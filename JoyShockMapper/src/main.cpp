@@ -10,7 +10,18 @@
 #include "AutoConnect.h"
 #include "SettingsManager.h"
 #include "JoyShock.h"
+#include "Telemetry.h"
+#include "NaturalCurve.h"
+#include "PowerCurve.h"
+#include "QuadraticCurve.h"
+#include "SigmoidCurve.h"
+#include "JumpCurve.h"
 #include <filesystem>
+#include <algorithm>
+#include <atomic>
+#include <deque>
+#include <unordered_map>
+#include <sstream>
 #define _USE_MATH_DEFINES
 #include <math.h> // M_PI
 
@@ -34,14 +45,97 @@ vector<JSMButton> mappings;      // array enables use of for each loop and other
 
 float os_mouse_speed = 1.0;
 float last_flick_and_rotation = 0.0;
+bool gyroOneEuroEnabled = false;
 unique_ptr<PollingThread> autoLoadThread;
 unique_ptr<JSM::AutoConnect> autoConnectThread;
+std::atomic<int> g_gyroGlobalOffCount(0);
+std::atomic<int> g_gyroGlobalOnCount(0);
+std::atomic_bool g_hasGyroOnAllBinding(false);
+vector<pair<int, int>> g_ignoreGyroVidPid;
 unique_ptr<PollingThread> minimizeThread;
 bool devicesCalibrating = false;
+bool g_manualConnectMode = false;
 unordered_map<int, shared_ptr<JoyShock>> handle_to_joyshock;
 
 int input_pipe_fd[2];
 int triggerCalibrationStep = 0;
+
+static void UpdateIgnoredGyroDevices()
+{
+	g_ignoreGyroVidPid.clear();
+	try
+	{
+		auto ignoreStr = SettingsManager::get<string>(SettingID::IGNORE_GYRO_DEVICES)->value();
+		stringstream ss(ignoreStr);
+		string token;
+		while (ss >> token)
+		{
+			auto colon = token.find(':');
+			if (colon == string::npos)
+			{
+				continue;
+			}
+			string vidStr = token.substr(0, colon);
+			string pidStr = token.substr(colon + 1);
+			try
+			{
+				int vid = stoi(vidStr, nullptr, 0);
+				int pid = stoi(pidStr, nullptr, 0);
+				if (vid > 0 && pid > 0)
+				{
+					g_ignoreGyroVidPid.emplace_back(vid, pid);
+				}
+			}
+			catch (...)
+			{
+				continue;
+			}
+		}
+	}
+	catch (...)
+	{
+	}
+
+	for (auto &entry : handle_to_joyshock)
+	{
+		auto &dev = entry.second;
+		dev->_ignoreGyro = false;
+		for (auto &pair : g_ignoreGyroVidPid)
+		{
+			if (dev->_vendorId == pair.first && dev->_productId == pair.second)
+			{
+				dev->_ignoreGyro = true;
+				break;
+			}
+		}
+	}
+}
+
+static void RefreshTelemetrySettings()
+{
+	auto telemetryEnabled = SettingsManager::get<Switch>(SettingID::TELEMETRY_ENABLED);
+	auto telemetryPort = SettingsManager::get<int>(SettingID::TELEMETRY_PORT);
+	if (!telemetryEnabled || !telemetryPort)
+	{
+		return;
+	}
+
+	int portValue = std::clamp(telemetryPort->value(), 1, 65535);
+	const bool enabled = telemetryEnabled->value() == Switch::ON;
+	Telemetry::Configure(enabled, static_cast<uint16_t>(portValue));
+}
+
+static string sanitizeControllerInfoName(string name)
+{
+	for (char &character : name)
+	{
+		if (character == '\t' || character == '\r' || character == '\n')
+		{
+			character = ' ';
+		}
+	}
+	return name;
+}
 
 struct TOUCH_POINT
 {
@@ -142,6 +236,7 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		int index0 = -1, index1 = -1;
 		if (point0.isDown())
 		{
+			point0.posY += 1e-6f;
 			float row = ceilf(point0.posY * grid_size.value().y()) - 1.f;
 			float col = ceilf(point0.posX * grid_size.value().x()) - 1.f;
 			// COUT << "I should be in button " << row << " " << col << '\n';
@@ -225,7 +320,7 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 
 void calibrateTriggers(shared_ptr<JoyShock> jc)
 {
-	if (jsl->GetButtons(jc->_handle) & (1 << JSOFFSET_HOME))
+	if (jsl->GetButtons(jc->_handle) & (1ULL << JSOFFSET_HOME))
 	{
 		COUT << "Abandonning calibration\n";
 		triggerCalibrationStep = 0;
@@ -252,7 +347,7 @@ void calibrateTriggers(shared_ptr<JoyShock> jc)
 		triggerCalibrationStep++;
 		break;
 	case 2:
-		if (jsl->GetButtons(jc->_handle) & (1 << JSOFFSET_DOWN))
+		if (jsl->GetButtons(jc->_handle) & (1ULL << JSOFFSET_DOWN))
 		{
 			triggerCalibrationStep++;
 		}
@@ -296,7 +391,7 @@ void calibrateTriggers(shared_ptr<JoyShock> jc)
 		triggerCalibrationStep++;
 		break;
 	case 7:
-		if (jsl->GetButtons(jc->_handle) & (1 << JSOFFSET_S))
+		if (jsl->GetButtons(jc->_handle) & (1ULL << JSOFFSET_S))
 		{
 			triggerCalibrationStep++;
 		}
@@ -468,6 +563,13 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			gyroY += inGyroZ;
 		}
 	}
+	else if (gyroSpace == GyroSpace::YAW_PLUS_ROLL)
+	{
+		const float rollContribution = jc->getSetting(SettingID::ROLL_CONTRIBUTION) / 100.0f;
+		gyroX -= inGyroY;
+		gyroX -= inGyroZ * rollContribution;
+		gyroY -= inGyroX;
+	}
 	else
 	{
 		float gravLength = sqrtf(inGravX * inGravX + inGravY * inGravY + inGravZ * inGravZ);
@@ -596,14 +698,34 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	}
 	float gyroLength = sqrt(gyroX * gyroX + gyroY * gyroY);
 	// do gyro smoothing
-	// convert gyro smooth time to number of samples
-	auto tick_time = SettingsManager::get<float>(SettingID::TICK_TIME)->value();
-	auto numGyroSamples = jc->getSetting(SettingID::GYRO_SMOOTH_TIME) * 1000.f / tick_time;
-	if (numGyroSamples < 1)
-		numGyroSamples = 1; // need at least 1 sample
-	auto threshold = jc->getSetting(SettingID::GYRO_SMOOTH_THRESHOLD);
-	jc->getSmoothedGyro(gyroX, gyroY, gyroLength, threshold / 2.0f, threshold, int(numGyroSamples), gyroX, gyroY);
-	// COUT << "%d Samples for threshold: %0.4f\n", numGyroSamples, gyro_smooth_threshold * maxSmoothingSamples);
+	const bool useDecaySmoothing = jc->getSetting<Switch>(SettingID::GYRO_SMOOTHING_DECAY) == Switch::ON;
+	if (useDecaySmoothing)
+	{
+		auto smoothingTime = jc->getSetting(SettingID::GYRO_SMOOTH_TIME);
+		auto threshold = jc->getSetting(SettingID::GYRO_SMOOTH_THRESHOLD);
+		jc->applyGyroDecaySmoothing(gyroX, gyroY, deltaTime, smoothingTime, threshold, gyroX, gyroY);
+	}
+	else
+	{
+		jc->disableGyroDecaySmoothing();
+		// convert gyro smooth time to number of samples
+		auto tick_time = SettingsManager::get<float>(SettingID::TICK_TIME)->value();
+		auto numGyroSamples = jc->getSetting(SettingID::GYRO_SMOOTH_TIME) * 1000.f / tick_time;
+		if (numGyroSamples < 1)
+			numGyroSamples = 1; // need at least 1 sample
+		auto threshold = jc->getSetting(SettingID::GYRO_SMOOTH_THRESHOLD);
+		jc->getSmoothedGyro(gyroX, gyroY, gyroLength, threshold / 2.0f, threshold, int(numGyroSamples), gyroX, gyroY);
+		// COUT << "%d Samples for threshold: %0.4f\n", numGyroSamples, gyro_smooth_threshold * maxSmoothingSamples);
+	}
+
+	// One Euro Filter — adaptive low-pass, smooth at low speed and responsive at high speed
+	if (gyroOneEuroEnabled)
+	{
+		jc->applyOneEuroFilter(gyroX, gyroY, deltaTime, gyroX, gyroY);
+	}
+
+	// Decel brake detection should use IMU-based, post-smoothing gyro before cutoff/recovery and before synthetic additions
+	jc->decelBrakeOmegaRaw = sqrt(gyroX * gyroX + gyroY * gyroY);
 
 	// now, honour gyro_cutoff_speed
 	gyroLength = sqrt(gyroX * gyroX + gyroY * gyroY);
@@ -726,6 +848,10 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 
 	bool trackball_x_pressed = false;
 	bool trackball_y_pressed = false;
+	if (jc->_ignoreGyro)
+	{
+		blockGyro = true;
+	}
 
 	// Apply gyro modifiers in the queue from oldest to newest (thus giving priority to most recent)
 	for (auto pair : jc->_context->gyroActionQueue)
@@ -748,11 +874,27 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			trackball_x_pressed = true;
 		else if (pair.second.code == GYRO_TRACK_Y)
 			trackball_y_pressed = true;
-		else if (pair.second.code == GYRO_TRACKBALL)
-		{
-			trackball_x_pressed = true;
-			trackball_y_pressed = true;
-		}
+	else if (pair.second.code == GYRO_TRACKBALL)
+	{
+		trackball_x_pressed = true;
+		trackball_y_pressed = true;
+	}
+}
+	const int globalOnCount = g_gyroGlobalOnCount.load();
+	const int globalOffCount = g_gyroGlobalOffCount.load();
+	if (globalOnCount > 0)
+	{
+		if (!jc->_ignoreGyro)
+			blockGyro = false;
+	}
+	else if (globalOffCount > 0)
+	{
+		blockGyro = true;
+	}
+	else if (g_hasGyroOnAllBinding.load())
+	{
+		// No global ON presses active but a global ON binding exists: default to off-until-held.
+		blockGyro = true;
 	}
 
 	float decay = exp2f(-deltaTime * jc->getSetting(SettingID::TRACKBALL_DECAY));
@@ -811,6 +953,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	{
 		gyroX = 0;
 		gyroY = 0;
+		jc->resetOneEuroFilter();
 	}
 
 	float camSpeedX = 0.0f;
@@ -821,35 +964,318 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 
 	pair<float, float> lowSensXY = jc->getSetting<FloatXY>(SettingID::MIN_GYRO_SENS);
 	pair<float, float> hiSensXY = jc->getSetting<FloatXY>(SettingID::MAX_GYRO_SENS);
+	const AccelCurve accelCurve = jc->getSetting<AccelCurve>(SettingID::ACCEL_CURVE);
+
+	// Curve-specific parameters
+	const float naturalVHalf = jc->getSetting(SettingID::ACCEL_NATURAL_VHALF);
+	const float powervRef = jc->getSetting(SettingID::ACCEL_POWER_VREF);
+	const float powerExponent = jc->getSetting(SettingID::ACCEL_POWER_EXPONENT);
+	const float sigmoidMid = jc->getSetting(SettingID::ACCEL_SIGMOID_MID);
+	const float sigmoidWidth = jc->getSetting(SettingID::ACCEL_SIGMOID_WIDTH);
+	const float jumpTau = jc->getSetting(SettingID::ACCEL_JUMP_TAU);
 
 	// apply calibration factor
-	// get input velocity
-	float magnitude = sqrt(gyroX * gyroX + gyroY * gyroY);
-	// COUT << "Gyro mag: " << setprecision(4) << magnitude << '\n';
-	// calculate position on minThreshold to maxThreshold scale
-	float minThreshold = jc->getSetting(SettingID::MIN_GYRO_THRESHOLD);
-	float maxThreshold = jc->getSetting(SettingID::MAX_GYRO_THRESHOLD);
-	magnitude -= minThreshold;
-	if (magnitude < 0.0f)
-		magnitude = 0.0f;
-	float denom = maxThreshold - minThreshold;
-	float newSensitivity;
-	if (denom <= 0.0f)
+	// get input velocity (post snap; may include synthetic gyro later)
+	float omega = sqrt(gyroXVelocity * gyroXVelocity + gyroYVelocity * gyroYVelocity);
+
+	// Gyro deceleration brake detection uses pre-curve, post-smoothing (IMU-only) gyro vector
+	const float decelBrakeStrength = std::clamp(jc->getSetting(SettingID::DECEL_BRAKE_STRENGTH), 0.0f, 1.0f);
+	const float decelBrakeThreshold = std::max(0.0f, jc->getSetting(SettingID::DECEL_BRAKE_THRESHOLD));
+	float decelBrakeMultiplier = 1.0f;
+	if (decelBrakeStrength <= 0.0f)
 	{
-		newSensitivity =
-		  magnitude > 0.0f ? 1.0f : 0.0f; // if min threshold overlaps max threshold, pop up to
-		                                  // max lowSens as soon as we're above min threshold
+		jc->decelBrakeEngagement = 0.0f;
 	}
 	else
 	{
-		newSensitivity = magnitude / denom;
-	}
-	if (newSensitivity > 1.0f)
-		newSensitivity = 1.0f;
+		constexpr float kWindowSeconds = 0.010f;              // Tw
+		constexpr float kSpeedMin = 2.0f;                     // S_MIN
+		constexpr float kSpeedMax = 60.0f;                    // S_MAX
+		constexpr float kEngageTime = 0.010f;                 // T_ENGAGE
+		constexpr float kReleaseTime = 0.006f;                // T_RELEASE
+		constexpr float kFullBrakeFactor = 3.5f;              // k
+		constexpr auto kHistoryWindow = std::chrono::milliseconds(50);
 
-	// interpolate between low sensitivity and high sensitivity
-	gyroXVelocity *= lowSensXY.first * (1.0f - newSensitivity) + hiSensXY.first * newSensitivity;
-	gyroYVelocity *= lowSensXY.second * (1.0f - newSensitivity) + hiSensXY.second * newSensitivity;
+		const auto nowTs = std::chrono::steady_clock::now();
+		jc->decelBrakeHistory.push_back({ nowTs, jc->decelBrakeOmegaRaw });
+		while (!jc->decelBrakeHistory.empty() && nowTs - jc->decelBrakeHistory.front().first > kHistoryWindow)
+		{
+			jc->decelBrakeHistory.pop_front();
+		}
+
+		float sOld = jc->decelBrakeOmegaRaw;
+		const auto targetTs = nowTs - std::chrono::milliseconds(10);
+		for (auto it = jc->decelBrakeHistory.rbegin(); it != jc->decelBrakeHistory.rend(); ++it)
+		{
+			if (it->first <= targetTs)
+			{
+				sOld = it->second;
+				break;
+			}
+		}
+
+		const float slope = (jc->decelBrakeOmegaRaw - sOld) / kWindowSeconds; // deg/s^2
+		const float dNeg = std::max(0.0f, -slope);
+		const float d0 = kWindowSeconds > 0.0f ? decelBrakeThreshold / kWindowSeconds : 0.0f;
+		const float d1 = d0 * kFullBrakeFactor;
+		const float denom = (d1 > d0) ? (d1 - d0) : 1e-6f;
+
+		float bInst = 0.0f;
+		const bool speedGate = omega >= kSpeedMin && omega <= kSpeedMax;
+		if (speedGate)
+		{
+			bInst = std::clamp((dNeg - d0) / denom, 0.0f, 1.0f);
+		}
+
+		float &engagement = jc->decelBrakeEngagement;
+		if (speedGate && bInst > 0.0f)
+		{
+			engagement += (deltaTime / kEngageTime) * bInst;
+		}
+		else
+		{
+			engagement -= (deltaTime / kReleaseTime);
+		}
+		engagement = std::clamp(engagement, 0.0f, 1.0f);
+
+		if (decelBrakeStrength > 0.0f && engagement > 0.0f)
+		{
+			decelBrakeMultiplier = 1.0f - decelBrakeStrength * engagement;
+		}
+	}
+
+	// Apply angle snap after decel brake detection so braking is not triggered by snap-induced slowdown
+	const float gyroAngleSnapDeg = jc->getSetting(SettingID::GYRO_ANGLE_SNAP);
+	if (gyroAngleSnapDeg > 0.0f && (gyroXVelocity != 0.0f || gyroYVelocity != 0.0f))
+	{
+		const bool smoothSnap = jc->getSetting<Switch>(SettingID::GYRO_ANGLE_SNAP_EASE) == Switch::ON;
+		const float snapRad = gyroAngleSnapDeg * float(M_PI) / 180.0f;
+		const float referenceAngle = gyroXVelocity == 0.0f ? float(M_PI_2) : atan(fabsf(gyroYVelocity / gyroXVelocity));
+		const float mag = sqrtf(gyroXVelocity * gyroXVelocity + gyroYVelocity * gyroYVelocity);
+
+		if (mag > 0.0f)
+		{
+			if (smoothSnap)
+			{
+				auto smoothstep01 = [](float x) -> float {
+					x = fminf(fmaxf(x, 0.0f), 1.0f);
+					return x * x * (3.0f - 2.0f * x);
+				};
+
+				if (referenceAngle > float(M_PI_2) - snapRad)
+				{
+					float x = 1.0f - ((float(M_PI_2) - referenceAngle) / snapRad);
+					const float snap = smoothstep01(x);
+					gyroXVelocity *= (1.0f - snap);
+					gyroYVelocity = copysignf(mag, gyroYVelocity);
+				}
+				else if (referenceAngle < snapRad)
+				{
+					float x = 1.0f - (referenceAngle / snapRad);
+					const float snap = smoothstep01(x);
+					gyroYVelocity *= (1.0f - snap);
+					gyroXVelocity = copysignf(mag, gyroXVelocity);
+				}
+			}
+			else
+			{
+				if (referenceAngle > float(M_PI_2) - snapRad)
+				{
+					gyroXVelocity = 0.0f;
+					gyroYVelocity = copysign(mag, gyroYVelocity);
+				}
+				else if (referenceAngle < snapRad)
+				{
+					gyroXVelocity = copysign(mag, gyroXVelocity);
+					gyroYVelocity = 0.0f;
+				}
+			}
+		}
+	}
+
+	// Recompute omega after snapping to feed accel curves/telemetry
+	omega = sqrt(gyroXVelocity * gyroXVelocity + gyroYVelocity * gyroYVelocity);
+
+	// calculate position on minThreshold to maxThreshold scale
+	float minThreshold = jc->getSetting(SettingID::MIN_GYRO_THRESHOLD);
+	float maxThreshold = jc->getSetting(SettingID::MAX_GYRO_THRESHOLD);
+	const float omegaAdjusted = std::max(0.0f, omega - minThreshold);
+	const float denom = maxThreshold - minThreshold;
+	float normalizedPreCurve = (denom > 0.0f) ? std::clamp(omegaAdjusted / denom, 0.0f, 1.0f)
+	                                          : (omegaAdjusted > 0.0f ? 1.0f : 0.0f);
+
+	float appliedSensX = 0.0f;
+	float appliedSensY = 0.0f;
+	float normalizedPostCurve = normalizedPreCurve;
+
+	switch (accelCurve)
+	{
+	case AccelCurve::NATURAL:
+		appliedSensX = NaturalSensitivity(omegaAdjusted, lowSensXY.first, hiSensXY.first, naturalVHalf);
+		appliedSensY = NaturalSensitivity(omegaAdjusted, lowSensXY.second, hiSensXY.second, naturalVHalf);
+		break;
+	case AccelCurve::POWER:
+		appliedSensX = PowerSensitivity(omegaAdjusted, lowSensXY.first, hiSensXY.first, powervRef, powerExponent);
+		appliedSensY = PowerSensitivity(omegaAdjusted, lowSensXY.second, hiSensXY.second, powervRef, powerExponent);
+		break;
+	case AccelCurve::QUADRATIC:
+		appliedSensX = QuadraticSensitivity(omegaAdjusted, lowSensXY.first, hiSensXY.first, maxThreshold);
+		appliedSensY = QuadraticSensitivity(omegaAdjusted, lowSensXY.second, hiSensXY.second, maxThreshold);
+		break;
+	case AccelCurve::SIGMOID:
+		appliedSensX = SigmoidSensitivity(omegaAdjusted, lowSensXY.first, hiSensXY.first, sigmoidMid, sigmoidWidth);
+		appliedSensY = SigmoidSensitivity(omegaAdjusted, lowSensXY.second, hiSensXY.second, sigmoidMid, sigmoidWidth);
+		break;
+	case AccelCurve::JUMP:
+		appliedSensX = JumpSensitivity(omegaAdjusted, lowSensXY.first, hiSensXY.first, maxThreshold, jumpTau);
+		appliedSensY = JumpSensitivity(omegaAdjusted, lowSensXY.second, hiSensXY.second, maxThreshold, jumpTau);
+		break;
+	case AccelCurve::LINEAR:
+	case AccelCurve::INVALID:
+	default: {
+		const float t = normalizedPreCurve;
+		appliedSensX = lowSensXY.first * (1.0f - t) + hiSensXY.first * t;
+		appliedSensY = lowSensXY.second * (1.0f - t) + hiSensXY.second * t;
+		normalizedPostCurve = t;
+		break;
+	}
+	}
+
+	// Map post-curve sensitivities back to 0..1 for telemetry
+	const auto normalizeSens = [](float sens, float sMin, float sMax) -> float {
+		const float denom = sMax - sMin;
+		if (denom <= 0.0f)
+			return 0.0f;
+		return std::clamp((sens - sMin) / denom, 0.0f, 1.0f);
+	};
+	normalizedPostCurve = std::max(normalizeSens(appliedSensX, lowSensXY.first, hiSensXY.first),
+	  normalizeSens(appliedSensY, lowSensXY.second, hiSensXY.second));
+
+	gyroXVelocity *= appliedSensX;
+	gyroYVelocity *= appliedSensY;
+
+	if (decelBrakeMultiplier < 1.0f)
+	{
+		gyroXVelocity *= decelBrakeMultiplier;
+		gyroYVelocity *= decelBrakeMultiplier;
+	}
+
+	TelemetrySample telemetrySample;
+	telemetrySample.omega = omega;
+	// Report post-curve normalized value so the live dot follows the selected curve
+	telemetrySample.normalized = normalizedPostCurve;
+	telemetrySample.sensX = appliedSensX;
+	telemetrySample.sensY = appliedSensY;
+	telemetrySample.minThreshold = minThreshold;
+	telemetrySample.maxThreshold = maxThreshold;
+	telemetrySample.sMinX = lowSensXY.first;
+	telemetrySample.sMaxX = hiSensXY.first;
+	telemetrySample.sMinY = lowSensXY.second;
+	telemetrySample.sMaxY = hiSensXY.second;
+	// Derive sample rate from backend report timestamps (JSL): count reports over a short window.
+	{
+		struct ReportWindow
+		{
+			std::deque<double> timestampsMs;
+			double lastReportMs = -1.0;
+		};
+		static std::unordered_map<int, ReportWindow> s_reportWindows;
+		constexpr double kWindowMs = 2000.0; // 2 seconds
+		constexpr double kMinStepMs = 0.1;   // ignore duplicate timestamps within 0.1ms
+
+		const auto nowUs = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		const double nowMs = nowUs / 1000.0;
+		const float deltaSinceUpdate = jsl->GetTimeSinceLastUpdate(jc->_handle);
+		if (deltaSinceUpdate > 0.0f)
+		{
+			const double reportTsMs = nowMs - (static_cast<double>(deltaSinceUpdate) * 1000.0);
+			auto &window = s_reportWindows[jc->_handle];
+			if (window.lastReportMs < 0.0 || (reportTsMs - window.lastReportMs) >= kMinStepMs)
+			{
+				window.timestampsMs.push_back(reportTsMs);
+				window.lastReportMs = reportTsMs;
+			}
+			// Drop old entries outside the window
+			while (!window.timestampsMs.empty() && (nowMs - window.timestampsMs.front()) > kWindowMs)
+			{
+				window.timestampsMs.pop_front();
+			}
+			const double windowSeconds = kWindowMs / 1000.0;
+			const double rate = window.timestampsMs.size() / windowSeconds;
+			telemetrySample.sampleRateHz = static_cast<float>(rate);
+		}
+	}
+#ifdef SDL
+	// SDL path: fall back to applied update rate (loop iterations over a short window).
+	{
+		static size_t s_loopCount = 0;
+		static auto s_windowStart = std::chrono::steady_clock::now();
+		static double s_lastAppliedRate = 0.0;
+		constexpr double kWindowSeconds = 2.0;
+
+		s_loopCount++;
+		const auto now = std::chrono::steady_clock::now();
+		const double elapsedSeconds =
+		  std::chrono::duration_cast<std::chrono::milliseconds>(now - s_windowStart).count() / 1000.0;
+		if (elapsedSeconds >= kWindowSeconds)
+		{
+			const double rate = s_loopCount / elapsedSeconds;
+			if (rate > 0.0)
+			{
+				s_lastAppliedRate = rate;
+			}
+			s_loopCount = 0;
+			s_windowStart = now;
+		}
+		if (telemetrySample.sampleRateHz <= 0.0f && s_lastAppliedRate > 0.0)
+		{
+			telemetrySample.sampleRateHz = static_cast<float>(s_lastAppliedRate);
+		}
+	}
+#else
+	// SDL path: measured sample rate provided by wrapper (legacy returns 0 here).
+	if (telemetrySample.sampleRateHz <= 0.0f)
+	{
+		const float backendRate = jsl->GetSampleRateHz(jc->_handle);
+		if (backendRate > 0.0f)
+		{
+			telemetrySample.sampleRateHz = backendRate;
+		}
+	}
+#endif
+	for (const auto &entry : handle_to_joyshock)
+	{
+		const auto &device = entry.second;
+		TelemetryDevice dev;
+		dev.handle = device->_handle;
+		dev.controllerType = device->_controllerType;
+		dev.splitType = device->_splitType;
+		dev.vendorId = jsl->GetControllerVendor(device->_handle);
+		dev.productId = jsl->GetControllerProduct(device->_handle);
+#ifdef SDL
+		TelemetryDeviceStatus status;
+		status.buttons = jsl->GetButtons(device->_handle);
+		if (device->_splitType != JS_SPLIT_TYPE_RIGHT)
+		{
+			status.leftStick.x = jsl->GetLeftX(device->_handle);
+			status.leftStick.y = jsl->GetLeftY(device->_handle);
+			status.triggers.left = jsl->GetLeftTrigger(device->_handle);
+		}
+		if (device->_splitType != JS_SPLIT_TYPE_LEFT)
+		{
+			status.rightStick.x = jsl->GetRightX(device->_handle);
+			status.rightStick.y = jsl->GetRightY(device->_handle);
+			status.triggers.right = jsl->GetRightTrigger(device->_handle);
+		}
+		const auto imu = jsl->GetIMUState(device->_handle);
+		status.gyro.x = imu.gyroX;
+		status.gyro.y = imu.gyroY;
+		status.gyro.z = imu.gyroZ;
+		dev.status = status;
+#endif
+		telemetrySample.devices.push_back(dev);
+	}
+	Telemetry::MaybeSend(telemetrySample);
 
 	jc->gyroXVelocity = gyroXVelocity;
 	jc->gyroYVelocity = gyroYVelocity;
@@ -987,17 +1413,17 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		}
 	}
 
-	int buttons = jsl->GetButtons(jc->_handle);
+	uint64_t buttons = jsl->GetButtons(jc->_handle);
 	// button mappings
 	if (jc->_splitType != JS_SPLIT_TYPE_RIGHT)
 	{
-		jc->handleButtonChange(ButtonID::UP, buttons & (1 << JSOFFSET_UP));
-		jc->handleButtonChange(ButtonID::DOWN, buttons & (1 << JSOFFSET_DOWN));
-		jc->handleButtonChange(ButtonID::LEFT, buttons & (1 << JSOFFSET_LEFT));
-		jc->handleButtonChange(ButtonID::RIGHT, buttons & (1 << JSOFFSET_RIGHT));
-		jc->handleButtonChange(ButtonID::L, buttons & (1 << JSOFFSET_L));
-		jc->handleButtonChange(ButtonID::MINUS, buttons & (1 << JSOFFSET_MINUS));
-		jc->handleButtonChange(ButtonID::L3, buttons & (1 << JSOFFSET_LCLICK));
+		jc->handleButtonChange(ButtonID::UP, buttons & (1ULL << JSOFFSET_UP));
+		jc->handleButtonChange(ButtonID::DOWN, buttons & (1ULL << JSOFFSET_DOWN));
+		jc->handleButtonChange(ButtonID::LEFT, buttons & (1ULL << JSOFFSET_LEFT));
+		jc->handleButtonChange(ButtonID::RIGHT, buttons & (1ULL << JSOFFSET_RIGHT));
+		jc->handleButtonChange(ButtonID::L, buttons & (1ULL << JSOFFSET_L));
+		jc->handleButtonChange(ButtonID::MINUS, buttons & (1ULL << JSOFFSET_MINUS));
+		jc->handleButtonChange(ButtonID::L3, buttons & (1ULL << JSOFFSET_LCLICK));
 
 		float lTrigger = jsl->GetLeftTrigger(jc->_handle);
 		jc->handleTriggerChange(ButtonID::ZL, ButtonID::ZLF, jc->getSetting<TriggerMode>(SettingID::ZL_MODE), lTrigger, jc->_leftEffect);
@@ -1008,57 +1434,134 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		case JS_TYPE_DS:
 			// JSL mapps mic button on the SL index
 			// Edge grips
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1 << JSOFFSET_SL));
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1 << JSOFFSET_SR));
+			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
+			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
 			// Edge FN
-			jc->handleButtonChange(ButtonID::LSR, buttons & (1 << JSOFFSET_FNL));
-			jc->handleButtonChange(ButtonID::RSL, buttons & (1 << JSOFFSET_FNR));
+			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));
+			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));
 
-			jc->handleButtonChange(ButtonID::MIC, buttons & (1 << JSOFFSET_MIC));
+			jc->handleButtonChange(ButtonID::MIC, buttons & (1ULL << JSOFFSET_MIC));
 			// Don't break but continue onto DS4 stuff too
 		case JS_TYPE_DS4:
 		{
-			float triggerpos = buttons & (1 << JSOFFSET_CAPTURE) ? 1.f :
+			float triggerpos = buttons & (1ULL << JSOFFSET_CAPTURE) ? 1.f :
 			  touch                                              ? 0.99f :
 			                                                       0.f;
 			jc->handleTriggerChange(ButtonID::TOUCH, ButtonID::CAPTURE, jc->getSetting<TriggerMode>(SettingID::TOUCHPAD_DUAL_STAGE_MODE), triggerpos, jc->_unusedEffect);
 		}
 		break;
 		case JS_TYPE_XBOXONE_ELITE:
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1 << JSOFFSET_SL)); // Xbox Elite back paddles
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1 << JSOFFSET_SR));
-			jc->handleButtonChange(ButtonID::LSR, buttons & (1 << JSOFFSET_FNL));
-			jc->handleButtonChange(ButtonID::RSL, buttons & (1 << JSOFFSET_FNR));
+			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL)); // Xbox Elite back paddles
+			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
+			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));
+			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));
 			break;
 		case JS_TYPE_XBOX_SERIES:
-			jc->handleButtonChange(ButtonID::CAPTURE, buttons & (1 << JSOFFSET_CAPTURE));
+			jc->handleButtonChange(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE));
 			break;
-		default: // Switch Pro controllers and left joycon
-		{
-			jc->handleButtonChange(ButtonID::CAPTURE, buttons & (1 << JSOFFSET_CAPTURE));
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1 << JSOFFSET_SL));
-			jc->handleButtonChange(ButtonID::LSR, buttons & (1 << JSOFFSET_SR));
-		}
-		break;
+		case JS_TYPE_JOYCON_LEFT:
+			jc->handleButtonChange(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE));
+			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
+			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_SR));
+			break;
+		case JS_TYPE_PRO_CONTROLLER:
+			jc->handleButtonChange(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE));
+			break;
+		case JS_TYPE_SWITCH2_PRO_CONTROLLER:
+			jc->handleButtonChange(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE)); // Capture button
+			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));          // GL back button
+			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));          // GR back button
+			jc->handleButtonChange(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));     // C button
+			break;
+		case JS_TYPE_HORI_STEAM:
+			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));        // L4 back button
+			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));        // R4 back button
+			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));       // M1 button below left stick
+			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));       // M2 button below right stick
+			jc->handleButtonChange(ButtonID::LTOUCH, buttons & (1ULL << JSOFFSET_LTOUCH)); // Left stick capacitive touch
+			jc->handleButtonChange(ButtonID::RTOUCH, buttons & (1ULL << JSOFFSET_RTOUCH)); // Right stick capacitive touch
+			jc->handleButtonChange(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));   // QAM button ("..." button)
+			break;
+		case JS_TYPE_G7_PRO_8K:
+			jc->handleButtonChange(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI));     // L5 mini shoulder button
+			jc->handleButtonChange(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI));     // R5 mini shoulder button
+			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));          // L4 back button
+			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));          // R4 back button
+			jc->handleButtonChange(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE)); // Share button
+			break;
+		// 8BitDo controllers with gyro and no additional buttons.
+		case JS_TYPE_8BITDO_SF30_PRO:
+		case JS_TYPE_8BITDO_SF30_PRO_BT:
+		case JS_TYPE_8BITDO_SN30_PRO:
+		case JS_TYPE_8BITDO_SN30_PRO_BT:
+			break;
+		// 8BitDo controllers with gyro and two additional buttons.
+		case JS_TYPE_8BITDO_PRO_2:
+		case JS_TYPE_8BITDO_PRO_2_BT:
+			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL)); // P2 back button (left)
+			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR)); // P1 back button (right)
+			break;
+		// 8BitDo controllers with gyro and four additional buttons.
+		case JS_TYPE_8BITDO_PRO_3:
+		case JS_TYPE_8BITDO_ULTIMATE2_WIRELESS:
+			jc->handleButtonChange(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI)); // L4 mini shoulder button
+			jc->handleButtonChange(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI)); // R4 mini shoulder button
+			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));      // PL back button
+			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));      // PR back button
+			break;
+		case JS_TYPE_FLYDIGI_APEX5:
+			jc->handleButtonChange(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI)); // LM mini shoulder button
+			jc->handleButtonChange(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI)); // RM mini shoulder button
+			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));  // M2 back button (top left)
+			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));  // M1 back button (top right)
+			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL)); // M4 back button (bottom left)
+			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR)); // M3 back button (bottom right)
+			break;
+		case JS_TYPE_FLYDIGI_VADER5_PRO:
+			jc->handleButtonChange(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI)); // LM mini shoulder button
+			jc->handleButtonChange(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI)); // RM mini shoulder button
+			jc->handleButtonChange(ButtonID::MISC3, buttons & (1ULL << JSOFFSET_MISC3)); // Circle button below right stick
+			// Fall through.
+		case JS_TYPE_FLYDIGI_VADER4_PRO:
+		case JS_TYPE_FLYDIGI_VADER3_PRO:
+			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));  // M2 back button (top left)
+			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));  // M1 back button (top right)
+			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL)); // M4 back button (bottom left)
+			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR)); // M3 back button (bottom right)
+			jc->handleButtonChange(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1)); // C face button
+			jc->handleButtonChange(ButtonID::MISC2, buttons & (1ULL << JSOFFSET_MISC2)); // Z face button
+			break;
+		default:
+			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
+			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
+			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));
+			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));
+			jc->handleButtonChange(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));
+			jc->handleButtonChange(ButtonID::MISC2, buttons & (1ULL << JSOFFSET_MISC2));
+			jc->handleButtonChange(ButtonID::MISC3, buttons & (1ULL << JSOFFSET_MISC3));
+			jc->handleButtonChange(ButtonID::MISC4, buttons & (1ULL << JSOFFSET_MISC4));
+			jc->handleButtonChange(ButtonID::MISC5, buttons & (1ULL << JSOFFSET_MISC5));
+			jc->handleButtonChange(ButtonID::MISC6, buttons & (1ULL << JSOFFSET_MISC6));
+			break;
 		}
 	}
 	else // split type IS right
 	{
 		// Right joycon bumpers
-		jc->handleButtonChange(ButtonID::RSL, buttons & (1 << JSOFFSET_SL));
-		jc->handleButtonChange(ButtonID::RSR, buttons & (1 << JSOFFSET_SR));
+		jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_SL));
+		jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
 	}
 
 	if (jc->_splitType != JS_SPLIT_TYPE_LEFT)
 	{
-		jc->handleButtonChange(ButtonID::E, buttons & (1 << JSOFFSET_E));
-		jc->handleButtonChange(ButtonID::S, buttons & (1 << JSOFFSET_S));
-		jc->handleButtonChange(ButtonID::N, buttons & (1 << JSOFFSET_N));
-		jc->handleButtonChange(ButtonID::W, buttons & (1 << JSOFFSET_W));
-		jc->handleButtonChange(ButtonID::R, buttons & (1 << JSOFFSET_R));
-		jc->handleButtonChange(ButtonID::PLUS, buttons & (1 << JSOFFSET_PLUS));
-		jc->handleButtonChange(ButtonID::HOME, buttons & (1 << JSOFFSET_HOME));
-		jc->handleButtonChange(ButtonID::R3, buttons & (1 << JSOFFSET_RCLICK));
+		jc->handleButtonChange(ButtonID::E, buttons & (1ULL << JSOFFSET_E));
+		jc->handleButtonChange(ButtonID::S, buttons & (1ULL << JSOFFSET_S));
+		jc->handleButtonChange(ButtonID::N, buttons & (1ULL << JSOFFSET_N));
+		jc->handleButtonChange(ButtonID::W, buttons & (1ULL << JSOFFSET_W));
+		jc->handleButtonChange(ButtonID::R, buttons & (1ULL << JSOFFSET_R));
+		jc->handleButtonChange(ButtonID::PLUS, buttons & (1ULL << JSOFFSET_PLUS));
+		jc->handleButtonChange(ButtonID::HOME, buttons & (1ULL << JSOFFSET_HOME));
+		jc->handleButtonChange(ButtonID::R3, buttons & (1ULL << JSOFFSET_RCLICK));
 
 		float rTrigger = jsl->GetRightTrigger(jc->_handle);
 		jc->handleTriggerChange(ButtonID::ZR, ButtonID::ZRF, jc->getSetting<TriggerMode>(SettingID::ZR_MODE), rTrigger, jc->_rightEffect);
@@ -1066,8 +1569,8 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	else
 	{
 		// Left joycon bumpers
-		jc->handleButtonChange(ButtonID::LSL, buttons & (1 << JSOFFSET_SL));
-		jc->handleButtonChange(ButtonID::LSR, buttons & (1 << JSOFFSET_SR));
+		jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
+		jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_SR));
 	}
 
 	auto at = jc->getSetting<Switch>(SettingID::ADAPTIVE_TRIGGER);
@@ -1141,11 +1644,11 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	jc->_context->callback_lock.unlock();
 }
 
-void connectDevices(bool mergeJoycons = true)
+void connectDevices(bool mergeJoycons = true, const vector<int>& selectedDeviceIds = {})
 {
 	handle_to_joyshock.clear();
 	this_thread::sleep_for(100ms);
-	int numConnected = jsl->ConnectDevices();
+	int numConnected = selectedDeviceIds.empty() ? jsl->ConnectDevices() : jsl->ConnectDevices(selectedDeviceIds);
 	vector<int> deviceHandles(numConnected, 0);
 	if (numConnected > 0)
 	{
@@ -1177,6 +1680,8 @@ void connectDevices(bool mergeJoycons = true)
 				handle_to_joyshock[handle] = make_shared<JoyShock>(handle, type);
 			}
 		}
+
+		UpdateIgnoredGyroDevices();
 	}
 
 	if (numConnected == 1)
@@ -1264,6 +1769,15 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
 
 	os_mouse_speed = 1.0f;
 	last_flick_and_rotation = 0.0f;
+	gyroOneEuroEnabled = false;
+	for (auto &[id, jc] : handle_to_joyshock)
+	{
+		jc->resetOneEuroFilter();
+	}
+	g_gyroGlobalOffCount.store(0);
+	g_gyroGlobalOnCount.store(0);
+	g_hasGyroOnAllBinding.store(false);
+	UpdateIgnoredGyroDevices();
 	if (registry)
 	{
 		if (!registry->loadConfigFile("OnReset.txt"))
@@ -1279,30 +1793,83 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
 bool do_RECONNECT_CONTROLLERS(string_view arguments, std::function<void()> loadOnReconnect)
 {
 	static bool mergeJoycons = true;
-	if (arguments.compare("MERGE") == 0)
+	vector<int> selectedDeviceIds;
+	bool hasSelection = false;
+	string token;
+	stringstream argumentStream{ string(arguments) };
+	while (argumentStream >> token)
 	{
-		mergeJoycons = true;
-	}
-	else if(arguments.compare("SPLIT") == 0)
-	{
-		mergeJoycons = false;
-	}
-	else if(!arguments.empty())
-	{
-		CERR << "Invalid argument: " << arguments << '\n';
-		return false;
+		if (token == "MERGE")
+		{
+			mergeJoycons = true;
+			continue;
+		}
+		if (token == "SPLIT")
+		{
+			mergeJoycons = false;
+			continue;
+		}
+		if (token == "SELECT")
+		{
+			hasSelection = true;
+			continue;
+		}
+		if (!hasSelection)
+		{
+			CERR << "Invalid argument: " << token << '\n';
+			return false;
+		}
+
+		try
+		{
+			size_t consumed = 0;
+			int deviceId = stoi(token, &consumed, 10);
+			if (consumed != token.size())
+			{
+				CERR << "Invalid controller id: " << token << '\n';
+				return false;
+			}
+			selectedDeviceIds.push_back(deviceId);
+		}
+		catch (...)
+		{
+			CERR << "Invalid controller id: " << token << '\n';
+			return false;
+		}
 	}
 	// else remember last
+	if (hasSelection && selectedDeviceIds.empty())
+	{
+		CERR << "RECONNECT_CONTROLLERS SELECT requires at least one controller id.\n";
+		return false;
+	}
 	 
 	COUT << "Reconnecting controllers: " << (mergeJoycons ? "MERGE" : "SPLIT") << '\n';
 	jsl->DisconnectAndDisposeAll();
-	connectDevices(mergeJoycons);
+	connectDevices(mergeJoycons, selectedDeviceIds);
 	jsl->SetCallback(&joyShockPollCallback);
 	jsl->SetTouchCallback(&touchCallback);
 
 	if (loadOnReconnect)
 		loadOnReconnect();
 
+	return true;
+}
+
+bool do_LIST_CONTROLLERS()
+{
+	auto devices = jsl->ListAvailableDevices();
+	COUT << "JSM_CONTROLLER_LIST_BEGIN\n";
+	for (auto &device : devices)
+	{
+		COUT << "JSM_CONTROLLER\t"
+			<< device.id << '\t'
+			<< device.vendorId << '\t'
+			<< device.productId << '\t'
+			<< (device.isGamepad ? 1 : 0) << '\t'
+			<< sanitizeControllerInfoName(device.name) << '\n';
+	}
+	COUT << "JSM_CONTROLLER_LIST_END\n";
 	return true;
 }
 
@@ -1317,6 +1884,17 @@ bool do_IGNORE_OS_MOUSE_SPEED()
 {
 	COUT << "Ignoring OS mouse speed setting\n";
 	os_mouse_speed = 1.0;
+	return true;
+}
+
+bool do_ONE_EURO_FILTER()
+{
+	COUT << "One Euro Filter enabled for gyro\n";
+	gyroOneEuroEnabled = true;
+	for (auto &[id, jc] : handle_to_joyshock)
+	{
+		jc->resetOneEuroFilter();
+	}
 	return true;
 }
 
@@ -1545,6 +2123,7 @@ void beforeShowTrayMenu()
 // Perform all cleanup tasks when JSM is exiting
 void cleanUp()
 {
+	Telemetry::Shutdown();
 	if (tray)
 	{
 		tray->Hide();
@@ -1568,6 +2147,11 @@ float filterClamp01(float current, float next)
 float filterPositive(float current, float next)
 {
 	return max(0.0f, next);
+}
+
+float filterClampPercent(float current, float next)
+{
+	return clamp(next, -100.0f, 100.0f);
 }
 
 float filterSign(float current, float next)
@@ -2129,6 +2713,29 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<JoyconMask>(*joycon_motion_mask))
 	                       ->setHelp("When using two Joycons, select which one will be used for non-gyro motion. Valid values are the following:\nUSE_BOTH, IGNORE_LEFT, IGNORE_RIGHT, IGNORE_BOTH"));
 
+	auto ignore_gyro_devices = new JSMSetting<string>(SettingID::IGNORE_GYRO_DEVICES, "");
+	SettingsManager::add(ignore_gyro_devices);
+	auto ignoreParser = [ignore_gyro_devices](JSMCommand *, string_view data, string_view) {
+		string value(data);
+		auto first = value.find_first_not_of(" \t");
+		auto last = value.find_last_not_of(" \t");
+		if (first == string::npos || last == string::npos)
+		{
+			value.clear();
+		}
+		else
+		{
+			value = value.substr(first, last - first + 1);
+		}
+		ignore_gyro_devices->set(value);
+		COUT << "IGNORE_GYRO_DEVICES has been set to " << value << '\n';
+		return true;
+	};
+	commandRegistry->add((new JSMAssignment<string>(*ignore_gyro_devices))
+	                       ->setParser(ignoreParser)
+	                       ->setHelp("Space-separated list of VID:PID pairs (hex) whose gyro should be ignored, e.g. IGNORE_GYRO_DEVICES = 0x054c:0x0ce6"));
+	ignore_gyro_devices->addOnChangeListener([](const string &) { UpdateIgnoredGyroDevices(); });
+
 	auto zlMode = new JSMSetting<TriggerMode>(SettingID::ZL_MODE, TriggerMode::NO_FULL);
 	zlMode->setFilter(&filterTriggerMode);
 	SettingsManager::add(zlMode);
@@ -2174,6 +2781,48 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(max_gyro_threshold);
 	commandRegistry->add((new JSMAssignment<float>(*max_gyro_threshold))
 	                       ->setHelp("Degrees per second at and above which to apply maximum gyro sensitivity."));
+
+	auto accel_curve = new JSMSetting<AccelCurve>(SettingID::ACCEL_CURVE, AccelCurve::LINEAR);
+	accel_curve->setFilter(&filterInvalidValue<AccelCurve, AccelCurve::INVALID>);
+	SettingsManager::add(accel_curve);
+	commandRegistry->add((new JSMAssignment<AccelCurve>("ACCEL_CURVE", *accel_curve))
+	                       ->setHelp("Selects gyro acceleration curve. Options: LINEAR (default), NATURAL, POWER, QUADRATIC, SIGMOID, JUMP."));
+
+	auto accel_natural_vhalf = new JSMSetting<float>(SettingID::ACCEL_NATURAL_VHALF, 200.0f);
+	accel_natural_vhalf->setFilter(&filterPositive);
+	SettingsManager::add(accel_natural_vhalf);
+	commandRegistry->add((new JSMAssignment<float>(*accel_natural_vhalf))
+	                       ->setHelp("Natural curve: velocity at which sensitivity reaches midpoint between MIN_GYRO_SENS and MAX_GYRO_SENS."));
+
+	auto accel_power_vref = new JSMSetting<float>(SettingID::ACCEL_POWER_VREF, 0.01f);
+	accel_power_vref->setFilter(&filterPositive);
+	SettingsManager::add(accel_power_vref);
+	commandRegistry->add((new JSMAssignment<float>(*accel_power_vref))
+	                       ->setHelp("Power curve: scale applied to gyro speed before exponent."));
+
+	auto accel_power_exponent = new JSMSetting<float>(SettingID::ACCEL_POWER_EXPONENT, 0.5f);
+	accel_power_exponent->setFilter(&filterPositive);
+	SettingsManager::add(accel_power_exponent);
+	commandRegistry->add((new JSMAssignment<float>(*accel_power_exponent))
+	                       ->setHelp("Power curve: exponent applied to scaled gyro speed."));
+
+	auto accel_sigmoid_mid = new JSMSetting<float>(SettingID::ACCEL_SIGMOID_MID, 20.0f);
+	accel_sigmoid_mid->setFilter(&filterPositive);
+	SettingsManager::add(accel_sigmoid_mid);
+	commandRegistry->add((new JSMAssignment<float>(*accel_sigmoid_mid))
+	                       ->setHelp("Sigmoid curve: input speed at the midpoint between MIN_GYRO_SENS and MAX_GYRO_SENS."));
+
+	auto accel_sigmoid_width = new JSMSetting<float>(SettingID::ACCEL_SIGMOID_WIDTH, 8.0f);
+	accel_sigmoid_width->setFilter(&filterPositive);
+	SettingsManager::add(accel_sigmoid_width);
+	commandRegistry->add((new JSMAssignment<float>(*accel_sigmoid_width))
+	                       ->setHelp("Sigmoid curve: width/steepness; larger values give gentler transitions."));
+
+	auto accel_jump_tau = new JSMSetting<float>(SettingID::ACCEL_JUMP_TAU, 1.5f);
+	accel_jump_tau->setFilter(&filterPositive);
+	SettingsManager::add(accel_jump_tau);
+	commandRegistry->add((new JSMAssignment<float>(*accel_jump_tau))
+	                       ->setHelp("Jump curve: rise length (smaller = steeper) before reaching peak sensitivity."));
 
 	auto stick_power = new JSMSetting<float>(SettingID::STICK_POWER, 1.0f);
 	stick_power->setFilter(&filterFloat);
@@ -2283,6 +2932,12 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<float>(*gyro_smooth_threshold))
 	                       ->setHelp("When the controller's angular velocity is below this threshold (in degrees per second), smoothing will be applied."));
 
+	auto gyro_smoothing_decay = new JSMSetting<Switch>(SettingID::GYRO_SMOOTHING_DECAY, Switch::OFF);
+	gyro_smoothing_decay->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(gyro_smoothing_decay);
+	commandRegistry->add((new JSMAssignment<Switch>(*gyro_smoothing_decay))
+	                       ->setHelp("When ON, uses speed-decay EMA smoothing instead of the legacy moving-average gyro smoothing."));
+
 	auto gyro_cutoff_speed = new JSMSetting<float>(SettingID::GYRO_CUTOFF_SPEED, 0.0f);
 	gyro_cutoff_speed->setFilter(&filterPositive);
 	SettingsManager::add(gyro_cutoff_speed);
@@ -2294,6 +2949,44 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(gyro_cutoff_recovery);
 	commandRegistry->add((new JSMAssignment<float>(*gyro_cutoff_recovery))
 	                       ->setHelp("Below this threshold (in degrees per second), gyro sensitivity is pushed down towards zero. This can tighten and steady aim without a deadzone."));
+
+	auto one_euro_min_cutoff = new JSMSetting<float>(SettingID::ONE_EURO_MIN_CUTOFF, 6.0f);
+	one_euro_min_cutoff->setFilter(&filterPositive);
+	SettingsManager::add(one_euro_min_cutoff);
+	commandRegistry->add((new JSMAssignment<float>(*one_euro_min_cutoff))
+	                       ->setHelp("Minimum cutoff frequency for One Euro filter. Lower this value to reduce slow speed jitter."));
+
+	auto one_euro_speed_coeff = new JSMSetting<float>(SettingID::ONE_EURO_SPEED_COEFF, 0.3f);
+	one_euro_speed_coeff->setFilter(&filterPositive);
+	SettingsManager::add(one_euro_speed_coeff);
+	commandRegistry->add((new JSMAssignment<float>(*one_euro_speed_coeff))
+	                       ->setHelp("Speed coefficient for One Euro filter. Raise this value to reduce speed lag."));
+
+	auto gyro_angle_snap_ease = new JSMSetting<Switch>(SettingID::GYRO_ANGLE_SNAP_EASE, Switch::OFF);
+	gyro_angle_snap_ease->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(gyro_angle_snap_ease);
+	commandRegistry->add((new JSMAssignment<Switch>(*gyro_angle_snap_ease))
+	                       ->setHelp("When ON, applies a smooth transition into angle snapping instead of a hard snap."));
+
+	auto gyro_angle_snap = new JSMSetting<float>(SettingID::GYRO_ANGLE_SNAP, 0.0f);
+	gyro_angle_snap->setFilter([](float current, float next)
+	  { return std::clamp(next, 0.0f, 45.0f); });
+	SettingsManager::add(gyro_angle_snap);
+	commandRegistry->add((new JSMAssignment<float>(*gyro_angle_snap))
+	                       ->setHelp("Degrees of angle snapping for gyro input. Snaps movement to horizontal/vertical when within this angle. 0 disables snapping. (Range: 0-45)"));
+
+	auto decel_brake_strength = new JSMSetting<float>(SettingID::DECEL_BRAKE_STRENGTH, 0.0f);
+	decel_brake_strength->setFilter([](float current, float next)
+	  { return std::clamp(next, 0.0f, 1.0f); });
+	SettingsManager::add(decel_brake_strength);
+	commandRegistry->add((new JSMAssignment<float>(*decel_brake_strength))
+	                       ->setHelp("Deceleration brake strength (0-1). Higher values apply more braking when stopping."));
+
+	auto decel_brake_threshold = new JSMSetting<float>(SettingID::DECEL_BRAKE_THRESHOLD, 25.0f);
+	decel_brake_threshold->setFilter(&filterPositive);
+	SettingsManager::add(decel_brake_threshold);
+	commandRegistry->add((new JSMAssignment<float>(*decel_brake_threshold))
+	                       ->setHelp("Deceleration brake trigger threshold (deg/s drop over a short window). Lower values trigger more easily."));
 
 	auto stick_acceleration_rate = new JSMSetting<float>(SettingID::STICK_ACCELERATION_RATE, 0.0f);
 	stick_acceleration_rate->setFilter(&filterPositive);
@@ -2384,7 +3077,13 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	gyro_space->setFilter(&filterInvalidValue<GyroSpace, GyroSpace::INVALID>);
 	SettingsManager::add(gyro_space);
 	commandRegistry->add((new JSMAssignment<GyroSpace>(*gyro_space))
-	                       ->setHelp("How gyro input is converted to 2D input. With LOCAL, your MOUSE_X_FROM_GYRO_AXIS and MOUSE_Y_FROM_GYRO_AXIS settings decide which local angular axis maps to which 2D mouse axis.\nYour other options are PLAYER_TURN and PLAYER_LEAN. These both take gravity into account to combine your axes more reliably.\n\tUse PLAYER_TURN if you like to turn your camera or move your cursor by turning your controller side to side.\n\tUse PLAYER_LEAN if you'd rather lean your controller to turn the camera."));
+	                       ->setHelp("How gyro input is converted to 2D input. With LOCAL, your MOUSE_X_FROM_GYRO_AXIS and MOUSE_Y_FROM_GYRO_AXIS settings decide which local angular axis maps to which 2D mouse axis.\nYAW_PLUS_ROLL keeps pitch on Y and combines yaw + roll on X using ROLL_CONTRIBUTION.\nYour other options are PLAYER_TURN and PLAYER_LEAN. These both take gravity into account to combine your axes more reliably.\n\tUse PLAYER_TURN if you like to turn your camera or move your cursor by turning your controller side to side.\n\tUse PLAYER_LEAN if you'd rather lean your controller to turn the camera."));
+
+	auto roll_contribution = new JSMSetting<float>(SettingID::ROLL_CONTRIBUTION, 0.0f);
+	roll_contribution->setFilter(&filterClampPercent);
+	SettingsManager::add(roll_contribution);
+	commandRegistry->add((new JSMAssignment<float>(*roll_contribution))
+	                       ->setHelp("When GYRO_SPACE is YAW_PLUS_ROLL, adds roll to horizontal turn as a percentage of yaw sensitivity. Valid range is -100 to 100."));
 
 	auto trackball_decay = new JSMSetting<float>(SettingID::TRACKBALL_DECAY, 1.0f);
 	trackball_decay->setFilter(&filterPositive);
@@ -2478,7 +3177,7 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	auto *autoloadCmd = new JSMAssignment<Switch>("AUTOLOAD", *autoloadSwitch);
 	commandRegistry->add(autoloadCmd);
 
-	auto autoConnectSwitch = new JSMVariable<Switch>(Switch::ON);
+	auto autoConnectSwitch = new JSMVariable<Switch>(g_manualConnectMode ? Switch::OFF : Switch::ON);
 	autoConnectThread.reset(new JSM::AutoConnect(jsl, autoConnectSwitch->value() == Switch::ON)); // Start by default
 	autoConnectSwitch->setFilter(&filterInvalidValue<Switch, Switch::INVALID>)->addOnChangeListener(bind(&updateThread, autoConnectThread.get(), placeholders::_1));
 	SettingsManager::add(SettingID::AUTOCONNECT, autoConnectSwitch);
@@ -2566,6 +3265,30 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(SettingID::RUMBLE, rumble_enable);
 	commandRegistry->add((new JSMAssignment<Switch>(magic_enum::enum_name(SettingID::RUMBLE).data(), *rumble_enable))
 	                       ->setHelp("Disable the rumbling feature from vigem. Valid values are ON and OFF."));
+
+	auto telemetry_enabled = new JSMSetting<Switch>(SettingID::TELEMETRY_ENABLED, Switch::OFF);
+	telemetry_enabled->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(SettingID::TELEMETRY_ENABLED, telemetry_enabled);
+	telemetry_enabled->addOnChangeListener([](const Switch &)
+	                                       { RefreshTelemetrySettings(); }, true);
+	commandRegistry->add((new JSMAssignment<Switch>("TELEMETRY_ENABLED", *telemetry_enabled))
+	                       ->setHelp("Enable or disable the UDP telemetry stream used by the viewer. Valid values are ON and OFF."));
+
+	auto telemetry_port = new JSMSetting<int>(SettingID::TELEMETRY_PORT, Telemetry::kDefaultPort);
+	telemetry_port->setFilter([](int current, int next)
+	                          {
+		                          if (next < 1024 || next > 65535)
+		                          {
+			                          CERR << "TELEMETRY_PORT must be between 1024 and 65535.\n";
+			                          return current;
+		                          }
+		                          return next;
+	                          });
+	telemetry_port->addOnChangeListener([](int)
+	                                    { RefreshTelemetrySettings(); });
+	SettingsManager::add(SettingID::TELEMETRY_PORT, telemetry_port);
+	commandRegistry->add((new JSMAssignment<int>("TELEMETRY_PORT", *telemetry_port))
+	                       ->setHelp("Set the UDP port that telemetry packets are sent to (default 8974). Valid range: 1024-65535."));
 
 	auto adaptive_trigger = new JSMSetting<Switch>(SettingID::ADAPTIVE_TRIGGER, Switch::ON);
 	adaptive_trigger->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
@@ -2785,6 +3508,19 @@ int main(int argc, char *argv[])
 	void *trayIconData = nullptr;
 	string module(argv[0]);
 #endif // _WIN32
+	for (int i = 0; i < argc; ++i)
+	{
+#if _WIN32
+		string arg(&argv[i][0], &argv[i][wcslen(argv[i])]);
+#else
+		string arg = string(argv[i]);
+#endif
+		if (arg == "--manual-connect")
+		{
+			g_manualConnectMode = true;
+		}
+	}
+
 	jsl.reset(JslWrapper::getNew());
 	whitelister.reset(Whitelister::getNew(false));
 
@@ -2853,6 +3589,7 @@ int main(int argc, char *argv[])
 	// Add Macro commands
 	commandRegistry.add((new JSMMacro("RESET_MAPPINGS"))->SetMacro(bind(&do_RESET_MAPPINGS, &commandRegistry))->setHelp("Delete all custom bindings and reset to default,\nand run script OnReset.txt in JSM_DIRECTORY."));
 	commandRegistry.add((new JSMMacro("NO_GYRO_BUTTON"))->SetMacro(bind(&do_NO_GYRO_BUTTON))->setHelp("Enable gyro at all times, without any GYRO_OFF binding."));
+	commandRegistry.add((new JSMMacro("LIST_CONTROLLERS"))->SetMacro(bind(&do_LIST_CONTROLLERS))->setHelp("List currently available SDL controllers without connecting them."));
 	commandRegistry.add((new JSMMacro("RECONNECT_CONTROLLERS"))->SetMacro(bind(&do_RECONNECT_CONTROLLERS, placeholders::_2, [&commandRegistry]()
 		{
 			if (!commandRegistry.loadConfigFile("OnReconnect.txt"))
@@ -2864,6 +3601,7 @@ int main(int argc, char *argv[])
 		}))->setHelp("Look for newly connected controllers. Specify MERGE (default) or SPLIT whether you want to consider joycons as a single or separate controllers."));
 	commandRegistry.add((new JSMMacro("COUNTER_OS_MOUSE_SPEED"))->SetMacro(bind(do_COUNTER_OS_MOUSE_SPEED))->setHelp("JoyShockMapper will load the user's OS mouse sensitivity value to consider it in its calculations."));
 	commandRegistry.add((new JSMMacro("IGNORE_OS_MOUSE_SPEED"))->SetMacro(bind(do_IGNORE_OS_MOUSE_SPEED))->setHelp("Disable JoyShockMapper's consideration of the the user's OS mouse sensitivity value."));
+	commandRegistry.add((new JSMMacro("ONE_EURO_FILTER"))->SetMacro(bind(do_ONE_EURO_FILTER))->setHelp("Enable the One Euro adaptive filter on gyro input. Reduces jitter at low speeds without adding latency at high speeds."));
 	commandRegistry.add((new JSMMacro("CALCULATE_REAL_WORLD_CALIBRATION"))->SetMacro(bind(&do_CALCULATE_REAL_WORLD_CALIBRATION, placeholders::_2))->setHelp("Get JoyShockMapper to recommend you a REAL_WORLD_CALIBRATION value after performing the calibration sequence. Visit GyroWiki for details:\nhttp://gyrowiki.jibbsmart.com/blog:joyshockmapper-guide#calibrating"));
 	commandRegistry.add((new JSMMacro("SLEEP"))->SetMacro(bind(&do_SLEEP, placeholders::_2))->setHelp("Sleep for the given number of seconds, or one second if no number is given. Can't sleep more than 10 seconds per command."));
 	commandRegistry.add((new JSMMacro("FINISH_GYRO_CALIBRATION"))->SetMacro(bind(&do_FINISH_GYRO_CALIBRATION))->setHelp("Finish calibrating the gyro in all controllers."));
@@ -2891,7 +3629,14 @@ int main(int argc, char *argv[])
 
 	Mapping::_isCommandValid = bind(&CmdRegistry::isCommandValid, &commandRegistry, placeholders::_1);
 
-	connectDevices();
+	if (g_manualConnectMode)
+	{
+		COUT << "Manual controller connection mode enabled. Use LIST_CONTROLLERS and RECONNECT_CONTROLLERS SELECT <id...> to connect devices.\n";
+	}
+	else
+	{
+		connectDevices();
+	}
 	jsl->SetCallback(&joyShockPollCallback);
 	jsl->SetTouchCallback(&touchCallback);
 	tray.reset(TrayIcon::getNew(trayIconData, &beforeShowTrayMenu));

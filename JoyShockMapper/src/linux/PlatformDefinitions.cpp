@@ -390,6 +390,14 @@ WORD nameToKey(string_view name)
 	{
 		return GYRO_TRACKBALL;
 	}
+	if (name.compare("GYRO_ON_ALL") == 0)
+	{
+		return GYRO_ON_ALL_BIND;
+	}
+	if (name.compare("GYRO_OFF_ALL") == 0)
+	{
+		return GYRO_OFF_ALL_BIND;
+	}
 	if (name.compare("GYRO_ON") == 0)
 	{
 		return GYRO_ON_BIND;

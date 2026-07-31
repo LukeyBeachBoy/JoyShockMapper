@@ -2,6 +2,7 @@
 #include "InputHelpers.h"
 #include <regex>
 #include <cstring>
+#include <atomic>
 
 const Mapping Mapping::NO_MAPPING = Mapping("NONE");
 function<bool(string_view)> Mapping::_isCommandValid = function<bool(string_view)>();
@@ -156,8 +157,13 @@ bool Mapping::AddMapping(KeyCode key, EventModifier evtMod, ActionModifier actMo
 		release = bind(&EventActionIf::FinishCalibration, placeholders::_1);
 		_tapDurationMs = MAGIC_EXTENDED_TAP_DURATION; // Unused in regular press
 	}
-	else if (key.code >= GYRO_INV_X && key.code <= GYRO_TRACKBALL)
+	else if (key.code >= GYRO_INV_X && key.code <= GYRO_ON_ALL_BIND)
 	{
+		extern std::atomic_bool g_hasGyroOnAllBinding;
+		if (key.code == GYRO_ON_ALL_BIND)
+		{
+			g_hasGyroOnAllBinding.store(true);
+		}
 		apply = bind(&EventActionIf::ApplyGyroAction, placeholders::_1, key);
 		release = bind(&EventActionIf::RemoveGyroAction, placeholders::_1);
 		_tapDurationMs = MAGIC_EXTENDED_TAP_DURATION; // Unused in regular press

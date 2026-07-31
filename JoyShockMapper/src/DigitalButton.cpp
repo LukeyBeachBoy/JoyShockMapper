@@ -2,6 +2,7 @@
 #include "JSMVariable.hpp"
 #include "InputHelpers.h"
 #include "SettingsManager.h"
+#include <atomic>
 
 void DigitalButton::Context::updateChordStack(bool isPressed, ButtonID id)
 {
@@ -142,6 +143,18 @@ public:
 
 	void ApplyGyroAction(KeyCode gyroAction) override
 	{
+		extern std::atomic<int> g_gyroGlobalOffCount;
+		extern std::atomic<int> g_gyroGlobalOnCount;
+		extern std::atomic_bool g_hasGyroOnAllBinding;
+		if (gyroAction.code == GYRO_OFF_ALL_BIND)
+		{
+			g_gyroGlobalOffCount.fetch_add(1);
+		}
+		else if (gyroAction.code == GYRO_ON_ALL_BIND)
+		{
+			g_hasGyroOnAllBinding.store(true);
+			g_gyroGlobalOnCount.fetch_add(1);
+		}
 		_context->gyroActionQueue.push_back({ _id, gyroAction });
 	}
 
@@ -161,6 +174,16 @@ public:
 			     currentlyActive != _context->gyroActionQueue.end();
 			     currentlyActive = find_if(currentlyActive, _context->gyroActionQueue.end(), bind(isSameKey, key, placeholders::_1)))
 			{
+				extern std::atomic<int> g_gyroGlobalOffCount;
+				extern std::atomic<int> g_gyroGlobalOnCount;
+				if (currentlyActive->second.code == GYRO_OFF_ALL_BIND)
+				{
+					g_gyroGlobalOffCount.fetch_sub(1);
+				}
+				else if (currentlyActive->second.code == GYRO_ON_ALL_BIND)
+				{
+					g_gyroGlobalOnCount.fetch_sub(1);
+				}
 				// DEBUG_LOG << "Removing active gyro action for " << key.name << endl;
 				currentlyActive = _context->gyroActionQueue.erase(currentlyActive);
 			}

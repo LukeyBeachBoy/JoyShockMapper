@@ -17,6 +17,8 @@ constexpr uint16_t GYRO_ON_BIND = 0x8C;  // Those here are bindings
 constexpr uint16_t GYRO_TRACK_X = 0x8D;
 constexpr uint16_t GYRO_TRACK_Y = 0x8E;
 constexpr uint16_t GYRO_TRACKBALL = 0x8F;
+constexpr uint16_t GYRO_OFF_ALL_BIND = 0x90;
+constexpr uint16_t GYRO_ON_ALL_BIND = 0x91;
 constexpr uint16_t COMMAND_ACTION = 0x97; // Run command
 constexpr uint16_t RUMBLE = 0xE6;
 

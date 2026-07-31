@@ -1,6 +1,13 @@
 #define JSL_WRAPPER_SOURCE
 #include "JslWrapper.h"
 
+#ifndef JS_VENDOR_UNKNOWN
+#define JS_VENDOR_UNKNOWN 0
+#endif
+#ifndef JS_PRODUCT_UNKNOWN
+#define JS_PRODUCT_UNKNOWN 0
+#endif
+
 class JSlWrapperImpl : public JslWrapper
 {
 	int _deviceCount = 0;
@@ -54,9 +61,9 @@ public:
 		return JslGetTouchpadDimension(deviceId, sizeX, sizeY);
 	}
 
-	int GetButtons(int deviceId) override
+	uint64_t GetButtons(int deviceId) override
 	{
-		return JslGetButtons(deviceId);
+		return uint64_t(JslGetButtons(deviceId));
 	}
 
 	float GetLeftX(int deviceId) override
@@ -154,6 +161,16 @@ public:
 		return JslGetPollRate(deviceId);
 	}
 
+	float GetTimeSinceLastUpdate(int deviceId) override
+	{
+		return JslGetTimeSinceLastUpdate(deviceId);
+	}
+
+	float GetSampleRateHz(int deviceId) override
+	{
+		return 0.0f; // Sample rate is computed in JSM for legacy path.
+	}
+
 	void ResetContinuousCalibration(int deviceId) override
 	{
 		JslResetContinuousCalibration(deviceId);
@@ -197,6 +214,18 @@ public:
 	int GetControllerSplitType(int deviceId) override
 	{
 		return JslGetControllerSplitType(deviceId);
+	}
+
+	int GetControllerVendor(int deviceId) override
+	{
+		// Not available in legacy JSL builds
+		return JS_VENDOR_UNKNOWN;
+	}
+
+	int GetControllerProduct(int deviceId) override
+	{
+		// Not available in legacy JSL builds
+		return JS_PRODUCT_UNKNOWN;
 	}
 
 	int GetControllerColour(int deviceId) override

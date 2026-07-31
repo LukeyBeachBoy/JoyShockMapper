@@ -1,5 +1,12 @@
 #pragma once
 
+#ifndef MAGIC_ENUM_RANGE_MIN
+#define MAGIC_ENUM_RANGE_MIN (-1)
+#endif
+#ifndef MAGIC_ENUM_RANGE_MAX
+#define MAGIC_ENUM_RANGE_MAX 512
+#endif
+
 #include "magic_enum.hpp"
 
 #include <map>
@@ -60,6 +67,16 @@ enum class ButtonID
 	MRIGHT,
 	MRING,
 	TOUCH,   // Touch anywhere on the touchpad
+	LTOUCH,  // Left stick capacitive touch
+	RTOUCH,  // Right stick capacitive touch
+	LMINI,   // Left mini shoulder button
+	RMINI,   // Right mini shoulder button
+	MISC1,   // Additional button that varies by controller
+	MISC2,   // Additional button that varies by controller
+	MISC3,   // Additional button that varies by controller
+	MISC4,   // Additional button that varies by controller
+	MISC5,   // Additional button that varies by controller
+	MISC6,   // Additional button that varies by controller
 	ZLF,     // = FIRST_ANALOG_TRIGGER
 	CAPTURE, // Full press of touchpad touch + press
 	// insert more analog triggers here
@@ -112,41 +129,56 @@ enum class SettingID
 	MIN_GYRO_SENS,  // Legacy but int value not used
 	MAX_GYRO_SENS,
 	MIN_GYRO_THRESHOLD,
-	MAX_GYRO_THRESHOLD,
-	STICK_POWER,
-	STICK_SENS,
-	REAL_WORLD_CALIBRATION,
-	VIRTUAL_STICK_CALIBRATION,
-	IN_GAME_SENS,
-	TRIGGER_THRESHOLD,
-	RESET_MAPPINGS,
-	NO_GYRO_BUTTON,
-	LEFT_STICK_MODE,
-	RIGHT_STICK_MODE,
-	MOTION_STICK_MODE,
-	GYRO_OFF,
-	GYRO_ON,
-	LEFT_STICK_AXIS,
-	RIGHT_STICK_AXIS,
-	MOTION_STICK_AXIS,
-	TOUCH_STICK_AXIS,
-	STICK_AXIS_X, // Legacy command
-	STICK_AXIS_Y, // Legacy command
-	GYRO_AXIS_X,
-	GYRO_AXIS_Y,
-	RECONNECT_CONTROLLERS,
-	COUNTER_OS_MOUSE_SPEED,
-	IGNORE_OS_MOUSE_SPEED,
-	JOYCON_GYRO_MASK,
-	JOYCON_MOTION_MASK,
-	GYRO_SENS,
-	FLICK_TIME,
-	GYRO_SMOOTH_THRESHOLD,
-	GYRO_SMOOTH_TIME,
-	GYRO_CUTOFF_SPEED,
-	GYRO_CUTOFF_RECOVERY,
-	STICK_ACCELERATION_RATE,
-	STICK_ACCELERATION_CAP,
+		MAX_GYRO_THRESHOLD,
+		ACCEL_CURVE,
+		ACCEL_NATURAL_VHALF,
+		ACCEL_POWER_VREF,
+		ACCEL_POWER_EXPONENT,
+		ACCEL_SIGMOID_MID,
+		ACCEL_SIGMOID_WIDTH,
+		ACCEL_JUMP_TAU,
+		STICK_POWER,
+		STICK_SENS,
+		REAL_WORLD_CALIBRATION,
+		VIRTUAL_STICK_CALIBRATION,
+		IN_GAME_SENS,
+		TRIGGER_THRESHOLD,
+		RESET_MAPPINGS,
+		IGNORE_GYRO_DEVICES,
+		NO_GYRO_BUTTON,
+		LEFT_STICK_MODE,
+		RIGHT_STICK_MODE,
+		MOTION_STICK_MODE,
+		GYRO_OFF,
+		GYRO_ON,
+		LEFT_STICK_AXIS,
+		RIGHT_STICK_AXIS,
+		MOTION_STICK_AXIS,
+		TOUCH_STICK_AXIS,
+		STICK_AXIS_X, // Legacy command
+		STICK_AXIS_Y, // Legacy command
+		GYRO_AXIS_X,
+		GYRO_AXIS_Y,
+		RECONNECT_CONTROLLERS,
+		COUNTER_OS_MOUSE_SPEED,
+		IGNORE_OS_MOUSE_SPEED,
+		JOYCON_GYRO_MASK,
+		JOYCON_MOTION_MASK,
+		GYRO_SENS,
+		FLICK_TIME,
+		GYRO_SMOOTH_THRESHOLD,
+		GYRO_SMOOTH_TIME,
+		GYRO_SMOOTHING_DECAY,
+		GYRO_CUTOFF_SPEED,
+		GYRO_CUTOFF_RECOVERY,
+		ONE_EURO_MIN_CUTOFF,
+		ONE_EURO_SPEED_COEFF,
+		GYRO_ANGLE_SNAP,
+		GYRO_ANGLE_SNAP_EASE,
+		DECEL_BRAKE_STRENGTH,
+		DECEL_BRAKE_THRESHOLD,
+		STICK_ACCELERATION_RATE,
+		STICK_ACCELERATION_CAP,
 	LEFT_STICK_DEADZONE_INNER,
 	LEFT_STICK_DEADZONE_OUTER,
 	STICK_DEADZONE_INNER,
@@ -184,6 +216,7 @@ enum class SettingID
 	FLICK_TIME_EXPONENT,
 	CONTROLLER_ORIENTATION,
 	GYRO_SPACE,
+	ROLL_CONTRIBUTION,
 	TRACKBALL_DECAY,
 	TRIGGER_SKIP_DELAY,
 	TURBO_PERIOD,
@@ -233,6 +266,8 @@ enum class SettingID
 	MOUSELIKE_FACTOR,
 	RETURN_DEADZONE_ANGLE,
 	RETURN_DEADZONE_ANGLE_CUTOFF,
+	TELEMETRY_ENABLED,
+	TELEMETRY_PORT,
 };
 
 // constexpr are like #define but with respect to typeness
@@ -250,11 +285,23 @@ constexpr int MAGIC_TRIGGER_SMOOTHING = 5;            // in samples
 enum class GyroSpace
 {
 	LOCAL,
+	YAW_PLUS_ROLL,
 	PLAYER_TURN,
 	PLAYER_LEAN,
 	WORLD_TURN,
 	WORLD_LEAN,
 	INVALID
+};
+
+enum class AccelCurve
+{
+	INVALID = -1,
+	LINEAR = 0,
+	NATURAL,
+	POWER,
+	QUADRATIC,
+	SIGMOID,
+	JUMP,
 };
 enum class ControllerOrientation
 {
