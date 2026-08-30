@@ -70,7 +70,21 @@ JoyShock::JoyShock(int uniqueHandle, int controllerSplitType, shared_ptr<Digital
 	jsl->SetLightColour(_handle, getSetting<Color>(SettingID::LIGHT_BAR).raw);
 	for (int i = 0; i < MAX_NO_OF_TOUCH; ++i)
 	{
-		_touchpads.push_back(TouchStick(i, _context, _handle));
+		if (_controllerType == JS_TYPE_STEAM_CONTROLLER_2026)
+		{
+			// Steam Controller 2026: two independent physical pads.
+			// i=0 = left pad, i=1 = right pad.
+			_touchpads.push_back(TouchStick(i, _context, _handle,
+				i == 0 ? SettingID::LEFT_TOUCH_DEADZONE_INNER : SettingID::RIGHT_TOUCH_DEADZONE_INNER,
+				i == 0 ? SettingID::LEFT_TOUCH_RING_MODE : SettingID::RIGHT_TOUCH_RING_MODE,
+				i == 0 ? SettingID::LEFT_TOUCH_STICK_MODE : SettingID::RIGHT_TOUCH_STICK_MODE,
+				i == 0 ? SettingID::LEFT_TOUCH_STICK_RADIUS : SettingID::RIGHT_TOUCH_STICK_RADIUS,
+				i == 0 ? SettingID::LEFT_TOUCH_STICK_AXIS : SettingID::RIGHT_TOUCH_STICK_AXIS));
+		}
+		else
+		{
+			_touchpads.push_back(TouchStick(i, _context, _handle));
+		}
 	}
 	_leftStick.scroll.init(_buttons[int(ButtonID::LLEFT)], _buttons[int(ButtonID::LRIGHT)]);
 	_rightStick.scroll.init(_buttons[int(ButtonID::RLEFT)], _buttons[int(ButtonID::RRIGHT)]);
@@ -1555,11 +1569,11 @@ void JoyShock::processStick(float stickX, float stickY, Stick &stick, float mous
 
 void JoyShock::handleTouchStickChange(TouchStick &ts, bool down, short movX, short movY, float delta_time)
 {
-	float stickX = down ? clamp<float>((ts._currentLocation.x() + movX) / getSetting(SettingID::TOUCH_STICK_RADIUS), -1.f, 1.f) : 0.f;
-	float stickY = down ? clamp<float>((ts._currentLocation.y() - movY) / getSetting(SettingID::TOUCH_STICK_RADIUS), -1.f, 1.f) : 0.f;
-	float innerDeadzone = getSetting(SettingID::TOUCH_DEADZONE_INNER);
-	RingMode ringMode = getSetting<RingMode>(SettingID::TOUCH_RING_MODE);
-	StickMode stickMode = getSetting<StickMode>(SettingID::TOUCH_STICK_MODE);
+	float stickX = down ? clamp<float>((ts._currentLocation.x() + movX) / getSetting(ts._stickRadius), -1.f, 1.f) : 0.f;
+	float stickY = down ? clamp<float>((ts._currentLocation.y() - movY) / getSetting(ts._stickRadius), -1.f, 1.f) : 0.f;
+	float innerDeadzone = getSetting(ts._innerDeadzone);
+	RingMode ringMode = getSetting<RingMode>(ts._ringMode);
+	StickMode stickMode = getSetting<StickMode>(ts._stickMode);
 	ControllerOrientation controllerOrientation = getSetting<ControllerOrientation>(SettingID::CONTROLLER_ORIENTATION);
 	float mouseCalibrationFactor = 180.0f / M_PI / os_mouse_speed;
 
@@ -1567,7 +1581,7 @@ void JoyShock::handleTouchStickChange(TouchStick &ts, bool down, short movX, sho
 	bool lockMouse = false;
 	float camSpeedX = 0.f;
 	float camSpeedY = 0.f;
-	auto axisSign = getSetting<AxisSignPair>(SettingID::TOUCH_STICK_AXIS);
+	auto axisSign = getSetting<AxisSignPair>(ts._stickAxis);
 
 	stickX *= float(axisSign.first);
 	stickY *= float(axisSign.second);
@@ -1575,7 +1589,7 @@ void JoyShock::handleTouchStickChange(TouchStick &ts, bool down, short movX, sho
 	ts.lastX = stickX;
 	ts.lastY = stickY;
 
-	moveMouse(camSpeedX * float(getSetting<AxisSignPair>(SettingID::TOUCH_STICK_AXIS).first), -camSpeedY * float(getSetting<AxisSignPair>(SettingID::TOUCH_STICK_AXIS).second));
+	moveMouse(camSpeedX * float(getSetting<AxisSignPair>(ts._stickAxis).first), -camSpeedY * float(getSetting<AxisSignPair>(ts._stickAxis).second));
 
 	if (!down && ts._prevDown)
 	{

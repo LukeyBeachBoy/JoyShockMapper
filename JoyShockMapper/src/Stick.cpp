@@ -91,9 +91,15 @@ void ScrollAxis::reset(chrono::steady_clock::time_point now)
 	_pressedBtn = ButtonID::NONE;
 }
 
-TouchStick::TouchStick(int index, shared_ptr<DigitalButton::Context> common, int handle)
-	: Stick(SettingID::TOUCH_DEADZONE_INNER, SettingID::ZERO, SettingID::TOUCH_RING_MODE, SettingID::TOUCH_STICK_MODE,
-		ButtonID::TRING, ButtonID::TLEFT, ButtonID::TRIGHT, ButtonID::TUP, ButtonID::TDOWN)
+TouchStick::TouchStick(int index, shared_ptr<DigitalButton::Context> common, int handle,
+                     SettingID innerDeadzone,
+                     SettingID ringMode,
+                     SettingID stickMode,
+                     SettingID stickRadius,
+                     SettingID stickAxis)
+	: Stick(innerDeadzone, SettingID::ZERO, ringMode, stickMode,
+		ButtonID::TRING, ButtonID::TLEFT, ButtonID::TRIGHT, ButtonID::TUP, ButtonID::TDOWN,
+		stickRadius, stickAxis)
 {
 	this->_touchpadIndex = index;
 	buttons.emplace(ButtonID::TUP, DigitalButton(common, mappings[int(ButtonID::TUP)]));
