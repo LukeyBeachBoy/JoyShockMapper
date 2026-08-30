@@ -158,6 +158,15 @@ struct ControllerDevice
 							_ctrlr_type = JS_TYPE_SWITCH2_PRO_CONTROLLER;
 						}
 						break;
+					case JS_VENDOR_VALVE:
+						if (_productId == JS_PRODUCT_VALVE_STEAM_2026_USB ||
+							_productId == JS_PRODUCT_VALVE_STEAM_2026_BLE ||
+							_productId == JS_PRODUCT_VALVE_PROTEUS_DONGLE ||
+							_productId == JS_PRODUCT_VALVE_NEREID_DONGLE)
+						{
+							_ctrlr_type = JS_TYPE_STEAM_CONTROLLER_2026;
+						}
+						break;
 					}
 
 					if (_ctrlr_type != JS_TYPE_UNKNOWN)
@@ -728,10 +737,22 @@ public:
 			return state;
 		}
 
-		if (!SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 0, &state.t0Down, &state.t0X, &state.t0Y, nullptr) || 
-			!SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 1, &state.t1Down, &state.t1X, &state.t1Y, nullptr))
+		bool isSteam = _controllerMap[deviceId]->_ctrlr_type == JS_TYPE_STEAM_CONTROLLER_2026;
+		// Steam Controller 2026: two single-finger physical pads
+		// DS4/DualSense: one pad with two fingers
+		if (isSteam && SDL_GetNumGamepadTouchpads(_controllerMap[deviceId]->_sdlController) >= 2)
 		{
-			CERR << "Cannot get finger state: " << SDL_GetError() << '\n';
+			// Left pad = touchpad index 0, Right pad = touchpad index 1
+			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 0, &state.t0Down, &state.t0X, &state.t0Y, nullptr);
+			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 1, 0, &state.t1Down, &state.t1X, &state.t1Y, nullptr);
+		}
+		else
+		{
+			if (!SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 0, &state.t0Down, &state.t0X, &state.t0Y, nullptr) || 
+				!SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 1, &state.t1Down, &state.t1X, &state.t1Y, nullptr))
+			{
+				CERR << "Cannot get finger state: " << SDL_GetError() << '\n';
+			}
 		}
 		return state;
 	}
@@ -746,6 +767,7 @@ public:
 			{
 			case JS_TYPE_DS4:
 			case JS_TYPE_DS:
+			case JS_TYPE_STEAM_CONTROLLER_2026:
 				// Matching SDL resolution
 				sizeX = 1920;
 				sizeY = 920;
@@ -806,6 +828,25 @@ public:
 			buttons |= SDL_GetGamepadButton(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_BUTTON_LEFT_PADDLE1) ? 1ULL << JSOFFSET_SL : 0;  // GL back button
 			buttons |= SDL_GetGamepadButton(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_BUTTON_MISC2) ? 1ULL << JSOFFSET_MISC1 : 0;      // C button
 			break;
+		case JS_TYPE_STEAM_CONTROLLER_2026:
+		{
+			SDL_Joystick *joy = SDL_GetGamepadJoystick(_controllerMap[deviceId]->_sdlController);
+			// QAM button (raw index 11)
+			buttons |= SDL_GetJoystickButton(joy, 11) ? 1ULL << JSOFFSET_MISC1 : 0;
+			// Four paddles (raw indices 12-15)
+			buttons |= SDL_GetJoystickButton(joy, 12) ? 1ULL << JSOFFSET_SR : 0;
+			buttons |= SDL_GetJoystickButton(joy, 13) ? 1ULL << JSOFFSET_SL : 0;
+			buttons |= SDL_GetJoystickButton(joy, 14) ? 1ULL << JSOFFSET_FNR : 0;
+			buttons |= SDL_GetJoystickButton(joy, 15) ? 1ULL << JSOFFSET_FNL : 0;
+			// Right pad click (raw index 16), Left pad click (raw index 17)
+			buttons |= SDL_GetJoystickButton(joy, 16) ? 1ULL << JSOFFSET_MISC2 : 0;
+			buttons |= SDL_GetJoystickButton(joy, 17) ? 1ULL << JSOFFSET_MISC3 : 0;
+			// Stick capacitive touch (LTOUCH/RTOUCH already exposed via cap-sense)
+			// Left grip (raw 20 / SDL_MISC6), Right grip (raw 21 / SDL_MISC5)
+			buttons |= SDL_GetJoystickButton(joy, 20) ? 1ULL << JSOFFSET_MISC6 : 0;
+			buttons |= SDL_GetJoystickButton(joy, 21) ? 1ULL << JSOFFSET_MISC5 : 0;
+		}
+		break;
 		case JS_TYPE_DS:
 			buttons |= SDL_GetGamepadButton(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_BUTTON_MISC1) ? 1ULL << JSOFFSET_MIC : 0;
 			buttons |= SDL_GetGamepadButton(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_BUTTON_TOUCHPAD) ? 1ULL << JSOFFSET_CAPTURE : 0;

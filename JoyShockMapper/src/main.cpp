@@ -1482,6 +1482,30 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			jc->handleButtonChange(ButtonID::RTOUCH, buttons & (1ULL << JSOFFSET_RTOUCH)); // Right stick capacitive touch
 			jc->handleButtonChange(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));   // QAM button ("..." button)
 			break;
+		case JS_TYPE_STEAM_CONTROLLER_2026:
+			// Four paddles: R4→RSR, L4→LSL, R5→RSL, L5→LSR
+			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
+			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
+			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));
+			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));
+			// QAM button
+			jc->handleButtonChange(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));
+			// Right pad click, left pad click
+			jc->handleButtonChange(ButtonID::MISC2, buttons & (1ULL << JSOFFSET_MISC2));
+			jc->handleButtonChange(ButtonID::MISC3, buttons & (1ULL << JSOFFSET_MISC3));
+			// Right grip, left grip
+			jc->handleButtonChange(ButtonID::MISC5, buttons & (1ULL << JSOFFSET_MISC5));
+			jc->handleButtonChange(ButtonID::MISC6, buttons & (1ULL << JSOFFSET_MISC6));
+			// Cap-sense: stick touch (LTOUCH/RTOUCH are in the default block)
+			// Touchpad dual-stage: left pad touch = TOUCH, left pad click = MISC3
+			// Right pad handled via separate touch-callback below
+			{
+				float touchpos = buttons & (1ULL << JSOFFSET_MISC3) ? 1.f :
+				  jsl->GetTouchDown(jc->_handle, false)                 ? 0.99f :
+				                                                         0.f;
+				jc->handleTriggerChange(ButtonID::TOUCH, ButtonID::MISC3, jc->getSetting<TriggerMode>(SettingID::TOUCHPAD_DUAL_STAGE_MODE), touchpos, jc->_unusedEffect);
+			}
+			break;
 		case JS_TYPE_G7_PRO_8K:
 			jc->handleButtonChange(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI));     // L5 mini shoulder button
 			jc->handleButtonChange(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI));     // R5 mini shoulder button
