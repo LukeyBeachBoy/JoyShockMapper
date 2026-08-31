@@ -2931,7 +2931,7 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<FloatXY>(*min_gyro_sens))
 	                       ->setHelp("Minimum gyro sensitivity when turning controller at or below MIN_GYRO_THRESHOLD.\nYou can assign a second value as a different vertical sensitivity."));
 
-	auto max_gyro_sens = new JSMSetting<FloatXY>(SettingID::MAX_GYRO_SENS, { 0.0f, 0.0f });
+	auto max_gyro_sens = new JSMSetting<FloatXY>(SettingID::MAX_GYRO_SENS, { 1.0f, 1.0f });
 	max_gyro_sens->setFilter(&filterFloatPair);
 	SettingsManager::add(max_gyro_sens);
 	commandRegistry->add((new JSMAssignment<FloatXY>(*max_gyro_sens))
