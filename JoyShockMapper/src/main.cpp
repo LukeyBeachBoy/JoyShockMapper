@@ -243,10 +243,37 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			}
 			js->handleTouchStickChange(js->_touchpads[0], point0.isDown(), point0.movX, point0.movY, delta_time);
 		}
-		else if (leftMode == TouchpadMode::MOUSE && point0.isDown())
+		else if (leftMode == TouchpadMode::MOUSE)
 		{
-			FloatXY sens = js->getSetting<FloatXY>(SettingID::LEFT_TOUCHPAD_SENS);
-			moveMouse(point0.movX * sens.x(), point0.movY * sens.y());
+			if (point0.isDown())
+			{
+				FloatXY sens = js->getSetting<FloatXY>(SettingID::LEFT_TOUCHPAD_SENS);
+				float mx = point0.movX * sens.x();
+				float my = point0.movY * sens.y();
+				// Accumulate momentum for trackball-style continuation
+				js->touchMomentumX = mx;
+				js->touchMomentumY = my;
+				js->touchActive = true;
+				moveMouse(mx, my);
+			}
+			else if (js->touchActive)
+			{
+				// Finger lifted — apply trackball decay
+				float decay = exp2f(-delta_time * js->getSetting(SettingID::TRACKBALL_DECAY));
+				js->touchMomentumX *= decay;
+				js->touchMomentumY *= decay;
+				// Stop when momentum is negligible
+				if (fabsf(js->touchMomentumX) < 0.1f && fabsf(js->touchMomentumY) < 0.1f)
+				{
+					js->touchMomentumX = 0.f;
+					js->touchMomentumY = 0.f;
+					js->touchActive = false;
+				}
+				else
+				{
+					moveMouse(js->touchMomentumX, js->touchMomentumY);
+				}
+			}
 		}
 
 		// Process right pad
@@ -268,10 +295,37 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			}
 			js->handleTouchStickChange(js->_touchpads[1], point1.isDown(), point1.movX, point1.movY, delta_time);
 		}
-		else if (rightMode == TouchpadMode::MOUSE && point1.isDown())
+		else if (rightMode == TouchpadMode::MOUSE)
 		{
-			FloatXY sens = js->getSetting<FloatXY>(SettingID::RIGHT_TOUCHPAD_SENS);
-			moveMouse(point1.movX * sens.x(), point1.movY * sens.y());
+			if (point1.isDown())
+			{
+				FloatXY sens = js->getSetting<FloatXY>(SettingID::RIGHT_TOUCHPAD_SENS);
+				float mx = point1.movX * sens.x();
+				float my = point1.movY * sens.y();
+				// Accumulate momentum for trackball-style continuation
+				js->touchMomentumX = mx;
+				js->touchMomentumY = my;
+				js->touchActive = true;
+				moveMouse(mx, my);
+			}
+			else if (js->touchActive)
+			{
+				// Finger lifted — apply trackball decay
+				float decay = exp2f(-delta_time * js->getSetting(SettingID::TRACKBALL_DECAY));
+				js->touchMomentumX *= decay;
+				js->touchMomentumY *= decay;
+				// Stop when momentum is negligible
+				if (fabsf(js->touchMomentumX) < 0.1f && fabsf(js->touchMomentumY) < 0.1f)
+				{
+					js->touchMomentumX = 0.f;
+					js->touchMomentumY = 0.f;
+					js->touchActive = false;
+				}
+				else
+				{
+					moveMouse(js->touchMomentumX, js->touchMomentumY);
+				}
+			}
 		}
 
 		// PS_TOUCHPAD not supported for dual-pad controllers
@@ -3427,7 +3481,7 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 
 	// Right pad settings
 	{
-		auto right_touchpad_mode = new JSMSetting<TouchpadMode>(SettingID::RIGHT_TOUCHPAD_MODE, TouchpadMode::MOUSE);
+		auto right_touchpad_mode = new JSMSetting<TouchpadMode>(SettingID::RIGHT_TOUCHPAD_MODE, TouchpadMode::GRID_AND_STICK);
 		right_touchpad_mode->setFilter(&filterInvalidValue<TouchpadMode, TouchpadMode::INVALID>);
 		SettingsManager::add(right_touchpad_mode);
 		commandRegistry->add((new JSMAssignment<TouchpadMode>("RIGHT_TOUCHPAD_MODE", *right_touchpad_mode))

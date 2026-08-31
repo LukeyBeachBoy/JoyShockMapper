@@ -135,6 +135,11 @@ public:
 	float gyroXVelocity = 0.f;
 	float gyroYVelocity = 0.f;
 
+	// Touchpad trackball momentum (for smooth mouse output after finger lift)
+	float touchMomentumX = 0.f;
+	float touchMomentumY = 0.f;
+	bool touchActive = false;
+
 	std::deque<std::pair<std::chrono::steady_clock::time_point, float>> decelBrakeHistory;
 	float decelBrakeEngagement = 0.f;
 	float decelBrakeOmegaRaw = 0.f;
