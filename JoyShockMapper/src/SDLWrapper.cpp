@@ -750,8 +750,14 @@ public:
 			state.t0Pressure = pressure0;
 			state.t1Pressure = pressure1;
 			float threshold = SettingsManager::get<float>(SettingID::TOUCHPAD_LIGHT_TOUCH_THRESHOLD)->value();
-			if (!state.t0Down && pressure0 >= threshold) state.t0Down = true;
-			if (!state.t1Down && pressure1 >= threshold) state.t1Down = true;
+			// A zero threshold disables pressure-based light-touch promotion.  Pressure
+			// is reported as zero for an inactive finger, so >= 0 creates phantom
+			// touches; SDL's authoritative down bit must win in that case.
+			if (threshold > 0.0f)
+			{
+				if (!state.t0Down && pressure0 >= threshold) state.t0Down = true;
+				if (!state.t1Down && pressure1 >= threshold) state.t1Down = true;
+			}
 		}
 		else
 		{
