@@ -750,9 +750,10 @@ public:
 			state.t0Pressure = pressure0;
 			state.t1Pressure = pressure1;
 			float threshold = SettingsManager::get<float>(SettingID::TOUCHPAD_LIGHT_TOUCH_THRESHOLD)->value();
-			// Pressure-based touch detection: bypass SDL's t0Down/t1Down flag entirely
-			// when meaningful pressure is present.  Hover-level pressure (e.g. 0.002)
-			// should register as contact even when SDL hasn't set its down bit.
+			// Pressure-based touch detection: respect SDL's down flag for physical
+			// presses AND promote hover-level pressure as a contact signal.
+			// At zero threshold, both sources are accepted so mouse output
+			// from SDL down bit still works while light touches are detected.
 			if (threshold > 0.0f)
 			{
 				// Configured threshold: pressure >= threshold is the exclusive touch signal
@@ -761,9 +762,9 @@ public:
 			}
 			else
 			{
-				// Zero/negative threshold: use pressure > 0.001 as the sole touch criterion
-				state.t0Down = pressure0 > 0.001f;
-				state.t1Down = pressure1 > 0.001f;
+				// Zero/negative threshold: accept SDL down OR any non-zero pressure
+				state.t0Down = state.t0Down || pressure0 > 0.0001f;
+				state.t1Down = state.t1Down || pressure1 > 0.0001f;
 			}
 		}
 		else
