@@ -43,11 +43,14 @@ struct TouchMousePipeline
 	void reset() { lastX = lastY = 0.f; }
 	FloatXY process(float x, float y, float smoothing, float acceleration)
 	{
+		// Bounded prediction adds responsiveness without delayed interpolation or buffering.
 		float a = smoothing < 0.f ? 0.f : (smoothing > 1.f ? 1.f : smoothing);
-		float px = x + (x - lastX) * a, py = y + (y - lastY) * a;
+		float px = x + clamp((x - lastX) * a, -2.f, 2.f);
+		float py = y + clamp((y - lastY) * a, -2.f, 2.f);
 		lastX = x; lastY = y;
 		float positiveAcceleration = acceleration > 0.f ? acceleration : 0.f;
 		float gain = 1.f + positiveAcceleration * sqrtf(px * px + py * py);
+		gain = gain > 4.f ? 4.f : gain;
 		return { px * gain, py * gain };
 	}
 };
