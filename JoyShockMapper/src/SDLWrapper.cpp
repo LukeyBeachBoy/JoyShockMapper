@@ -743,8 +743,15 @@ public:
 		if (isSteam && SDL_GetNumGamepadTouchpads(_controllerMap[deviceId]->_sdlController) >= 2)
 		{
 			// Left pad = touchpad index 0, Right pad = touchpad index 1
-			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 0, &state.t0Down, &state.t0X, &state.t0Y, nullptr);
-			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 1, 0, &state.t1Down, &state.t1X, &state.t1Y, nullptr);
+			// Query pressure to detect light touches where SDL may not set down=true
+			float pressure0 = 0.f, pressure1 = 0.f;
+			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 0, &state.t0Down, &state.t0X, &state.t0Y, &pressure0);
+			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 1, 0, &state.t1Down, &state.t1X, &state.t1Y, &pressure1);
+			// If SDL says not down but pressure > 0, treat as touched
+			if (!state.t0Down && pressure0 > 0.f)
+				state.t0Down = true;
+			if (!state.t1Down && pressure1 > 0.f)
+				state.t1Down = true;
 		}
 		else
 		{
