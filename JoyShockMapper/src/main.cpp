@@ -221,21 +221,11 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 	{
 		// --- Steam Controller 2026: two independent physical pads ---
 		// Left pad = point0 (t0), Right pad = point1 (t1)
-		// Per-pad settings override the generic TOUCHPAD_MODE; if the user
-		// only sets TOUCHPAD_MODE (not LEFT/RIGHT_TOUCHPAD_MODE), use it for both.
-		auto genericMode = js->getSetting<TouchpadMode>(SettingID::TOUCHPAD_MODE);
+		// The UI mirrors the legacy TOUCHPAD_MODE value into both per-pad keys.
+		// Runtime dispatch uses the per-pad values so explicit left/right settings
+		// remain independent and configurable.
 		auto leftMode = js->getSetting<TouchpadMode>(SettingID::LEFT_TOUCHPAD_MODE);
 		auto rightMode = js->getSetting<TouchpadMode>(SettingID::RIGHT_TOUCHPAD_MODE);
-		// If TOUCHPAD_MODE is explicitly set to MOUSE or PS_TOUCHPAD, use it for both pads
-		// (unless the per-pad mode was also explicitly set differently)
-		if (genericMode == TouchpadMode::MOUSE || genericMode == TouchpadMode::PS_TOUCHPAD)
-		{
-			// Only override if the per-pad setting hasn't been changed from default
-			// We can't easily check "was it changed", so we prioritize the generic setting
-			// when it's MOUSE or PS_TOUCHPAD, since GRID_AND_STICK is the default for per-pad.
-			leftMode = genericMode;
-			rightMode = genericMode;
-		}
 
 		// Process left pad
 		if (leftMode == TouchpadMode::GRID_AND_STICK)
