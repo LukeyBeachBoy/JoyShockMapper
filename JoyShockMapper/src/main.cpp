@@ -1505,15 +1505,11 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			jc->handleButtonChange(ButtonID::MISC5, buttons & (1ULL << JSOFFSET_MISC5));
 			jc->handleButtonChange(ButtonID::MISC6, buttons & (1ULL << JSOFFSET_MISC6));
 			// Cap-sense: stick touch (LTOUCH/RTOUCH are in the default block)
-			// Touchpad dual-stage: left pad touch = TOUCH, left pad click = MISC3
-			// Right pad handled via separate touch-callback below
-			{
-				float touchpos = buttons & (1ULL << JSOFFSET_MISC3) ? 1.f :
-				  jsl->GetTouchDown(jc->_handle, false)                 ? 0.99f :
-				                                                         0.f;
-				jc->handleTriggerChange(ButtonID::TOUCH, ButtonID::MISC3, jc->getSetting<TriggerMode>(SettingID::TOUCHPAD_DUAL_STAGE_MODE), touchpos, jc->_unusedEffect);
-			}
-			break;
+				// Touchpad touch (TOUCH) and click (MISC3) are both handled as
+				// regular buttons above. The dual-stage trigger mechanism requires
+				// an analog trigger index, which MISC3 is not, so we skip it here
+				// to avoid console spam: "Trigger MISC3 does not exist in state map."
+				break;
 		case JS_TYPE_G7_PRO_8K:
 			jc->handleButtonChange(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI));     // L5 mini shoulder button
 			jc->handleButtonChange(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI));     // R5 mini shoulder button
