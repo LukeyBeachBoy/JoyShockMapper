@@ -750,17 +750,20 @@ public:
 			state.t0Pressure = pressure0;
 			state.t1Pressure = pressure1;
 			float threshold = SettingsManager::get<float>(SettingID::TOUCHPAD_LIGHT_TOUCH_THRESHOLD)->value();
-			// A zero threshold disables pressure-based light-touch promotion.  Pressure
-			// is reported as zero for an inactive finger, so >= 0 creates phantom
-			// touches; SDL's authoritative down bit must win in that case.
+			// Pressure-based touch detection: bypass SDL's t0Down/t1Down flag entirely
+			// when meaningful pressure is present.  Hover-level pressure (e.g. 0.002)
+			// should register as contact even when SDL hasn't set its down bit.
 			if (threshold > 0.0f)
 			{
-				// The configured threshold gates every contact source: SDL's down bit
-				// and pressure-based promotion must agree before reporting a touch.
-				state.t0Down = state.t0Down || pressure0 >= threshold;
-				state.t1Down = state.t1Down || pressure1 >= threshold;
-				state.t0Down = state.t0Down && pressure0 >= threshold;
-				state.t1Down = state.t1Down && pressure1 >= threshold;
+				// Configured threshold: pressure >= threshold is the exclusive touch signal
+				state.t0Down = pressure0 >= threshold;
+				state.t1Down = pressure1 >= threshold;
+			}
+			else
+			{
+				// Zero/negative threshold: use pressure > 0.001 as the sole touch criterion
+				state.t0Down = pressure0 > 0.001f;
+				state.t1Down = pressure1 > 0.001f;
 			}
 		}
 		else

@@ -18,8 +18,13 @@ def test_prediction_starts_without_origin_overshoot_and_is_bounded():
 
 def test_contact_threshold_gates_sdl_down_and_pressure_fallback():
     sdl = (ROOT / 'JoyShockMapper/src/SDLWrapper.cpp').read_text()
-    assert 'state.t0Down = state.t0Down && pressure0 >= threshold;' in sdl
-    assert 'state.t1Down = state.t1Down && pressure1 >= threshold;' in sdl
+    assert 'state.t0Down = pressure0 >= threshold;' in sdl
+    assert 'state.t1Down = pressure1 >= threshold;' in sdl
+    assert 'state.t0Down = pressure0 > 0.001f;' in sdl
+    assert 'state.t1Down = pressure1 > 0.001f;' in sdl
+    # SDL's t0Down/t1Down is no longer required for pressure promotion
+    assert 'state.t0Down = state.t0Down && pressure0 >= threshold;' not in sdl
+    assert 'state.t1Down = state.t1Down && pressure1 >= threshold;' not in sdl
 
 
 def test_pipeline_retains_acceleration_and_trackball_friction():
