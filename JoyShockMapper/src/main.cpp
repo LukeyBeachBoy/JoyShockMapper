@@ -227,6 +227,9 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		auto leftMode = js->getSetting<TouchpadMode>(SettingID::LEFT_TOUCHPAD_MODE);
 		auto rightMode = js->getSetting<TouchpadMode>(SettingID::RIGHT_TOUCHPAD_MODE);
 
+		if (!point0.isDown()) js->touchPipelines[0].reset();
+		if (!point1.isDown()) js->touchPipelines[1].reset();
+
 		// Process left pad
 		if (leftMode == TouchpadMode::GRID_AND_STICK)
 		{
@@ -253,30 +256,32 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 				FloatXY sens = js->getSetting<FloatXY>(SettingID::LEFT_TOUCHPAD_SENS);
 				float mx = point0.movX * sens.x();
 				float my = point0.movY * sens.y();
+				if (!js->touchPipelines[0].active)
+					js->touchPipelines[0].reset();
 				FloatXY shaped = js->touchPipelines[0].process(mx, my, js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
 				mx = shaped.x(); my = shaped.y();
 				// Accumulate momentum for trackball-style continuation
-				js->touchMomentumX = mx;
-				js->touchMomentumY = my;
-				js->touchActive = true;
+				js->touchPipelines[0].momentumX = mx;
+				js->touchPipelines[0].momentumY = my;
+				js->touchPipelines[0].active = true;
 				moveMouse(mx, my);
 			}
-			else if (js->touchActive)
+			else if (js->touchPipelines[0].active)
 			{
 				// Finger lifted — apply trackball decay
 				float decay = exp2f(-delta_time * js->getSetting(SettingID::TRACKBALL_DECAY));
-				js->touchMomentumX *= decay;
-				js->touchMomentumY *= decay;
+				js->touchPipelines[0].momentumX *= decay;
+				js->touchPipelines[0].momentumY *= decay;
 				// Stop when momentum is negligible
-				if (fabsf(js->touchMomentumX) < 0.1f && fabsf(js->touchMomentumY) < 0.1f)
+				if (fabsf(js->touchPipelines[0].momentumX) < 0.1f && fabsf(js->touchPipelines[0].momentumY) < 0.1f)
 				{
-					js->touchMomentumX = 0.f;
-					js->touchMomentumY = 0.f;
-					js->touchActive = false;
+					js->touchPipelines[0].momentumX = 0.f;
+					js->touchPipelines[0].momentumY = 0.f;
+					js->touchPipelines[0].active = false;
 				}
 				else
 				{
-					moveMouse(js->touchMomentumX, js->touchMomentumY);
+					moveMouse(js->touchPipelines[0].momentumX, js->touchPipelines[0].momentumY);
 				}
 			}
 		}
@@ -307,30 +312,32 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 				FloatXY sens = js->getSetting<FloatXY>(SettingID::RIGHT_TOUCHPAD_SENS);
 				float mx = point1.movX * sens.x();
 				float my = point1.movY * sens.y();
+				if (!js->touchPipelines[1].active)
+					js->touchPipelines[1].reset();
 				FloatXY shaped = js->touchPipelines[1].process(mx, my, js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
 				mx = shaped.x(); my = shaped.y();
 				// Accumulate momentum for trackball-style continuation
-				js->touchMomentumX = mx;
-				js->touchMomentumY = my;
-				js->touchActive = true;
+				js->touchMomentumX[1] = mx;
+				js->touchMomentumY[1] = my;
+				js->touchActive[1] = true;
 				moveMouse(mx, my);
 			}
-			else if (js->touchActive)
+			else if (js->touchActive[1])
 			{
 				// Finger lifted — apply trackball decay
 				float decay = exp2f(-delta_time * js->getSetting(SettingID::TRACKBALL_DECAY));
-				js->touchMomentumX *= decay;
-				js->touchMomentumY *= decay;
+				js->touchMomentumX[1] *= decay;
+				js->touchMomentumY[1] *= decay;
 				// Stop when momentum is negligible
-				if (fabsf(js->touchMomentumX) < 0.1f && fabsf(js->touchMomentumY) < 0.1f)
+				if (fabsf(js->touchMomentumX[1]) < 0.1f && fabsf(js->touchMomentumY[1]) < 0.1f)
 				{
-					js->touchMomentumX = 0.f;
-					js->touchMomentumY = 0.f;
-					js->touchActive = false;
+					js->touchMomentumX[1] = 0.f;
+					js->touchMomentumY[1] = 0.f;
+					js->touchActive[1] = false;
 				}
 				else
 				{
-					moveMouse(js->touchMomentumX, js->touchMomentumY);
+					moveMouse(js->touchMomentumX[1], js->touchMomentumY[1]);
 				}
 			}
 		}
@@ -368,6 +375,7 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		}
 		else if (mode == TouchpadMode::MOUSE)
 		{
+			if (!point0.isDown() && !point1.isDown()) { js->touchPipelines[0].reset(); js->touchPipelines[1].reset(); }
 			if (point0.isDown() || point1.isDown())
 			{
 				TOUCH_POINT *downPoint = point0.isDown() ? &point0 : &point1;

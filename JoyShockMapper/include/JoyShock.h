@@ -40,18 +40,21 @@ struct OneEuroFilter
 struct TouchMousePipeline
 {
 	float lastX = 0.f, lastY = 0.f;
-	void reset() { lastX = lastY = 0.f; }
+	bool initialized = false;
+	float momentumX = 0.f, momentumY = 0.f;
+	bool active = false;
+	void reset() { lastX = lastY = 0.f; initialized = false; momentumX = momentumY = 0.f; active = false; }
 	FloatXY process(float x, float y, float smoothing, float acceleration)
 	{
 		// Bounded prediction adds responsiveness without delayed interpolation or buffering.
 		float a = smoothing < 0.f ? 0.f : (smoothing > 1.f ? 1.f : smoothing);
-		float dx = (x - lastX) * a;
-		float dy = (y - lastY) * a;
+		float dx = initialized ? (x - lastX) * a : 0.f;
+		float dy = initialized ? (y - lastY) * a : 0.f;
 		dx = dx < -2.f ? -2.f : (dx > 2.f ? 2.f : dx);
 		dy = dy < -2.f ? -2.f : (dy > 2.f ? 2.f : dy);
 		float px = x + dx;
 		float py = y + dy;
-		lastX = x; lastY = y;
+		lastX = x; lastY = y; initialized = true;
 		float positiveAcceleration = acceleration > 0.f ? acceleration : 0.f;
 		float gain = 1.f + positiveAcceleration * sqrtf(px * px + py * py);
 		gain = gain > 4.f ? 4.f : gain;
@@ -157,10 +160,8 @@ public:
 	float gyroXVelocity = 0.f;
 	float gyroYVelocity = 0.f;
 
-	// Touchpad trackball momentum (for smooth mouse output after finger lift)
-	float touchMomentumX = 0.f;
-	float touchMomentumY = 0.f;
-	bool touchActive = false;
+	// Trackball state is owned by each pad's pipeline.
+
 	// Keep independent filter state for dual-pad controllers; a left-pad sample
 	// must not influence the next right-pad sample.
 	TouchMousePipeline touchPipelines[2];
