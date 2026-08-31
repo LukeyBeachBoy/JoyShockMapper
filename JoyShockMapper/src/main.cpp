@@ -253,7 +253,7 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 				FloatXY sens = js->getSetting<FloatXY>(SettingID::LEFT_TOUCHPAD_SENS);
 				float mx = point0.movX * sens.x();
 				float my = point0.movY * sens.y();
-				FloatXY shaped = js->touchPipeline.process(mx, my, js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
+				FloatXY shaped = js->touchPipelines[0].process(mx, my, js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
 				mx = shaped.x(); my = shaped.y();
 				// Accumulate momentum for trackball-style continuation
 				js->touchMomentumX = mx;
@@ -307,7 +307,7 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 				FloatXY sens = js->getSetting<FloatXY>(SettingID::RIGHT_TOUCHPAD_SENS);
 				float mx = point1.movX * sens.x();
 				float my = point1.movY * sens.y();
-				FloatXY shaped = js->touchPipeline.process(mx, my, js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
+				FloatXY shaped = js->touchPipelines[1].process(mx, my, js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
 				mx = shaped.x(); my = shaped.y();
 				// Accumulate momentum for trackball-style continuation
 				js->touchMomentumX = mx;
@@ -372,7 +372,7 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			{
 				TOUCH_POINT *downPoint = point0.isDown() ? &point0 : &point1;
 				FloatXY sens = js->getSetting<FloatXY>(SettingID::TOUCHPAD_SENS);
-				FloatXY shaped = js->touchPipeline.process(downPoint->movX * sens.x(), downPoint->movY * sens.y(), js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
+				FloatXY shaped = js->touchPipelines[0].process(downPoint->movX * sens.x(), downPoint->movY * sens.y(), js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
 				moveMouse(shaped.x(), shaped.y());
 			}
 		}

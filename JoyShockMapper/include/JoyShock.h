@@ -153,7 +153,9 @@ public:
 	float touchMomentumX = 0.f;
 	float touchMomentumY = 0.f;
 	bool touchActive = false;
-	TouchMousePipeline touchPipeline;
+	// Keep independent filter state for dual-pad controllers; a left-pad sample
+	// must not influence the next right-pad sample.
+	TouchMousePipeline touchPipelines[2];
 
 	std::deque<std::pair<std::chrono::steady_clock::time_point, float>> decelBrakeHistory;
 	float decelBrakeEngagement = 0.f;
