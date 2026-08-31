@@ -755,8 +755,12 @@ public:
 			// touches; SDL's authoritative down bit must win in that case.
 			if (threshold > 0.0f)
 			{
-				if (!state.t0Down && pressure0 >= threshold) state.t0Down = true;
-				if (!state.t1Down && pressure1 >= threshold) state.t1Down = true;
+				// The configured threshold gates every contact source: SDL's down bit
+				// and pressure-based promotion must agree before reporting a touch.
+				state.t0Down = state.t0Down || pressure0 >= threshold;
+				state.t1Down = state.t1Down || pressure1 >= threshold;
+				state.t0Down = state.t0Down && pressure0 >= threshold;
+				state.t1Down = state.t1Down && pressure1 >= threshold;
 			}
 		}
 		else
