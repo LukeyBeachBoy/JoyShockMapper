@@ -40,21 +40,34 @@ struct OneEuroFilter
 struct TouchMousePipeline
 {
 	float lastX = 0.f, lastY = 0.f;
+	float filteredX = 0.f, filteredY = 0.f;
 	bool initialized = false;
 	float momentumX = 0.f, momentumY = 0.f;
 	bool active = false;
-	void reset() { lastX = lastY = 0.f; initialized = false; momentumX = momentumY = 0.f; active = false; }
+	void reset() { lastX = lastY = filteredX = filteredY = 0.f; initialized = false; momentumX = momentumY = 0.f; active = false; }
 	FloatXY process(float x, float y, float smoothing, float acceleration)
 	{
-		// Bounded prediction adds responsiveness without delayed interpolation or buffering.
+		// Smoothing is an optional low-pass; prediction is a separate bounded
+		// extrapolation from the filtered movement, never from the origin.
 		float a = smoothing < 0.f ? 0.f : (smoothing > 1.f ? 1.f : smoothing);
-		float dx = initialized ? (x - lastX) * a : 0.f;
-		float dy = initialized ? (y - lastY) * a : 0.f;
-		dx = dx < -2.f ? -2.f : (dx > 2.f ? 2.f : dx);
-		dy = dy < -2.f ? -2.f : (dy > 2.f ? 2.f : dy);
-		float px = x + dx;
-		float py = y + dy;
-		lastX = x; lastY = y; initialized = true;
+		if (!initialized)
+		{
+			filteredX = x; filteredY = y; lastX = x; lastY = y; initialized = true;
+		}
+		else
+		{
+			float previousX = filteredX, previousY = filteredY;
+			filteredX = a * x + (1.f - a) * filteredX;
+			filteredY = a * y + (1.f - a) * filteredY;
+			float dx = (filteredX - previousX) * a;
+			float dy = (filteredY - previousY) * a;
+			dx = dx < -2.f ? -2.f : (dx > 2.f ? 2.f : dx);
+			dy = dy < -2.f ? -2.f : (dy > 2.f ? 2.f : dy);
+			filteredX += dx; filteredY += dy;
+			lastX = x; lastY = y;
+		}
+		float px = filteredX;
+		float py = filteredY;
 		float positiveAcceleration = acceleration > 0.f ? acceleration : 0.f;
 		float gain = 1.f + positiveAcceleration * sqrtf(px * px + py * py);
 		gain = gain > 4.f ? 4.f : gain;

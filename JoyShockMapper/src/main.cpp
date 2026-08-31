@@ -275,9 +275,7 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 				// Stop when momentum is negligible
 				if (fabsf(js->touchPipelines[0].momentumX) < 0.1f && fabsf(js->touchPipelines[0].momentumY) < 0.1f)
 				{
-					js->touchPipelines[0].momentumX = 0.f;
-					js->touchPipelines[0].momentumY = 0.f;
-					js->touchPipelines[0].active = false;
+					js->touchPipelines[0].reset();
 				}
 				else
 				{
@@ -317,27 +315,25 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 				FloatXY shaped = js->touchPipelines[1].process(mx, my, js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
 				mx = shaped.x(); my = shaped.y();
 				// Accumulate momentum for trackball-style continuation
-				js->touchMomentumX[1] = mx;
-				js->touchMomentumY[1] = my;
-				js->touchActive[1] = true;
+				js->touchPipelines[1].momentumX = mx;
+				js->touchPipelines[1].momentumY = my;
+				js->touchPipelines[1].active = true;
 				moveMouse(mx, my);
 			}
-			else if (js->touchActive[1])
+			else if (js->touchPipelines[1].active)
 			{
 				// Finger lifted — apply trackball decay
 				float decay = exp2f(-delta_time * js->getSetting(SettingID::TRACKBALL_DECAY));
-				js->touchMomentumX[1] *= decay;
-				js->touchMomentumY[1] *= decay;
+				js->touchPipelines[1].momentumX *= decay;
+				js->touchPipelines[1].momentumY *= decay;
 				// Stop when momentum is negligible
-				if (fabsf(js->touchMomentumX[1]) < 0.1f && fabsf(js->touchMomentumY[1]) < 0.1f)
+				if (fabsf(js->touchPipelines[1].momentumX) < 0.1f && fabsf(js->touchPipelines[1].momentumY) < 0.1f)
 				{
-					js->touchMomentumX[1] = 0.f;
-					js->touchMomentumY[1] = 0.f;
-					js->touchActive[1] = false;
+					js->touchPipelines[1].reset();
 				}
 				else
 				{
-					moveMouse(js->touchMomentumX[1], js->touchMomentumY[1]);
+					moveMouse(js->touchPipelines[1].momentumX, js->touchPipelines[1].momentumY);
 				}
 			}
 		}
