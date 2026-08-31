@@ -762,9 +762,14 @@ public:
 			}
 			else
 			{
-				// Zero/negative threshold: accept SDL down OR any non-zero pressure
-				state.t0Down = state.t0Down || pressure0 > 0.0001f;
-				state.t1Down = state.t1Down || pressure1 > 0.0001f;
+				// Zero/negative threshold: accept SDL down, any non-zero pressure,
+				// OR valid position coordinates as a touch signal.
+				// The Triton HID driver may report down=false, pressure=0 even when
+				// a finger is resting on the pad - but t0X/t0Y still hold valid coords.
+				bool pos0Valid = state.t0X >= 0.f && state.t0X <= 1.f && state.t0Y >= 0.f && state.t0Y <= 1.f;
+				bool pos1Valid = state.t1X >= 0.f && state.t1X <= 1.f && state.t1Y >= 0.f && state.t1Y <= 1.f;
+				state.t0Down = state.t0Down || pressure0 > 0.0001f || pos0Valid;
+				state.t1Down = state.t1Down || pressure1 > 0.0001f || pos1Valid;
 			}
 		}
 		else
