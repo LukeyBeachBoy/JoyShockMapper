@@ -24,6 +24,13 @@ struct TelemetryGyroState
 	float z = 0.0f;
 };
 
+struct TelemetryPadState
+{
+	float x = 0.0f;        // -1..1 normalized position
+	float y = 0.0f;
+	bool touched = false;  // finger on pad
+};
+
 struct TelemetryDeviceStatus
 {
 	uint64_t buttons = 0;
@@ -31,6 +38,8 @@ struct TelemetryDeviceStatus
 	TelemetryStickState rightStick;
 	TelemetryTriggerState triggers;
 	TelemetryGyroState gyro;
+	TelemetryPadState leftPad;
+	TelemetryPadState rightPad;
 };
 
 struct TelemetryDevice

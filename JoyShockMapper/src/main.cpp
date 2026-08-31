@@ -1279,6 +1279,18 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		status.gyro.x = imu.gyroX;
 		status.gyro.y = imu.gyroY;
 		status.gyro.z = imu.gyroZ;
+		// Touchpad position data (for Steam Controller 2026 and DualSense)
+		if (device->_controllerType == JS_TYPE_STEAM_CONTROLLER_2026)
+		{
+			TOUCH_STATE touch = jsl->GetTouchState(device->_handle);
+			// Steam Controller 2026: t0 = left pad, t1 = right pad
+			status.leftPad.x = touch.t0X * 2.f - 1.f;
+			status.leftPad.y = touch.t0Y * 2.f - 1.f;
+			status.leftPad.touched = touch.t0Down;
+			status.rightPad.x = touch.t1X * 2.f - 1.f;
+			status.rightPad.y = touch.t1Y * 2.f - 1.f;
+			status.rightPad.touched = touch.t1Down;
+		}
 		dev.status = status;
 #endif
 		telemetrySample.devices.push_back(dev);
