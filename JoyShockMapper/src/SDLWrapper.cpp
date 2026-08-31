@@ -747,11 +747,11 @@ public:
 			float pressure0 = 0.f, pressure1 = 0.f;
 			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 0, &state.t0Down, &state.t0X, &state.t0Y, &pressure0);
 			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 1, 0, &state.t1Down, &state.t1X, &state.t1Y, &pressure1);
-			// If SDL says not down but pressure > 0, treat as touched
-			if (!state.t0Down && pressure0 > 0.f)
-				state.t0Down = true;
-			if (!state.t1Down && pressure1 > 0.f)
-				state.t1Down = true;
+			state.t0Pressure = pressure0;
+			state.t1Pressure = pressure1;
+			float threshold = SettingsManager::get<float>(SettingID::TOUCHPAD_LIGHT_TOUCH_THRESHOLD)->value();
+			if (!state.t0Down && pressure0 >= threshold) state.t0Down = true;
+			if (!state.t1Down && pressure1 >= threshold) state.t1Down = true;
 		}
 		else
 		{

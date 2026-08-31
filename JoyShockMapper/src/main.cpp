@@ -253,6 +253,8 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 				FloatXY sens = js->getSetting<FloatXY>(SettingID::LEFT_TOUCHPAD_SENS);
 				float mx = point0.movX * sens.x();
 				float my = point0.movY * sens.y();
+				FloatXY shaped = js->touchPipeline.process(mx, my, js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
+				mx = shaped.x(); my = shaped.y();
 				// Accumulate momentum for trackball-style continuation
 				js->touchMomentumX = mx;
 				js->touchMomentumY = my;
@@ -305,6 +307,8 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 				FloatXY sens = js->getSetting<FloatXY>(SettingID::RIGHT_TOUCHPAD_SENS);
 				float mx = point1.movX * sens.x();
 				float my = point1.movY * sens.y();
+				FloatXY shaped = js->touchPipeline.process(mx, my, js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
+				mx = shaped.x(); my = shaped.y();
 				// Accumulate momentum for trackball-style continuation
 				js->touchMomentumX = mx;
 				js->touchMomentumY = my;
@@ -368,7 +372,8 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			{
 				TOUCH_POINT *downPoint = point0.isDown() ? &point0 : &point1;
 				FloatXY sens = js->getSetting<FloatXY>(SettingID::TOUCHPAD_SENS);
-				moveMouse(downPoint->movX * sens.x(), downPoint->movY * sens.y());
+				FloatXY shaped = js->touchPipeline.process(downPoint->movX * sens.x(), downPoint->movY * sens.y(), js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
+				moveMouse(shaped.x(), shaped.y());
 			}
 		}
 		else if (mode == TouchpadMode::PS_TOUCHPAD)
@@ -3391,6 +3396,19 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(touchpad_sens);
 	commandRegistry->add((new JSMAssignment<FloatXY>(*touchpad_sens))
 	                       ->setHelp("Changes the sensitivity of the touchpad when set as a mouse. Enter a second value for a different vertical sensitivity."));
+
+	auto touch_threshold = new JSMSetting<float>(SettingID::TOUCHPAD_LIGHT_TOUCH_THRESHOLD, 0.01f);
+	touch_threshold->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
+	SettingsManager::add(touch_threshold);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_LIGHT_TOUCH_THRESHOLD", *touch_threshold))->setHelp("Minimum normalized touch pressure for light touch contact."));
+	auto touch_smoothing = new JSMSetting<float>(SettingID::TOUCHPAD_SMOOTHING, 0.f);
+	touch_smoothing->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
+	SettingsManager::add(touch_smoothing);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_SMOOTHING", *touch_smoothing))->setHelp("Predictive touch smoothing, without input buffering (0 disables)."));
+	auto touch_accel = new JSMSetting<float>(SettingID::TOUCHPAD_ACCELERATION, 0.f);
+	touch_accel->setFilter(&filterPositive);
+	SettingsManager::add(touch_accel);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCELERATION", *touch_accel))->setHelp("Velocity-based touchpad mouse acceleration."));
 
 	auto hide_minimized = new JSMVariable<Switch>(Switch::OFF);
 	minimizeThread.reset(new PollingThread( "Minimize thread", [] (void *param)

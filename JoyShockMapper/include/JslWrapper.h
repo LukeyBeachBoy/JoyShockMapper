@@ -260,6 +260,8 @@ typedef struct TOUCH_STATE
 	float t0Y;
 	float t1X;
 	float t1Y;
+	float t0Pressure;
+	float t1Pressure;
 } TOUCH_STATE;
 
 #endif

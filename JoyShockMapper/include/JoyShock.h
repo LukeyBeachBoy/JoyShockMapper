@@ -37,6 +37,20 @@ struct OneEuroFilter
 	void reset() { initialized = false; xFilt.reset(); dxFilt.reset(); }
 };
 
+struct TouchMousePipeline
+{
+	float lastX = 0.f, lastY = 0.f;
+	void reset() { lastX = lastY = 0.f; }
+	FloatXY process(float x, float y, float smoothing, float acceleration)
+	{
+		float a = clamp(smoothing, 0.f, 1.f);
+		float px = x + (x - lastX) * a, py = y + (y - lastY) * a;
+		lastX = x; lastY = y;
+		float gain = 1.f + max(0.f, acceleration) * sqrtf(px * px + py * py);
+		return { px * gain, py * gain };
+	}
+};
+
 // An instance of this class represents a single controller device that JSM is listening to.
 class JoyShock
 {
@@ -139,6 +153,7 @@ public:
 	float touchMomentumX = 0.f;
 	float touchMomentumY = 0.f;
 	bool touchActive = false;
+	TouchMousePipeline touchPipeline;
 
 	std::deque<std::pair<std::chrono::steady_clock::time_point, float>> decelBrakeHistory;
 	float decelBrakeEngagement = 0.f;
