@@ -290,6 +290,18 @@ enum class SettingID
 	RIGHT_TOUCH_RING_MODE,
 	LEFT_TOUCH_STICK_AXIS,
 	RIGHT_TOUCH_STICK_AXIS,
+	// Touchpad mouse output shaping. The One Euro filter runs on pad POSITION and
+	// adapts its cutoff to finger speed: heavy smoothing while panning slowly,
+	// almost none during a flick.
+	TOUCHPAD_MIN_CUTOFF,
+	TOUCHPAD_SPEED_COEFF,
+	// Fraction of recent peak pressure below which a falling contact counts as a
+	// liftoff and stops producing mouse motion. 0 disables liftoff rejection.
+	TOUCHPAD_LIFTOFF_RATIO,
+	// Opt-in last-resort contact detection for drivers that report neither a down
+	// bit nor any pressure while a finger rests on the pad. Latches the pad down,
+	// so it is OFF by default.
+	TOUCHPAD_POSITION_FALLBACK,
 };
 
 // constexpr are like #define but with respect to typeness

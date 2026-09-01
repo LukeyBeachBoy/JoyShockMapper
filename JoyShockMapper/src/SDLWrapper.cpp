@@ -324,6 +324,10 @@ public:
 	uint8_t _micLight = 0;
 	SDL_Gamepad *_sdlController = nullptr;
 	TOUCH_STATE _prevTouchState;
+	// Decaying peak pressure per pad, used to detect a collapsing contact (liftoff)
+	// without gating on an absolute force threshold.
+	float _padPeakPressure[2] = { 0.f, 0.f };
+	float _padPrevPressure[2] = { 0.f, 0.f };
 };
 
 struct SdlInstance : public JslWrapper
@@ -749,28 +753,70 @@ public:
 			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 1, 0, &state.t1Down, &state.t1X, &state.t1Y, &pressure1);
 			state.t0Pressure = pressure0;
 			state.t1Pressure = pressure1;
-			float threshold = SettingsManager::get<float>(SettingID::TOUCHPAD_LIGHT_TOUCH_THRESHOLD)->value();
-			// Pressure-based touch detection: respect SDL's down flag for physical
-			// presses AND promote hover-level pressure as a contact signal.
-			// At zero threshold, both sources are accepted so mouse output
-			// from SDL down bit still works while light touches are detected.
-			if (threshold > 0.0f)
+			// Contact detection and motion gating are two different things, and
+			// conflating them is what forced users to press hard to move the cursor.
+			//
+			// Contact is capacitive: the Steam Controller pads register a finger at
+			// zero force, and SDL's down bit is authoritative for that. The pressure
+			// threshold may only ever PROMOTE a contact that SDL missed, never veto
+			// one it reported. (The previous code did `(A || B) && B`, which reduces
+			// to `B`, discarding the capacitive bit entirely.)
+			const float promoteThreshold = SettingsManager::get<float>(SettingID::TOUCHPAD_LIGHT_TOUCH_THRESHOLD)->value();
+			if (promoteThreshold > 0.0f)
 			{
-				// Configured threshold: pressure >= threshold is the exclusive touch signal
-				state.t0Down = pressure0 >= threshold;
-				state.t1Down = pressure1 >= threshold;
+				state.t0Down = state.t0Down || pressure0 >= promoteThreshold;
+				state.t1Down = state.t1Down || pressure1 >= promoteThreshold;
 			}
 			else
 			{
-				// Zero/negative threshold: accept SDL down, any non-zero pressure,
-				// OR valid position coordinates as a touch signal.
-				// The Triton HID driver may report down=false, pressure=0 even when
-				// a finger is resting on the pad - but t0X/t0Y still hold valid coords.
-				bool pos0Valid = state.t0X >= 0.f && state.t0X <= 1.f && state.t0Y >= 0.f && state.t0Y <= 1.f;
-				bool pos1Valid = state.t1X >= 0.f && state.t1X <= 1.f && state.t1Y >= 0.f && state.t1Y <= 1.f;
-				state.t0Down = state.t0Down || pressure0 > 0.0001f || pos0Valid;
-				state.t1Down = state.t1Down || pressure1 > 0.0001f || pos1Valid;
+				// A threshold of zero means "any pressure the pad reports at all counts".
+				// Still a promotion, never a veto: >= 0 would be true for an idle finger.
+				state.t0Down = state.t0Down || pressure0 > 0.f;
+				state.t1Down = state.t1Down || pressure1 > 0.f;
 			}
+
+			// Last-resort contact fallback, opt in. Some Steam Controller HID drivers
+			// have been observed reporting down=false AND pressure=0 while a finger is
+			// resting on the pad, leaving valid coordinates as the only evidence of
+			// contact. Treating coordinates as contact latches the pad permanently
+			// down (an idle finger still reports an in-range 0,0), so this cannot be
+			// the default -- it is here for hardware where nothing else works.
+			if (SettingsManager::getV<Switch>(SettingID::TOUCHPAD_POSITION_FALLBACK)->value() == Switch::ON)
+			{
+				state.t0Down = state.t0Down || (state.t0X >= 0.f && state.t0X <= 1.f && state.t0Y >= 0.f && state.t0Y <= 1.f);
+				state.t1Down = state.t1Down || (state.t1X >= 0.f && state.t1X <= 1.f && state.t1Y >= 0.f && state.t1Y <= 1.f);
+			}
+
+			// Liftoff rejection is separate and pressure-relative rather than
+			// absolute. Track a decaying peak per pad; when pressure is both falling
+			// and has dropped below a fraction of that peak, the finger is on its way
+			// off the pad and the remaining motion is an involuntary tail. Flagging it
+			// costs no latency, unlike a lookback buffer.
+			const float liftoffRatio = SettingsManager::get<float>(SettingID::TOUCHPAD_LIFTOFF_RATIO)->value();
+			auto *device = _controllerMap[deviceId];
+			const bool down[2] = { state.t0Down, state.t1Down };
+			const float pressure[2] = { pressure0, pressure1 };
+			bool lifting[2] = { false, false };
+			for (int pad = 0; pad < 2; ++pad)
+			{
+				if (!down[pad])
+				{
+					device->_padPeakPressure[pad] = 0.f;
+					device->_padPrevPressure[pad] = 0.f;
+					continue;
+				}
+				float &peak = device->_padPeakPressure[pad];
+				const float decayedPeak = peak * 0.98f;
+				peak = pressure[pad] > decayedPeak ? pressure[pad] : decayedPeak;
+				if (liftoffRatio > 0.f && peak > 0.f)
+				{
+					lifting[pad] = pressure[pad] < peak * liftoffRatio &&
+					  pressure[pad] < device->_padPrevPressure[pad];
+				}
+				device->_padPrevPressure[pad] = pressure[pad];
+			}
+			state.t0Lifting = lifting[0];
+			state.t1Lifting = lifting[1];
 		}
 		else
 		{
@@ -793,10 +839,19 @@ public:
 			{
 			case JS_TYPE_DS4:
 			case JS_TYPE_DS:
-			case JS_TYPE_STEAM_CONTROLLER_2026:
 				// Matching SDL resolution
 				sizeX = 1920;
 				sizeY = 920;
+				break;
+			case JS_TYPE_STEAM_CONTROLLER_2026:
+				// The 2026 pads are square (the front artwork measures 102.1 x 101.9
+				// units per pad). Reusing the DS4's 1920x920 made vertical gain 2.09x
+				// lower than horizontal, so a physical 45 degree swipe came out at
+				// roughly 64 degrees. X is left at 1920 so existing horizontal
+				// sensitivity values keep their feel; vertical is now correct, which
+				// means TOUCHPAD_SENS Y may need roughly halving from old configs.
+				sizeX = 1920;
+				sizeY = 1920;
 				break;
 			default:
 				sizeX = 0;

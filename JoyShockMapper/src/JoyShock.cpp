@@ -508,16 +508,21 @@ void JoyShock::disableGyroDecaySmoothing()
 	_gyroDecayInit = false;
 }
 
-float OneEuroFilter::filter(float x, float dt)
+float OneEuroFilter::filter(float x, float dt, float minCutoff, float beta)
 {
 	float dx = initialized ? (x - xPrev) / dt : 0.f;
 	xPrev = x;
 	initialized = true;
 	float edx = dxFilt.filter(dx, alpha(dCutoff, dt));
-	float minCutoff = SettingsManager::get<float>(SettingID::ONE_EURO_MIN_CUTOFF)->value();
-	float beta = SettingsManager::get<float>(SettingID::ONE_EURO_SPEED_COEFF)->value();
 	float cutoff = minCutoff + beta * std::abs(edx);
 	return xFilt.filter(x, alpha(cutoff, dt));
+}
+
+float OneEuroFilter::filter(float x, float dt)
+{
+	return filter(x, dt,
+	  SettingsManager::get<float>(SettingID::ONE_EURO_MIN_CUTOFF)->value(),
+	  SettingsManager::get<float>(SettingID::ONE_EURO_SPEED_COEFF)->value());
 }
 
 void JoyShock::applyOneEuroFilter(float rawX, float rawY, float deltaTime, float &outX, float &outY)
@@ -1567,7 +1572,7 @@ void JoyShock::processStick(float stickX, float stickY, Stick &stick, float mous
 	}
 }
 
-void JoyShock::handleTouchStickChange(TouchStick &ts, bool down, short movX, short movY, float delta_time)
+void JoyShock::handleTouchStickChange(TouchStick &ts, bool down, float movX, float movY, float delta_time)
 {
 	float stickX = down ? clamp<float>((ts._currentLocation.x() + movX) / getSetting(ts._stickRadius), -1.f, 1.f) : 0.f;
 	float stickY = down ? clamp<float>((ts._currentLocation.y() - movY) / getSetting(ts._stickRadius), -1.f, 1.f) : 0.f;
