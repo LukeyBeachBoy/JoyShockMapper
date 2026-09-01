@@ -142,23 +142,31 @@ static string sanitizeControllerInfoName(string name)
 struct TOUCH_POINT
 {
 	TOUCH_POINT() = default;
-	TOUCH_POINT(optional<FloatXY> newState, optional<FloatXY> prevState, FloatXY tpSize)
+	TOUCH_POINT(optional<FloatXY> newState, optional<FloatXY> prevState, FloatXY tpSize, bool isLifting = false)
 	{
+		lifting = isLifting;
 		if (newState)
 		{
 			posX = newState->x(); // Absolute position in percentage
 			posY = newState->y();
 			if (prevState)
 			{
-				movX = int16_t((newState->x() - prevState->x()) * tpSize.x()); // Relative movement in unit
-				movY = int16_t((newState->y() - prevState->y()) * tpSize.y());
+				// Deltas MUST stay floating point. The old int16_t cast discarded the
+				// fractional part every poll: at a 3ms tick a slow, steady swipe yields
+				// well under one pad unit per poll, which truncated to zero and then
+				// jumped whenever noise pushed a sample over 1.0. That was the source of
+				// the "pixel skipping" at low speeds, and no amount of downstream
+				// smoothing could recover it.
+				movX = (newState->x() - prevState->x()) * tpSize.x(); // Relative movement in unit
+				movY = (newState->y() - prevState->y()) * tpSize.y();
 			}
 		}
 	}
 	float posX = -1.f;
 	float posY = -1.f;
-	short movX = 0;
-	short movY = 0;
+	float movX = 0.f;
+	float movY = 0.f;
+	bool lifting = false;
 	inline bool isDown()
 	{
 		return posX >= 0.f && posX <= 1.f && posY >= 0.f && posY <= 1.f;
@@ -183,6 +191,61 @@ struct TOUCH_POINT
 //	}
 // }
 
+// Shared touchpad -> mouse path for a single physical pad.
+//
+// Order matters here: the One Euro filter runs on normalised pad POSITION, the
+// result is differentiated, and only then is it scaled into mouse units and
+// accelerated. Filtering deltas instead (as the old TouchMousePipeline::process
+// did) compounds quantisation and cannot preserve displacement.
+static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POINT &point,
+  int sourceIndex, FloatXY tpSize, FloatXY sens, float delta_time)
+{
+	TouchMousePipeline &pipe = js->touchPipelines[padIndex];
+
+	if (point.isDown())
+	{
+		// A fresh contact, or a handover to a different finger, restarts the filter so
+		// the position discontinuity is never differentiated into a cursor jump.
+		if (!pipe.active || pipe.sourceIndex != sourceIndex)
+		{
+			pipe.reset();
+			pipe.sourceIndex = sourceIndex;
+		}
+
+		FloatXY normalised = pipe.step(point.posX, point.posY, delta_time,
+		  js->getSetting(SettingID::TOUCHPAD_MIN_CUTOFF),
+		  js->getSetting(SettingID::TOUCHPAD_SPEED_COEFF));
+
+		FloatXY moved = TouchMousePipeline::accelerate(
+		  { normalised.x() * tpSize.x() * sens.x(), normalised.y() * tpSize.y() * sens.y() },
+		  js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
+
+		pipe.active = true;
+
+		// Liftoff: keep tracking position so the filter stays primed, but emit nothing
+		// and leave momentum untouched so the involuntary tail cannot be flung.
+		if (point.lifting)
+			return;
+
+		pipe.momentumX = moved.x();
+		pipe.momentumY = moved.y();
+		moveMouse(moved.x(), moved.y());
+	}
+	else if (pipe.active)
+	{
+		// Trackball continuation. delta_time is now measured seconds, so this decay
+		// finally behaves as intended -- it was previously fed the tick time in
+		// milliseconds, which killed momentum within a few polls.
+		float decay = exp2f(-delta_time * js->getSetting(SettingID::TRACKBALL_DECAY));
+		pipe.momentumX *= decay;
+		pipe.momentumY *= decay;
+		if (fabsf(pipe.momentumX) < 0.1f && fabsf(pipe.momentumY) < 0.1f)
+			pipe.reset();
+		else
+			moveMouse(pipe.momentumX, pipe.momentumY);
+	}
+}
+
 void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, float delta_time)
 {
 	shared_ptr<JoyShock> js = handle_to_joyshock[jcHandle];
@@ -193,11 +256,27 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 
 	lock_guard guard(js->_context->callback_lock);
 
+	// delta_time arrives as the NOMINAL TICK_TIME in milliseconds, not measured and
+	// not in seconds. Every consumer downstream (trackball decay, touch sticks, the
+	// One Euro filter) wants real elapsed seconds, exactly as joyShockPollCallback
+	// already computes for itself. Measure it here rather than trusting the tick.
+	auto touchTimeNow = chrono::steady_clock::now();
+	if (js->_touchTimeInitialized)
+	{
+		delta_time = float(chrono::duration_cast<chrono::microseconds>(touchTimeNow - js->_touchTimeNow).count()) / 1000000.0f;
+	}
+	else
+	{
+		delta_time = delta_time / 1000.f; // first frame: fall back to the nominal tick, converted to seconds
+		js->_touchTimeInitialized = true;
+	}
+	js->_touchTimeNow = touchTimeNow;
+
 	TOUCH_POINT point0(newState.t0Down ? make_optional<FloatXY>(newState.t0X, newState.t0Y) : nullopt,
-	  prevState.t0Down ? make_optional<FloatXY>(prevState.t0X, prevState.t0Y) : nullopt, tpSize);
+	  prevState.t0Down ? make_optional<FloatXY>(prevState.t0X, prevState.t0Y) : nullopt, tpSize, newState.t0Lifting);
 
 	TOUCH_POINT point1(newState.t1Down ? make_optional<FloatXY>(newState.t1X, newState.t1Y) : nullopt,
-	  prevState.t1Down ? make_optional<FloatXY>(prevState.t1X, prevState.t1Y) : nullopt, tpSize);
+	  prevState.t1Down ? make_optional<FloatXY>(prevState.t1X, prevState.t1Y) : nullopt, tpSize, newState.t1Lifting);
 
 	bool isSteam = js->_controllerType == JS_TYPE_STEAM_CONTROLLER_2026;
 	auto mode = js->getSetting<TouchpadMode>(SettingID::TOUCHPAD_MODE);
@@ -227,8 +306,9 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		auto leftMode = js->getSetting<TouchpadMode>(SettingID::LEFT_TOUCHPAD_MODE);
 		auto rightMode = js->getSetting<TouchpadMode>(SettingID::RIGHT_TOUCHPAD_MODE);
 
-		if (!point0.isDown()) js->touchPipelines[0].reset();
-		if (!point1.isDown()) js->touchPipelines[1].reset();
+		// NOTE: the pipelines are deliberately NOT reset here on finger-up. Resetting
+		// unconditionally wiped trackball momentum before it could ever be applied.
+		// processTouchMouse owns the lifecycle instead.
 
 		// Process left pad
 		if (leftMode == TouchpadMode::GRID_AND_STICK)
@@ -251,37 +331,8 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		}
 		else if (leftMode == TouchpadMode::MOUSE)
 		{
-			if (point0.isDown())
-			{
-				FloatXY sens = js->getSetting<FloatXY>(SettingID::LEFT_TOUCHPAD_SENS);
-				float mx = point0.movX * sens.x();
-				float my = point0.movY * sens.y();
-				if (!js->touchPipelines[0].active)
-					js->touchPipelines[0].reset();
-				FloatXY shaped = js->touchPipelines[0].process(mx, my, js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
-				mx = shaped.x(); my = shaped.y();
-				// Accumulate momentum for trackball-style continuation
-				js->touchPipelines[0].momentumX = mx;
-				js->touchPipelines[0].momentumY = my;
-				js->touchPipelines[0].active = true;
-				moveMouse(mx, my);
-			}
-			else if (js->touchPipelines[0].active)
-			{
-				// Finger lifted — apply trackball decay
-				float decay = exp2f(-delta_time * js->getSetting(SettingID::TRACKBALL_DECAY));
-				js->touchPipelines[0].momentumX *= decay;
-				js->touchPipelines[0].momentumY *= decay;
-				// Stop when momentum is negligible
-				if (fabsf(js->touchPipelines[0].momentumX) < 0.1f && fabsf(js->touchPipelines[0].momentumY) < 0.1f)
-				{
-					js->touchPipelines[0].reset();
-				}
-				else
-				{
-					moveMouse(js->touchPipelines[0].momentumX, js->touchPipelines[0].momentumY);
-				}
-			}
+			processTouchMouse(js, 0, point0, 0, tpSize,
+			  js->getSetting<FloatXY>(SettingID::LEFT_TOUCHPAD_SENS), delta_time);
 		}
 
 		// Process right pad
@@ -305,37 +356,8 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		}
 		else if (rightMode == TouchpadMode::MOUSE)
 		{
-			if (point1.isDown())
-			{
-				FloatXY sens = js->getSetting<FloatXY>(SettingID::RIGHT_TOUCHPAD_SENS);
-				float mx = point1.movX * sens.x();
-				float my = point1.movY * sens.y();
-				if (!js->touchPipelines[1].active)
-					js->touchPipelines[1].reset();
-				FloatXY shaped = js->touchPipelines[1].process(mx, my, js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
-				mx = shaped.x(); my = shaped.y();
-				// Accumulate momentum for trackball-style continuation
-				js->touchPipelines[1].momentumX = mx;
-				js->touchPipelines[1].momentumY = my;
-				js->touchPipelines[1].active = true;
-				moveMouse(mx, my);
-			}
-			else if (js->touchPipelines[1].active)
-			{
-				// Finger lifted — apply trackball decay
-				float decay = exp2f(-delta_time * js->getSetting(SettingID::TRACKBALL_DECAY));
-				js->touchPipelines[1].momentumX *= decay;
-				js->touchPipelines[1].momentumY *= decay;
-				// Stop when momentum is negligible
-				if (fabsf(js->touchPipelines[1].momentumX) < 0.1f && fabsf(js->touchPipelines[1].momentumY) < 0.1f)
-				{
-					js->touchPipelines[1].reset();
-				}
-				else
-				{
-					moveMouse(js->touchPipelines[1].momentumX, js->touchPipelines[1].momentumY);
-				}
-			}
+			processTouchMouse(js, 1, point1, 1, tpSize,
+			  js->getSetting<FloatXY>(SettingID::RIGHT_TOUCHPAD_SENS), delta_time);
 		}
 
 		// PS_TOUCHPAD not supported for dual-pad controllers
@@ -371,14 +393,13 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		}
 		else if (mode == TouchpadMode::MOUSE)
 		{
-			if (!point0.isDown() && !point1.isDown()) { js->touchPipelines[0].reset(); js->touchPipelines[1].reset(); }
-			if (point0.isDown() || point1.isDown())
-			{
-				TOUCH_POINT *downPoint = point0.isDown() ? &point0 : &point1;
-				FloatXY sens = js->getSetting<FloatXY>(SettingID::TOUCHPAD_SENS);
-				FloatXY shaped = js->touchPipelines[0].process(downPoint->movX * sens.x(), downPoint->movY * sens.y(), js->getSetting(SettingID::TOUCHPAD_SMOOTHING), js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
-				moveMouse(shaped.x(), shaped.y());
-			}
+			// One logical surface, either finger may drive it. The source index is
+			// passed through so that lifting one finger while the other stays down
+			// restarts the position filter instead of teleporting the cursor.
+			int sourceIndex = point0.isDown() ? 0 : 1;
+			TOUCH_POINT &downPoint = point0.isDown() ? point0 : point1;
+			processTouchMouse(js, 0, downPoint, sourceIndex, tpSize,
+			  js->getSetting<FloatXY>(SettingID::TOUCHPAD_SENS), delta_time);
 		}
 		else if (mode == TouchpadMode::PS_TOUCHPAD)
 		{
@@ -3408,7 +3429,25 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	auto touch_smoothing = new JSMSetting<float>(SettingID::TOUCHPAD_SMOOTHING, 0.f);
 	touch_smoothing->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
 	SettingsManager::add(touch_smoothing);
-	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_SMOOTHING", *touch_smoothing))->setHelp("Predictive touch smoothing, without input buffering (0 disables)."));
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_SMOOTHING", *touch_smoothing))->setHelp("Deprecated: superseded by TOUCHPAD_MIN_CUTOFF and TOUCHPAD_SPEED_COEFF. No longer affects mouse output."));
+
+	// One Euro filter on pad position. Lower cutoff means heavier smoothing at low
+	// finger speed; the speed coefficient raises the cutoff as you swipe faster, so
+	// flicks stay responsive while slow panning stays free of stepping.
+	auto touch_min_cutoff = new JSMSetting<float>(SettingID::TOUCHPAD_MIN_CUTOFF, 0.8f);
+	touch_min_cutoff->setFilter(&filterPositive);
+	SettingsManager::add(touch_min_cutoff);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_MIN_CUTOFF", *touch_min_cutoff))->setHelp("Touchpad One Euro minimum cutoff in Hz. Lower is smoother when panning slowly. 0 disables filtering."));
+
+	auto touch_speed_coeff = new JSMSetting<float>(SettingID::TOUCHPAD_SPEED_COEFF, 0.015f);
+	touch_speed_coeff->setFilter(&filterPositive);
+	SettingsManager::add(touch_speed_coeff);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_SPEED_COEFF", *touch_speed_coeff))->setHelp("Touchpad One Euro speed coefficient (beta). Higher reduces lag on fast flicks."));
+
+	auto touch_liftoff = new JSMSetting<float>(SettingID::TOUCHPAD_LIFTOFF_RATIO, 0.f);
+	touch_liftoff->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
+	SettingsManager::add(touch_liftoff);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_LIFTOFF_RATIO", *touch_liftoff))->setHelp("Suppress mouse motion once pressure falls below this fraction of its recent peak, to reject the tail of a swipe as the finger lifts. 0 disables."));
 	auto touch_accel = new JSMSetting<float>(SettingID::TOUCHPAD_ACCELERATION, 0.f);
 	touch_accel->setFilter(&filterPositive);
 	SettingsManager::add(touch_accel);

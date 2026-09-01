@@ -33,45 +33,83 @@ struct OneEuroFilter
 		float tau = 1.f / (6.2831853f * cutoff);
 		return 1.f / (1.f + tau / dt);
 	}
+	// Uses the global gyro ONE_EURO_* settings.
 	float filter(float x, float dt);
+	// Explicit parameters, so independent consumers (gyro, touchpads) can each run
+	// their own tuning. Position in normalised pad units needs a far lower cutoff
+	// than gyro in degrees/sec, so sharing one pair of settings does not work.
+	float filter(float x, float dt, float minCutoff, float beta);
 	void reset() { initialized = false; xFilt.reset(); dxFilt.reset(); }
 };
 
 struct TouchMousePipeline
 {
+	// The One Euro filter runs on absolute pad POSITION, never on per-poll deltas.
+	// Filtering deltas compounds sensor quantisation and cannot recover displacement
+	// that was already lost; filtering position and differentiating afterwards is
+	// both smoother and displacement-preserving.
+	OneEuroFilter posFilterX, posFilterY;
 	float lastX = 0.f, lastY = 0.f;
-	float filteredX = 0.f, filteredY = 0.f;
 	bool initialized = false;
+	// Which touch point currently feeds this pipeline. Position-space filtering has
+	// to restart when the source finger changes, otherwise handing over between two
+	// contacts teleports the cursor.
+	int sourceIndex = -1;
 	float momentumX = 0.f, momentumY = 0.f;
 	bool active = false;
-	void reset() { lastX = lastY = filteredX = filteredY = 0.f; initialized = false; momentumX = momentumY = 0.f; active = false; }
-	FloatXY process(float x, float y, float smoothing, float acceleration)
+
+	void reset()
 	{
-		// Smoothing is an optional low-pass; prediction is a separate bounded
-		// extrapolation from the filtered movement, never from the origin.
-		float a = smoothing < 0.f ? 0.f : (smoothing > 1.f ? 1.f : smoothing);
+		posFilterX.reset();
+		posFilterY.reset();
+		lastX = lastY = 0.f;
+		initialized = false;
+		sourceIndex = -1;
+		momentumX = momentumY = 0.f;
+		active = false;
+	}
+
+	// rawX / rawY: normalised pad position in [0, 1]. dt in SECONDS.
+	// Returns the normalised displacement since the previous call. The first call
+	// after a fresh contact returns zero, so touching down never jerks the cursor.
+	FloatXY step(float rawX, float rawY, float dt, float minCutoff, float beta)
+	{
+		if (dt <= 0.f || dt > 0.1f)
+			dt = 0.003f; // fall back to the nominal tick if the clock misbehaved
+
+		float fx = rawX;
+		float fy = rawY;
+		if (minCutoff > 0.f)
+		{
+			fx = posFilterX.filter(rawX, dt, minCutoff, beta);
+			fy = posFilterY.filter(rawY, dt, minCutoff, beta);
+		}
+
 		if (!initialized)
 		{
-			filteredX = x; filteredY = y; lastX = x; lastY = y; initialized = true;
+			lastX = fx;
+			lastY = fy;
+			initialized = true;
+			return { 0.f, 0.f };
 		}
-		else
-		{
-			float previousX = filteredX, previousY = filteredY;
-			filteredX = a * x + (1.f - a) * filteredX;
-			filteredY = a * y + (1.f - a) * filteredY;
-			float dx = (filteredX - previousX) * a;
-			float dy = (filteredY - previousY) * a;
-			dx = dx < -2.f ? -2.f : (dx > 2.f ? 2.f : dx);
-			dy = dy < -2.f ? -2.f : (dy > 2.f ? 2.f : dy);
-			filteredX += dx; filteredY += dy;
-			lastX = x; lastY = y;
-		}
-		float px = filteredX;
-		float py = filteredY;
-		float positiveAcceleration = acceleration > 0.f ? acceleration : 0.f;
-		float gain = 1.f + positiveAcceleration * sqrtf(px * px + py * py);
-		gain = gain > 4.f ? 4.f : gain;
-		return { px * gain, py * gain };
+
+		FloatXY delta{ fx - lastX, fy - lastY };
+		lastX = fx;
+		lastY = fy;
+		return delta;
+	}
+
+	// Applied AFTER the delta has been scaled into mouse units, so the speed term is
+	// measured in the same space the user tunes sensitivity in.
+	static FloatXY accelerate(FloatXY delta, float acceleration)
+	{
+		if (acceleration <= 0.f)
+			return delta;
+		float speed = sqrtf(delta.x() * delta.x() + delta.y() * delta.y());
+		float gain = 1.f + acceleration * speed;
+		if (gain > 4.f)
+			gain = 4.f;
+		return { delta.x() * gain, delta.y() * gain };
 	}
 };
 
@@ -86,7 +124,7 @@ public:
 	// These two large functions are defined further down
 	void processStick(float stickX, float stickY, Stick &stick, float mouseCalibrationFactor, float deltaTime, bool &anyStickInput, bool &lockMouse, float &camSpeedX, float &camSpeedY);
 
-	void handleTouchStickChange(TouchStick &ts, bool down, short movX, short movY, float delta_time);
+	void handleTouchStickChange(TouchStick &ts, bool down, float movX, float movY, float delta_time);
 
 	bool hasVirtualController();
 
@@ -136,6 +174,10 @@ public:
 	vector<DigitalButton> _gridButtons;
 	vector<TouchStick> _touchpads;
 	chrono::steady_clock::time_point _timeNow;
+	// Separate clock for the touch callback: it runs on the same poll iteration as
+	// joyShockPollCallback but must not consume that callback's timestamp.
+	chrono::steady_clock::time_point _touchTimeNow;
+	bool _touchTimeInitialized = false;
 	shared_ptr<MotionIf> _motion;
 	int _handle;
 	int _controllerType;

@@ -262,6 +262,12 @@ typedef struct TOUCH_STATE
 	float t1Y;
 	float t0Pressure;
 	float t1Pressure;
+	// True while contact is still registered but pressure is collapsing, i.e. the
+	// finger is being lifted. Motion during this window is the involuntary tail of
+	// a swipe and should not be forwarded to the mouse. Kept separate from tXDown
+	// so that position tracking continues uninterrupted through the release.
+	bool t0Lifting;
+	bool t1Lifting;
 } TOUCH_STATE;
 
 #endif
