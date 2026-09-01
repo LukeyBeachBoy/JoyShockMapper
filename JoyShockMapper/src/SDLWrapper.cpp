@@ -533,7 +533,7 @@ public:
 				}
 				if (g_touch_callback)
 				{
-					TOUCH_STATE touch = GetTouchState(iter->first, false);
+					TOUCH_STATE touch = readTouchState(iter->first, true);
 					g_touch_callback(iter->first, touch, iter->second->_prevTouchState, tick_time);
 					iter->second->_prevTouchState = touch;
 				}
@@ -729,7 +729,18 @@ public:
 		return MOTION_STATE();
 	}
 
+	// Public queries (telemetry, the GUI status readout) must not disturb the
+	// liftoff state machine: joyShockPollCallback reads the touch state once for
+	// telemetry before the poll loop reads it again for the touch callback, and
+	// advancing the decaying-peak tracker twice per poll would leave
+	// `pressure < prevPressure` permanently false, disabling liftoff rejection.
 	TOUCH_STATE GetTouchState(int deviceId, bool previous) override
+	{
+		return readTouchState(deviceId, false);
+	}
+
+	// advanceLiftoff: true only on the polling path, which owns the state machine.
+	TOUCH_STATE readTouchState(int deviceId, bool advanceLiftoff)
 	{
 		TOUCH_STATE state;
 		memset(&state, 0, sizeof(TOUCH_STATE));
@@ -797,7 +808,7 @@ public:
 			const bool down[2] = { state.t0Down, state.t1Down };
 			const float pressure[2] = { pressure0, pressure1 };
 			bool lifting[2] = { false, false };
-			for (int pad = 0; pad < 2; ++pad)
+			for (int pad = 0; advanceLiftoff && pad < 2; ++pad)
 			{
 				if (!down[pad])
 				{
