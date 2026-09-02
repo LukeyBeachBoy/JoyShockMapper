@@ -1374,9 +1374,11 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			status.leftPad.x = touch.t0X * 2.f - 1.f;
 			status.leftPad.y = touch.t0Y * 2.f - 1.f;
 			status.leftPad.touched = touch.t0Down;
+			status.leftPad.pressure = touch.t0Pressure;
 			status.rightPad.x = touch.t1X * 2.f - 1.f;
 			status.rightPad.y = touch.t1Y * 2.f - 1.f;
 			status.rightPad.touched = touch.t1Down;
+			status.rightPad.pressure = touch.t1Pressure;
 		}
 		dev.status = status;
 #endif

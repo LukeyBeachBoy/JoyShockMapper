@@ -29,6 +29,7 @@ struct TelemetryPadState
 	float x = 0.0f;        // -1..1 normalized position
 	float y = 0.0f;
 	bool touched = false;  // finger on pad
+	float pressure = 0.0f; // raw driver pressure (diagnostic for threshold tuning)
 };
 
 struct TelemetryDeviceStatus

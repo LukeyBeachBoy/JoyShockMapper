@@ -124,8 +124,8 @@ public:
 					    << ",\"rightStick\":{\"x\":" << status.rightStick.x << ",\"y\":" << status.rightStick.y << "}"
 					    << ",\"triggers\":{\"left\":" << status.triggers.left << ",\"right\":" << status.triggers.right << "}"
 					    << ",\"gyro\":{\"x\":" << status.gyro.x << ",\"y\":" << status.gyro.y << ",\"z\":" << status.gyro.z << "}"
-					    << ",\"leftPad\":{\"x\":" << status.leftPad.x << ",\"y\":" << status.leftPad.y << ",\"touched\":" << (status.leftPad.touched ? "true" : "false") << "}"
-					    << ",\"rightPad\":{\"x\":" << status.rightPad.x << ",\"y\":" << status.rightPad.y << ",\"touched\":" << (status.rightPad.touched ? "true" : "false") << "}"
+					    << ",\"leftPad\":{\"x\":" << status.leftPad.x << ",\"y\":" << status.leftPad.y << ",\"touched\":" << (status.leftPad.touched ? "true" : "false") << ",\"pressure\":" << status.leftPad.pressure << "}"
+					    << ",\"rightPad\":{\"x\":" << status.rightPad.x << ",\"y\":" << status.rightPad.y << ",\"touched\":" << (status.rightPad.touched ? "true" : "false") << ",\"pressure\":" << status.rightPad.pressure << "}"
 					    << "}";
 				}
 				oss << "}";
