@@ -324,6 +324,12 @@ public:
 	uint8_t _micLight = 0;
 	SDL_Gamepad *_sdlController = nullptr;
 	TOUCH_STATE _prevTouchState;
+	// Hysteresis state: a touch starts when pressure rises above the ON
+	// threshold and ends only when it falls below the OFF threshold. This
+	// keeps light strokes stable and makes the release pressure independent
+	// of the press pressure.
+	bool _touchHysteresis0 = false;
+	bool _touchHysteresis1 = false;
 };
 
 struct SdlInstance : public JslWrapper
@@ -749,19 +755,19 @@ public:
 			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 1, 0, &state.t1Down, &state.t1X, &state.t1Y, &pressure1);
 			state.t0Pressure = pressure0;
 			state.t1Pressure = pressure1;
-			float threshold = SettingsManager::get<float>(SettingID::TOUCHPAD_LIGHT_TOUCH_THRESHOLD)->value();
-			// A zero threshold disables pressure-based light-touch promotion.  Pressure
-			// is reported as zero for an inactive finger, so >= 0 creates phantom
-			// touches; SDL's authoritative down bit must win in that case.
-			if (threshold > 0.0f)
-			{
-				// The configured threshold gates every contact source: SDL's down bit
-				// and pressure-based promotion must agree before reporting a touch.
-				state.t0Down = state.t0Down || pressure0 >= threshold;
-				state.t1Down = state.t1Down || pressure1 >= threshold;
-				state.t0Down = state.t0Down && pressure0 >= threshold;
-				state.t1Down = state.t1Down && pressure1 >= threshold;
-			}
+			float onThreshold = SettingsManager::get<float>(SettingID::TOUCHPAD_TOUCH_ON_THRESHOLD)->value();
+			float offThreshold = SettingsManager::get<float>(SettingID::TOUCHPAD_TOUCH_OFF_THRESHOLD)->value();
+			// Off must never exceed on, or a touch could never start.
+			if (offThreshold > onThreshold)
+				offThreshold = onThreshold;
+			// Hysteresis: start a touch above the ON threshold, keep it until
+			// pressure drops below the OFF threshold. With ON == OFF this
+			// degenerates to a plain threshold. ON = 0 means any contact at
+			// all starts a touch (SDL's authoritative down bit also starts one).
+			_touchHysteresis0 = _touchHysteresis0 ? pressure0 >= offThreshold : (pressure0 >= onThreshold || state.t0Down);
+			_touchHysteresis1 = _touchHysteresis1 ? pressure1 >= offThreshold : (pressure1 >= onThreshold || state.t1Down);
+			state.t0Down = _touchHysteresis0;
+			state.t1Down = _touchHysteresis1;
 		}
 		else
 		{

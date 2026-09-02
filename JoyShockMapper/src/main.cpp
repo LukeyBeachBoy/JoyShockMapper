@@ -268,18 +268,26 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			}
 			else if (js->touchPipelines[0].active)
 			{
-				// Finger lifted — apply trackball decay
-				float decay = exp2f(-delta_time * js->getSetting(SettingID::TRACKBALL_DECAY));
-				js->touchPipelines[0].momentumX *= decay;
-				js->touchPipelines[0].momentumY *= decay;
-				// Stop when momentum is negligible
-				if (fabsf(js->touchPipelines[0].momentumX) < 0.1f && fabsf(js->touchPipelines[0].momentumY) < 0.1f)
+				// Finger lifted — glide with friction decay when trackball mode
+				// is enabled, otherwise stop immediately.
+				if (SettingsManager::getV<Switch>(SettingID::TOUCHPAD_TRACKBALL)->value() == Switch::ON)
 				{
-					js->touchPipelines[0].reset();
+					float decay = exp2f(-delta_time * js->getSetting(SettingID::TOUCHPAD_TRACKBALL_FRICTION));
+					js->touchPipelines[0].momentumX *= decay;
+					js->touchPipelines[0].momentumY *= decay;
+					// Stop when momentum is negligible
+					if (fabsf(js->touchPipelines[0].momentumX) < 0.1f && fabsf(js->touchPipelines[0].momentumY) < 0.1f)
+					{
+						js->touchPipelines[0].reset();
+					}
+					else
+					{
+						moveMouse(js->touchPipelines[0].momentumX, js->touchPipelines[0].momentumY);
+					}
 				}
 				else
 				{
-					moveMouse(js->touchPipelines[0].momentumX, js->touchPipelines[0].momentumY);
+					js->touchPipelines[0].reset();
 				}
 			}
 		}
@@ -322,18 +330,26 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			}
 			else if (js->touchPipelines[1].active)
 			{
-				// Finger lifted — apply trackball decay
-				float decay = exp2f(-delta_time * js->getSetting(SettingID::TRACKBALL_DECAY));
-				js->touchPipelines[1].momentumX *= decay;
-				js->touchPipelines[1].momentumY *= decay;
-				// Stop when momentum is negligible
-				if (fabsf(js->touchPipelines[1].momentumX) < 0.1f && fabsf(js->touchPipelines[1].momentumY) < 0.1f)
+				// Finger lifted — glide with friction decay when trackball mode
+				// is enabled, otherwise stop immediately.
+				if (SettingsManager::getV<Switch>(SettingID::TOUCHPAD_TRACKBALL)->value() == Switch::ON)
 				{
-					js->touchPipelines[1].reset();
+					float decay = exp2f(-delta_time * js->getSetting(SettingID::TOUCHPAD_TRACKBALL_FRICTION));
+					js->touchPipelines[1].momentumX *= decay;
+					js->touchPipelines[1].momentumY *= decay;
+					// Stop when momentum is negligible
+					if (fabsf(js->touchPipelines[1].momentumX) < 0.1f && fabsf(js->touchPipelines[1].momentumY) < 0.1f)
+					{
+						js->touchPipelines[1].reset();
+					}
+					else
+					{
+						moveMouse(js->touchPipelines[1].momentumX, js->touchPipelines[1].momentumY);
+					}
 				}
 				else
 				{
-					moveMouse(js->touchPipelines[1].momentumX, js->touchPipelines[1].momentumY);
+					js->touchPipelines[1].reset();
 				}
 			}
 		}
@@ -3405,6 +3421,27 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	touch_threshold->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
 	SettingsManager::add(touch_threshold);
 	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_LIGHT_TOUCH_THRESHOLD", *touch_threshold))->setHelp("Minimum normalized touch pressure for light touch contact."));
+
+	auto touch_on_threshold = new JSMSetting<float>(SettingID::TOUCHPAD_TOUCH_ON_THRESHOLD, 0.0f);
+	touch_on_threshold->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
+	SettingsManager::add(touch_on_threshold);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_TOUCH_ON_THRESHOLD", *touch_on_threshold))->setHelp("Normalized pressure required to START a touch (0 = any contact, default). Raise to ignore accidental grazes."));
+
+	auto touch_off_threshold = new JSMSetting<float>(SettingID::TOUCHPAD_TOUCH_OFF_THRESHOLD, 0.0f);
+	touch_off_threshold->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
+	SettingsManager::add(touch_off_threshold);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_TOUCH_OFF_THRESHOLD", *touch_off_threshold))->setHelp("Normalized pressure below which a touch ENDS. Keep this lower than TOUCH_ON_THRESHOLD for stable touches (hysteresis)."));
+
+	auto touch_trackball = new JSMSetting<Switch>(SettingID::TOUCHPAD_TRACKBALL, Switch::ON);
+	touch_trackball->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(touch_trackball);
+	commandRegistry->add((new JSMAssignment<Switch>("TOUCHPAD_TRACKBALL", *touch_trackball))->setHelp("When ON (default), lifting the finger keeps the cursor gliding with friction decay. When OFF, the cursor stops the moment the finger lifts."));
+
+	auto touch_trackball_friction = new JSMSetting<float>(SettingID::TOUCHPAD_TRACKBALL_FRICTION, 1.0f);
+	touch_trackball_friction->setFilter(&filterPositive);
+	SettingsManager::add(touch_trackball_friction);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_TRACKBALL_FRICTION", *touch_trackball_friction))->setHelp("Trackball friction for the touchpads: higher values stop the glide sooner (1 halves speed every second, 2 every half second, 0.5 every 2 seconds). Only used when TOUCHPAD_TRACKBALL is ON."));
+
 	auto touch_smoothing = new JSMSetting<float>(SettingID::TOUCHPAD_SMOOTHING, 0.f);
 	touch_smoothing->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
 	SettingsManager::add(touch_smoothing);
