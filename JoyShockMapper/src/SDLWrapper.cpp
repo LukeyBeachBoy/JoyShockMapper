@@ -764,10 +764,11 @@ public:
 			// pressure drops below the OFF threshold. With ON == OFF this
 			// degenerates to a plain threshold. ON = 0 means any contact at
 			// all starts a touch (SDL's authoritative down bit also starts one).
-			_touchHysteresis0 = _touchHysteresis0 ? pressure0 >= offThreshold : (pressure0 >= onThreshold || state.t0Down);
-			_touchHysteresis1 = _touchHysteresis1 ? pressure1 >= offThreshold : (pressure1 >= onThreshold || state.t1Down);
-			state.t0Down = _touchHysteresis0;
-			state.t1Down = _touchHysteresis1;
+			auto *dev = _controllerMap[deviceId];
+			dev->_touchHysteresis0 = dev->_touchHysteresis0 ? pressure0 >= offThreshold : (pressure0 >= onThreshold || state.t0Down);
+			dev->_touchHysteresis1 = dev->_touchHysteresis1 ? pressure1 >= offThreshold : (pressure1 >= onThreshold || state.t1Down);
+			state.t0Down = dev->_touchHysteresis0;
+			state.t1Down = dev->_touchHysteresis1;
 		}
 		else
 		{
