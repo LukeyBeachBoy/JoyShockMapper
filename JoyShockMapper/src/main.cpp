@@ -3442,6 +3442,30 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(touch_trackball_friction);
 	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_TRACKBALL_FRICTION", *touch_trackball_friction))->setHelp("Trackball friction for the touchpads: higher values stop the glide sooner (1 halves speed every second, 2 every half second, 0.5 every 2 seconds). Only used when TOUCHPAD_TRACKBALL is ON."));
 
+	// Grip-sense debounce: the Triton grip sensors are binary contact bits with
+	// no analog pressure, so the hysteresis equivalent is per-grip hold time.
+	// A grip must be contacted for ON_MS before it reads as held, and released
+	// for OFF_MS before it reads as let go — this filters hand-adjustment flicker.
+	auto left_grip_on = new JSMSetting<float>(SettingID::LEFT_GRIP_ON_MS, 0.f);
+	left_grip_on->setFilter([](auto, auto next) { return next < 0.f ? 0.f : (next > 500.f ? 500.f : floorf(next)); });
+	SettingsManager::add(left_grip_on);
+	commandRegistry->add((new JSMAssignment<float>("LEFT_GRIP_ON_MS", *left_grip_on))->setHelp("Milliseconds the left grip must be touched before it counts as held (0-500, default 0). Debounces accidental grip flickers."));
+
+	auto left_grip_off = new JSMSetting<float>(SettingID::LEFT_GRIP_OFF_MS, 0.f);
+	left_grip_off->setFilter([](auto, auto next) { return next < 0.f ? 0.f : (next > 500.f ? 500.f : floorf(next)); });
+	SettingsManager::add(left_grip_off);
+	commandRegistry->add((new JSMAssignment<float>("LEFT_GRIP_OFF_MS", *left_grip_off))->setHelp("Milliseconds the left grip must be released before it counts as let go (0-500, default 0). Raise this if your grip bindings trigger while adjusting your hand."));
+
+	auto right_grip_on = new JSMSetting<float>(SettingID::RIGHT_GRIP_ON_MS, 0.f);
+	right_grip_on->setFilter([](auto, auto next) { return next < 0.f ? 0.f : (next > 500.f ? 500.f : floorf(next)); });
+	SettingsManager::add(right_grip_on);
+	commandRegistry->add((new JSMAssignment<float>("RIGHT_GRIP_ON_MS", *right_grip_on))->setHelp("Milliseconds the right grip must be touched before it counts as held (0-500, default 0). Debounces accidental grip flickers."));
+
+	auto right_grip_off = new JSMSetting<float>(SettingID::RIGHT_GRIP_OFF_MS, 0.f);
+	right_grip_off->setFilter([](auto, auto next) { return next < 0.f ? 0.f : (next > 500.f ? 500.f : floorf(next)); });
+	SettingsManager::add(right_grip_off);
+	commandRegistry->add((new JSMAssignment<float>("RIGHT_GRIP_OFF_MS", *right_grip_off))->setHelp("Milliseconds the right grip must be released before it counts as let go (0-500, default 0). Raise this if your grip bindings trigger while adjusting your hand."));
+
 	auto touch_smoothing = new JSMSetting<float>(SettingID::TOUCHPAD_SMOOTHING, 0.f);
 	touch_smoothing->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
 	SettingsManager::add(touch_smoothing);

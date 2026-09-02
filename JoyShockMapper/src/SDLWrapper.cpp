@@ -330,6 +330,11 @@ public:
 	// of the press pressure.
 	bool _touchHysteresis0 = false;
 	bool _touchHysteresis1 = false;
+	// Grip debounce state: timestamps of the last raw signal change per grip.
+	// The debounced value only flips once the raw signal has been stable for
+	// the configured ON/OFF duration.
+	Uint64 _gripLastChange[2] = { 0, 0 };
+	bool _gripDebounced[2] = { false, false };
 };
 
 struct SdlInstance : public JslWrapper
@@ -866,9 +871,39 @@ public:
 			buttons |= SDL_GetJoystickButton(joy, 16) ? 1ULL << JSOFFSET_MISC2 : 0;
 			buttons |= SDL_GetJoystickButton(joy, 17) ? 1ULL << JSOFFSET_MISC3 : 0;
 			// Stick capacitive touch (LTOUCH/RTOUCH already exposed via cap-sense)
-			// Left grip (raw 20 / SDL_MISC6), Right grip (raw 21 / SDL_MISC5)
-			buttons |= SDL_GetJoystickButton(joy, 20) ? 1ULL << JSOFFSET_MISC6 : 0;
-			buttons |= SDL_GetJoystickButton(joy, 21) ? 1ULL << JSOFFSET_MISC5 : 0;
+			// Grips (raw 20 = left, 21 = right) with per-grip debounce: a binary
+			// contact signal has no pressure range, so hysteresis is expressed
+			// as hold-to-confirm / hold-to-release durations instead.
+			auto *dev = _controllerMap[deviceId];
+			const Uint64 nowMs = SDL_GetTicks();
+			const struct { int raw; SettingID onMs; SettingID offMs; int slot; } grips[] = {
+				{ 20, SettingID::LEFT_GRIP_ON_MS, SettingID::LEFT_GRIP_OFF_MS, 0 },
+				{ 21, SettingID::RIGHT_GRIP_ON_MS, SettingID::RIGHT_GRIP_OFF_MS, 1 },
+			};
+			for (const auto &grip : grips)
+			{
+				const bool raw = SDL_GetJoystickButton(joy, grip.raw) != 0;
+				const Uint64 onMs = Uint64(SettingsManager::get<float>(grip.onMs)->value());
+				const Uint64 offMs = Uint64(SettingsManager::get<float>(grip.offMs)->value());
+				if (raw != dev->_gripDebounced[grip.slot])
+				{
+					const bool confirmed = raw ? onMs == 0 : offMs == 0;
+					const Uint64 required = raw ? onMs : offMs;
+					if (dev->_gripLastChange[grip.slot] == 0)
+						dev->_gripLastChange[grip.slot] = nowMs;
+					if (confirmed || nowMs - dev->_gripLastChange[grip.slot] >= required)
+					{
+						dev->_gripDebounced[grip.slot] = raw;
+						dev->_gripLastChange[grip.slot] = nowMs;
+					}
+				}
+				else
+				{
+					dev->_gripLastChange[grip.slot] = 0;
+				}
+				const int offset = grip.slot == 0 ? JSOFFSET_MISC6 : JSOFFSET_MISC5;
+				buttons |= dev->_gripDebounced[grip.slot] ? 1ULL << offset : 0;
+			}
 		}
 		break;
 		case JS_TYPE_DS:
