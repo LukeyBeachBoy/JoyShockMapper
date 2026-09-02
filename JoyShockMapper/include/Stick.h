@@ -49,11 +49,15 @@ struct Stick
 		ButtonID leftId,
 		ButtonID rightId,
 		ButtonID upId,
-		ButtonID downId)
+		ButtonID downId,
+		SettingID stickRadius = SettingID::ZERO,
+		SettingID stickAxis = SettingID::ZERO)
 		: _innerDeadzone(innerDeadzone)
 		, _outerDeadzone(outerDeadzone)
 		, _ringMode(ringMode)
 		, _stickMode(stickMode)
+		, _stickRadius(stickRadius)
+		, _stickAxis(stickAxis)
 		, _ringId(ringId)
 		, _leftId(leftId)
 		, _rightId(rightId)
@@ -65,6 +69,8 @@ struct Stick
 	SettingID _outerDeadzone;
 	SettingID _ringMode;
 	SettingID _stickMode;
+	SettingID _stickRadius;
+	SettingID _stickAxis;
 	ButtonID _ringId;
 	ButtonID _leftId;
 	ButtonID _rightId;
@@ -109,7 +115,12 @@ struct TouchStick : public Stick
 	ScrollAxis verticalScroll;
 	map<ButtonID, DigitalButton> buttons; // Each touchstick gets it's own digital _buttons. Is that smart?
 
-	TouchStick(int index, shared_ptr<DigitalButton::Context> common, int handle);
+	TouchStick(int index, shared_ptr<DigitalButton::Context> common, int handle,
+              SettingID innerDeadzone = SettingID::TOUCH_DEADZONE_INNER,
+              SettingID ringMode = SettingID::TOUCH_RING_MODE,
+              SettingID stickMode = SettingID::TOUCH_STICK_MODE,
+              SettingID stickRadius = SettingID::TOUCH_STICK_RADIUS,
+              SettingID stickAxis = SettingID::TOUCH_STICK_AXIS);
 
 	inline bool wasDown() const
 	{

@@ -158,6 +158,15 @@ struct ControllerDevice
 							_ctrlr_type = JS_TYPE_SWITCH2_PRO_CONTROLLER;
 						}
 						break;
+					case JS_VENDOR_VALVE:
+						if (_productId == JS_PRODUCT_VALVE_STEAM_2026_USB ||
+							_productId == JS_PRODUCT_VALVE_STEAM_2026_BLE ||
+							_productId == JS_PRODUCT_VALVE_PROTEUS_DONGLE ||
+							_productId == JS_PRODUCT_VALVE_NEREID_DONGLE)
+						{
+							_ctrlr_type = JS_TYPE_STEAM_CONTROLLER_2026;
+						}
+						break;
 					}
 
 					if (_ctrlr_type != JS_TYPE_UNKNOWN)
@@ -315,6 +324,17 @@ public:
 	uint8_t _micLight = 0;
 	SDL_Gamepad *_sdlController = nullptr;
 	TOUCH_STATE _prevTouchState;
+	// Hysteresis state: a touch starts when pressure rises above the ON
+	// threshold and ends only when it falls below the OFF threshold. This
+	// keeps light strokes stable and makes the release pressure independent
+	// of the press pressure.
+	bool _touchHysteresis0 = false;
+	bool _touchHysteresis1 = false;
+	// Grip debounce state: timestamps of the last raw signal change per grip.
+	// The debounced value only flips once the raw signal has been stable for
+	// the configured ON/OFF duration.
+	Uint64 _gripLastChange[2] = { 0, 0 };
+	bool _gripDebounced[2] = { false, false };
 };
 
 struct SdlInstance : public JslWrapper
@@ -728,10 +748,40 @@ public:
 			return state;
 		}
 
-		if (!SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 0, &state.t0Down, &state.t0X, &state.t0Y, nullptr) || 
-			!SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 1, &state.t1Down, &state.t1X, &state.t1Y, nullptr))
+		bool isSteam = _controllerMap[deviceId]->_ctrlr_type == JS_TYPE_STEAM_CONTROLLER_2026;
+		// Steam Controller 2026: two single-finger physical pads
+		// DS4/DualSense: one pad with two fingers
+		if (isSteam && SDL_GetNumGamepadTouchpads(_controllerMap[deviceId]->_sdlController) >= 2)
 		{
-			CERR << "Cannot get finger state: " << SDL_GetError() << '\n';
+			// Left pad = touchpad index 0, Right pad = touchpad index 1
+			// Query pressure to detect light touches where SDL may not set down=true
+			float pressure0 = 0.f, pressure1 = 0.f;
+			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 0, &state.t0Down, &state.t0X, &state.t0Y, &pressure0);
+			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 1, 0, &state.t1Down, &state.t1X, &state.t1Y, &pressure1);
+			state.t0Pressure = pressure0;
+			state.t1Pressure = pressure1;
+			float onThreshold = SettingsManager::get<float>(SettingID::TOUCHPAD_TOUCH_ON_THRESHOLD)->value();
+			float offThreshold = SettingsManager::get<float>(SettingID::TOUCHPAD_TOUCH_OFF_THRESHOLD)->value();
+			// Off must never exceed on, or a touch could never start.
+			if (offThreshold > onThreshold)
+				offThreshold = onThreshold;
+			// Hysteresis: start a touch above the ON threshold, keep it until
+			// pressure drops below the OFF threshold. With ON == OFF this
+			// degenerates to a plain threshold. ON = 0 means any contact at
+			// all starts a touch (SDL's authoritative down bit also starts one).
+			auto *dev = _controllerMap[deviceId];
+			dev->_touchHysteresis0 = dev->_touchHysteresis0 ? pressure0 >= offThreshold : (pressure0 >= onThreshold || state.t0Down);
+			dev->_touchHysteresis1 = dev->_touchHysteresis1 ? pressure1 >= offThreshold : (pressure1 >= onThreshold || state.t1Down);
+			state.t0Down = dev->_touchHysteresis0;
+			state.t1Down = dev->_touchHysteresis1;
+		}
+		else
+		{
+			if (!SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 0, &state.t0Down, &state.t0X, &state.t0Y, nullptr) || 
+				!SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 1, &state.t1Down, &state.t1X, &state.t1Y, nullptr))
+			{
+				CERR << "Cannot get finger state: " << SDL_GetError() << '\n';
+			}
 		}
 		return state;
 	}
@@ -746,6 +796,7 @@ public:
 			{
 			case JS_TYPE_DS4:
 			case JS_TYPE_DS:
+			case JS_TYPE_STEAM_CONTROLLER_2026:
 				// Matching SDL resolution
 				sizeX = 1920;
 				sizeY = 920;
@@ -806,6 +857,55 @@ public:
 			buttons |= SDL_GetGamepadButton(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_BUTTON_LEFT_PADDLE1) ? 1ULL << JSOFFSET_SL : 0;  // GL back button
 			buttons |= SDL_GetGamepadButton(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_BUTTON_MISC2) ? 1ULL << JSOFFSET_MISC1 : 0;      // C button
 			break;
+		case JS_TYPE_STEAM_CONTROLLER_2026:
+		{
+			SDL_Joystick *joy = SDL_GetGamepadJoystick(_controllerMap[deviceId]->_sdlController);
+			// QAM button (raw index 11)
+			buttons |= SDL_GetJoystickButton(joy, 11) ? 1ULL << JSOFFSET_MISC1 : 0;
+			// Four paddles (raw indices 12-15)
+			buttons |= SDL_GetJoystickButton(joy, 12) ? 1ULL << JSOFFSET_SR : 0;
+			buttons |= SDL_GetJoystickButton(joy, 13) ? 1ULL << JSOFFSET_SL : 0;
+			buttons |= SDL_GetJoystickButton(joy, 14) ? 1ULL << JSOFFSET_FNR : 0;
+			buttons |= SDL_GetJoystickButton(joy, 15) ? 1ULL << JSOFFSET_FNL : 0;
+			// Right pad click (raw index 16), Left pad click (raw index 17)
+			buttons |= SDL_GetJoystickButton(joy, 16) ? 1ULL << JSOFFSET_MISC2 : 0;
+			buttons |= SDL_GetJoystickButton(joy, 17) ? 1ULL << JSOFFSET_MISC3 : 0;
+			// Stick capacitive touch (LTOUCH/RTOUCH already exposed via cap-sense)
+			// Grips (raw 20 = left, 21 = right) with per-grip debounce: a binary
+			// contact signal has no pressure range, so hysteresis is expressed
+			// as hold-to-confirm / hold-to-release durations instead.
+			auto *dev = _controllerMap[deviceId];
+			const Uint64 nowMs = SDL_GetTicks();
+			const struct { int raw; SettingID onMs; SettingID offMs; int slot; } grips[] = {
+				{ 20, SettingID::LEFT_GRIP_ON_MS, SettingID::LEFT_GRIP_OFF_MS, 0 },
+				{ 21, SettingID::RIGHT_GRIP_ON_MS, SettingID::RIGHT_GRIP_OFF_MS, 1 },
+			};
+			for (const auto &grip : grips)
+			{
+				const bool raw = SDL_GetJoystickButton(joy, grip.raw) != 0;
+				const Uint64 onMs = Uint64(SettingsManager::get<float>(grip.onMs)->value());
+				const Uint64 offMs = Uint64(SettingsManager::get<float>(grip.offMs)->value());
+				if (raw != dev->_gripDebounced[grip.slot])
+				{
+					const bool confirmed = raw ? onMs == 0 : offMs == 0;
+					const Uint64 required = raw ? onMs : offMs;
+					if (dev->_gripLastChange[grip.slot] == 0)
+						dev->_gripLastChange[grip.slot] = nowMs;
+					if (confirmed || nowMs - dev->_gripLastChange[grip.slot] >= required)
+					{
+						dev->_gripDebounced[grip.slot] = raw;
+						dev->_gripLastChange[grip.slot] = nowMs;
+					}
+				}
+				else
+				{
+					dev->_gripLastChange[grip.slot] = 0;
+				}
+				const int offset = grip.slot == 0 ? JSOFFSET_MISC6 : JSOFFSET_MISC5;
+				buttons |= dev->_gripDebounced[grip.slot] ? 1ULL << offset : 0;
+			}
+		}
+		break;
 		case JS_TYPE_DS:
 			buttons |= SDL_GetGamepadButton(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_BUTTON_MISC1) ? 1ULL << JSOFFSET_MIC : 0;
 			buttons |= SDL_GetGamepadButton(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_BUTTON_TOUCHPAD) ? 1ULL << JSOFFSET_CAPTURE : 0;

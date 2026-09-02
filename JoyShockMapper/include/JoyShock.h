@@ -37,6 +37,44 @@ struct OneEuroFilter
 	void reset() { initialized = false; xFilt.reset(); dxFilt.reset(); }
 };
 
+struct TouchMousePipeline
+{
+	float lastX = 0.f, lastY = 0.f;
+	float filteredX = 0.f, filteredY = 0.f;
+	bool initialized = false;
+	float momentumX = 0.f, momentumY = 0.f;
+	bool active = false;
+	void reset() { lastX = lastY = filteredX = filteredY = 0.f; initialized = false; momentumX = momentumY = 0.f; active = false; }
+	FloatXY process(float x, float y, float smoothing, float acceleration)
+	{
+		// Smoothing is an optional low-pass; prediction is a separate bounded
+		// extrapolation from the filtered movement, never from the origin.
+		float a = smoothing < 0.f ? 0.f : (smoothing > 1.f ? 1.f : smoothing);
+		if (!initialized)
+		{
+			filteredX = x; filteredY = y; lastX = x; lastY = y; initialized = true;
+		}
+		else
+		{
+			float previousX = filteredX, previousY = filteredY;
+			filteredX = a * x + (1.f - a) * filteredX;
+			filteredY = a * y + (1.f - a) * filteredY;
+			float dx = (filteredX - previousX) * a;
+			float dy = (filteredY - previousY) * a;
+			dx = dx < -2.f ? -2.f : (dx > 2.f ? 2.f : dx);
+			dy = dy < -2.f ? -2.f : (dy > 2.f ? 2.f : dy);
+			filteredX += dx; filteredY += dy;
+			lastX = x; lastY = y;
+		}
+		float px = filteredX;
+		float py = filteredY;
+		float positiveAcceleration = acceleration > 0.f ? acceleration : 0.f;
+		float gain = 1.f + positiveAcceleration * sqrtf(px * px + py * py);
+		gain = gain > 4.f ? 4.f : gain;
+		return { px * gain, py * gain };
+	}
+};
+
 // An instance of this class represents a single controller device that JSM is listening to.
 class JoyShock
 {
@@ -134,6 +172,12 @@ public:
 
 	float gyroXVelocity = 0.f;
 	float gyroYVelocity = 0.f;
+
+	// Trackball state is owned by each pad's pipeline.
+
+	// Keep independent filter state for dual-pad controllers; a left-pad sample
+	// must not influence the next right-pad sample.
+	TouchMousePipeline touchPipelines[2];
 
 	std::deque<std::pair<std::chrono::steady_clock::time_point, float>> decelBrakeHistory;
 	float decelBrakeEngagement = 0.f;

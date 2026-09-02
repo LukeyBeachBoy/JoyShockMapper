@@ -71,6 +71,7 @@ inline bool operator!=(const AdaptiveTriggerSetting &lhs, const AdaptiveTriggerS
 #define JS_TYPE_FLYDIGI_VADER4_PRO 21
 #define JS_TYPE_FLYDIGI_VADER5_PRO 22
 #define JS_TYPE_SWITCH2_PRO_CONTROLLER 23
+#define JS_TYPE_STEAM_CONTROLLER_2026 24
 
 #define JS_SPLIT_TYPE_LEFT 1
 #define JS_SPLIT_TYPE_RIGHT 2
@@ -87,6 +88,7 @@ inline bool operator!=(const AdaptiveTriggerSetting &lhs, const AdaptiveTriggerS
 #define JS_VENDOR_NINTENDO 0x057e
 #define JS_VENDOR_PDP 0x0e6f
 #define JS_VENDOR_POWERA 0x24c6
+#define JS_VENDOR_VALVE 0x28DE
 
 // USB PID values
 #define JS_PRODUCT_UNKNOWN 0
@@ -104,6 +106,10 @@ inline bool operator!=(const AdaptiveTriggerSetting &lhs, const AdaptiveTriggerS
 #define JS_PRODUCT_GAMESIR_GAMEPAD_G7_PRO_8K 0x10B8
 #define JS_PRODUCT_HORI_STEAM_CONTROLLER 0x01ab
 #define JS_PRODUCT_HORI_STEAM_CONTROLLER_BT 0x0196
+#define JS_PRODUCT_VALVE_STEAM_2026_USB 0x1302
+#define JS_PRODUCT_VALVE_STEAM_2026_BLE 0x1303
+#define JS_PRODUCT_VALVE_PROTEUS_DONGLE 0x1304
+#define JS_PRODUCT_VALVE_NEREID_DONGLE 0x1305
 #define JS_PRODUCT_NINTENDO_SWITCH2_PRO 0x2069
 #define JS_PRODUCT_XBOX_ONE_ELITE_SERIES_1 0x02e3
 #define JS_PRODUCT_XBOX_ONE_ELITE_SERIES_2 0x0b00
@@ -254,6 +260,8 @@ typedef struct TOUCH_STATE
 	float t0Y;
 	float t1X;
 	float t1Y;
+	float t0Pressure;
+	float t1Pressure;
 } TOUCH_STATE;
 
 #endif
