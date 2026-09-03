@@ -302,6 +302,16 @@ enum class SettingID
 	// bit nor any pressure while a finger rests on the pad. Latches the pad down,
 	// so it is OFF by default.
 	TOUCHPAD_POSITION_FALLBACK,
+	// Post-liftoff mouse coast, separate from the legacy TRACKBALL_DECAY (which is
+	// shared with an unrelated stick-based trackball feature and must not change
+	// behaviour for it). 0 disables coasting entirely: the cursor stops the instant
+	// contact ends, matching Steam Input's Mouse touch style. This is the default.
+	TOUCHPAD_TRACKBALL_DECAY,
+	// Grip sensor (Steam Controller 2026). The raw sensor is analog; GRIP_L/GRIP_R
+	// are derived from it with a press threshold and a separate release threshold
+	// (threshold - hysteresis) so resting exactly on the border doesn't chatter.
+	GRIP_THRESHOLD,
+	GRIP_HYSTERESIS,
 };
 
 // constexpr are like #define but with respect to typeness

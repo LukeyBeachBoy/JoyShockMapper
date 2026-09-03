@@ -5,6 +5,7 @@ catch a silent revert during a merge or refactor. The numeric behaviour is
 covered by tests/touch_pipeline_harness.cpp, which lifts the real structs out of
 JoyShock.h and runs them.
 """
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -123,6 +124,37 @@ def test_new_tuning_settings_are_registered():
     # Old configs must still parse even though the setting no longer does anything.
     assert 'TOUCHPAD_SMOOTHING' in MAIN
     assert 'Deprecated' in MAIN.split('"TOUCHPAD_SMOOTHING"', 1)[1][:400]
+
+def test_touchpad_filter_defaults_favour_live_tracking_over_deferred_coast():
+    """The literature 1-euro defaults (0.8Hz / 0.015) were tuned for a desk mouse,
+    not a touch gesture: they deferred most of a short swipe's displacement into a
+    single momentum sample released only on lift. Combined with the legacy
+    TRACKBALL_DECAY default (1.0, shared with an unrelated feature), that produced
+    a multi-second post-lift slide with almost nothing visible during the actual
+    touch -- easy to read as "the touchpad doesn't move the mouse at all". See
+    tests/touch_short_gesture_harness.cpp for the numeric reproduction."""
+    cutoff = re.search(r'SettingID::TOUCHPAD_MIN_CUTOFF,\s*(\d+\.?\d*)f\)', MAIN)
+    speed = re.search(r'SettingID::TOUCHPAD_SPEED_COEFF,\s*(\d+\.?\d*)f\)', MAIN)
+    assert cutoff and float(cutoff.group(1)) >= 3.0, \
+        'TOUCHPAD_MIN_CUTOFF default is back near the too-laggy 0.8Hz literature value'
+    assert speed and float(speed.group(1)) >= 0.1, \
+        'TOUCHPAD_SPEED_COEFF default is back near the too-laggy 0.015 literature value'
+
+
+def test_touchpad_coast_is_a_dedicated_opt_in_setting_defaulting_off():
+    """Must not reuse the legacy TRACKBALL_DECAY (a different, unrelated stick-based
+    trackball feature with its own tuned default) -- and must default to no coast at
+    all, matching Steam Input's Mouse touch style, which does not fling the cursor
+    after release."""
+    assert 'SettingID::TOUCHPAD_TRACKBALL_DECAY' in MAIN
+    decay = re.search(r'SettingID::TOUCHPAD_TRACKBALL_DECAY,\s*(\d+\.?\d*)f\)', MAIN)
+    assert decay and float(decay.group(1)) == 0.0, \
+        'TOUCHPAD_TRACKBALL_DECAY must default to 0 (coast disabled)'
+    body = MAIN.split('static void processTouchMouse', 1)[1].split('\nvoid touchCallback', 1)[0]
+    assert 'SettingID::TOUCHPAD_TRACKBALL_DECAY' in body
+    assert 'SettingID::TRACKBALL_DECAY)' not in body, \
+        'processTouchMouse must not read the legacy shared TRACKBALL_DECAY setting'
+    assert 'if (decaySetting <= 0.f)' in body and 'pipe.reset();' in body.split('if (decaySetting <= 0.f)', 1)[1][:80]
 
 
 def test_keymap_call_sites_forward_light_touch_threshold():

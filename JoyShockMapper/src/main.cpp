@@ -233,10 +233,18 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 	}
 	else if (pipe.active)
 	{
-		// Trackball continuation. delta_time is now measured seconds, so this decay
-		// finally behaves as intended -- it was previously fed the tick time in
-		// milliseconds, which killed momentum within a few polls.
-		float decay = exp2f(-delta_time * js->getSetting(SettingID::TRACKBALL_DECAY));
+		// Post-liftoff coast, opt-in via TOUCHPAD_TRACKBALL_DECAY (default 0 = off,
+		// matching Steam Input: the cursor stops the instant contact ends). This is
+		// deliberately NOT the legacy TRACKBALL_DECAY setting -- that one belongs to
+		// an unrelated stick-based trackball feature elsewhere and must keep its own
+		// tuned default undisturbed.
+		float decaySetting = js->getSetting(SettingID::TOUCHPAD_TRACKBALL_DECAY);
+		if (decaySetting <= 0.f)
+		{
+			pipe.reset();
+			return;
+		}
+		float decay = exp2f(-delta_time * decaySetting);
 		pipe.momentumX *= decay;
 		pipe.momentumY *= decay;
 		if (fabsf(pipe.momentumX) < 0.1f && fabsf(pipe.momentumY) < 0.1f)
@@ -3434,15 +3442,36 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	// One Euro filter on pad position. Lower cutoff means heavier smoothing at low
 	// finger speed; the speed coefficient raises the cutoff as you swipe faster, so
 	// flicks stay responsive while slow panning stays free of stepping.
-	auto touch_min_cutoff = new JSMSetting<float>(SettingID::TOUCHPAD_MIN_CUTOFF, 0.8f);
+	//
+	// 0.8 / 0.015 (this filter's literature defaults, tuned for a mouse cursor
+	// driven by a desk mouse) turned out far too heavy for a touch gesture: a
+	// realistic 90ms flick only moved 19% of its distance live, with the rest
+	// dumped into a single deferred "momentum" sample on lift. 6.0 / 0.6 tracks
+	// 71-87% of a gesture live (measured for flicks from 90ms to 150ms) while a
+	// slow deliberate pan is unaffected -- it still fully delivers its
+	// displacement with no stepping, because the pan is slow enough that the
+	// filter has time to catch up regardless of the floor cutoff.
+	auto touch_min_cutoff = new JSMSetting<float>(SettingID::TOUCHPAD_MIN_CUTOFF, 6.0f);
 	touch_min_cutoff->setFilter(&filterPositive);
 	SettingsManager::add(touch_min_cutoff);
-	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_MIN_CUTOFF", *touch_min_cutoff))->setHelp("Touchpad One Euro minimum cutoff in Hz. Lower is smoother when panning slowly. 0 disables filtering."));
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_MIN_CUTOFF", *touch_min_cutoff))->setHelp("Touchpad One Euro minimum cutoff in Hz. Lower is smoother when panning slowly, but laggier on quick flicks. 0 disables filtering."));
 
-	auto touch_speed_coeff = new JSMSetting<float>(SettingID::TOUCHPAD_SPEED_COEFF, 0.015f);
+	auto touch_speed_coeff = new JSMSetting<float>(SettingID::TOUCHPAD_SPEED_COEFF, 0.6f);
 	touch_speed_coeff->setFilter(&filterPositive);
 	SettingsManager::add(touch_speed_coeff);
-	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_SPEED_COEFF", *touch_speed_coeff))->setHelp("Touchpad One Euro speed coefficient (beta). Higher reduces lag on fast flicks."));
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_SPEED_COEFF", *touch_speed_coeff))->setHelp("Touchpad One Euro speed coefficient (beta). Higher tracks fast flicks more live, with less deferred to the post-lift coast."));
+
+	// Separate from the legacy TRACKBALL_DECAY, which an unrelated stick-based
+	// trackball feature already depends on at its own tuned default. 0 (default)
+	// means no coast: with the responsive filter above already delivering most of
+	// a gesture live, Steam Input's Mouse touch style doesn't fling the cursor
+	// after release, and a long, slow decay previously made a fast flick's
+	// deferred remainder appear as an unexplained multi-second slide after the
+	// finger had already lifted -- easy to mistake for "the touchpad doesn't work".
+	auto touch_trackball_decay = new JSMSetting<float>(SettingID::TOUCHPAD_TRACKBALL_DECAY, 0.f);
+	touch_trackball_decay->setFilter(&filterPositive);
+	SettingsManager::add(touch_trackball_decay);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_TRACKBALL_DECAY", *touch_trackball_decay))->setHelp("Coast the mouse briefly after the finger lifts, using whatever the filter hadn't yet caught up on. 0 (default) disables coasting: the cursor stops the instant contact ends. Higher decays faster; try 30-40 for a short flick-only coast."));
 
 	auto touch_liftoff = new JSMSetting<float>(SettingID::TOUCHPAD_LIFTOFF_RATIO, 0.f);
 	touch_liftoff->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
