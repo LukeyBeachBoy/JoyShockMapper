@@ -18,5 +18,6 @@ include (cmake/LinuxConfig.cmake)
 include (cmake/WindowsConfig.cmake)
 include (cmake/CPM.cmake)
 include (cmake/GetGitRevisionDescription.cmake)
+include (cmake/PatchSdlTritonTouch.cmake)
 
 add_subdirectory (JoyShockMapper)

@@ -28,10 +28,22 @@ CMAKELISTS = (ROOT / 'JoyShockMapper/CMakeLists.txt').read_text()
 
 
 def test_patch_is_applied_to_the_fetched_sdl_source():
-    assert 'include (${CMAKE_SOURCE_DIR}/cmake/PatchSdlTritonTouch.cmake)' in CMAKELISTS
+    root = (ROOT / 'CMakeLists.txt').read_text()
+    assert 'include (cmake/PatchSdlTritonTouch.cmake)' in root, \
+        'the module must be included from the root, like every other cmake/ module'
     assert 'patch_sdl_triton_touch (${SDL3_SOURCE_DIR})' in CMAKELISTS
     # Must run against the source CPM just fetched, and therefore after it.
     assert CMAKELISTS.index('GITHUB_REPOSITORY libsdl-org/SDL') < CMAKELISTS.index('patch_sdl_triton_touch')
+
+
+def test_the_module_is_actually_tracked_by_git():
+    """.gitignore carries a blanket *.cmake rule for generated build files, which
+    silently swallowed this module: git add -A skipped it, the commit looked
+    clean, and CI failed at configure with "include could not find requested
+    file". The other modules in cmake/ only survive because they predate it."""
+    ignore = (ROOT / '.gitignore').read_text()
+    assert '!cmake/*.cmake' in ignore, \
+        'cmake/ modules must be exempted from the blanket *.cmake ignore rule'
 
 
 def test_capacitive_contact_is_added_never_substituted():

@@ -191,8 +191,8 @@ if(SDL OR NOT DEFINED SDL)
         GITHUB_REPOSITORY libsdl-org/SDL
         GIT_TAG 5b98c1cc2f598115906c9c1f2758d3d256913468
 	)
-    # The pads must report a capacitive touch, not a press. See the script.
-    include (${CMAKE_SOURCE_DIR}/cmake/PatchSdlTritonTouch.cmake)
+    # The pads must report a capacitive touch, not a press. Defined in
+    # cmake/PatchSdlTritonTouch.cmake, included from the root CMakeLists.
     patch_sdl_triton_touch (${SDL3_SOURCE_DIR})
 	set_target_properties(SDL_uclibc PROPERTIES FOLDER "SDL")
     set_target_properties(SDL3-shared PROPERTIES FOLDER "SDL")
