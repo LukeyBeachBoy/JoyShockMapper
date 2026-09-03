@@ -309,6 +309,11 @@ __pycache__/
 *vcxproj*
 *.sln
 *.cmake
+# ...except the project's own modules. The blanket *.cmake rule is aimed at
+# generated files in build trees, and it silently swallowed a new module in
+# here: git add -A skipped it, the commit looked clean, and the build failed on
+# CI with "include could not find requested file".
+!cmake/*.cmake
 CMakeLists.txt.user
 CMakeCache.txt
 CMakeFiles
