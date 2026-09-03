@@ -563,9 +563,17 @@ void moveMouse(float x, float y)
 {
 	accumulatedX += x;
 	accumulatedY += y;
+}
 
+void flushMouseMotion()
+{
 	int applicableX = (int)accumulatedX;
 	int applicableY = (int)accumulatedY;
+
+	if (applicableX == 0 && applicableY == 0)
+	{
+		return;
+	}
 
 	accumulatedX -= applicableX;
 	accumulatedY -= applicableY;

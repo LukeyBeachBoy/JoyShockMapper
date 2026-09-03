@@ -66,16 +66,33 @@ def test_firmware_setting_numbers_match_sdl_header():
         assert int(match.group(1), 0) == value, f'{name} = {match.group(1)}, want {value}'
 
 
+def test_feature_report_starts_with_the_hid_report_id():
+    """The report id is not part of FeatureReportMsg -- SDL's own SetSensorsEnabled
+    writes it by building the message at buffer + 1. Omitting it puts every field
+    one byte early and the controller silently ignores the report, which is what
+    made the first grip-range implementation do nothing at all on the device."""
+    body = SDL.split('static bool sendTritonSettings', 1)[1].split('\n\t}', 1)[0]
+    assert 'buffer[0] = TRITON_HID_REPORT_ID;' in body
+    assert re.search(r'TRITON_HID_REPORT_ID = 1;', SDL)
+    assert 'buffer[1] = TRITON_ID_SET_SETTINGS_VALUES;' in body
+    # Settings start after the 1-byte id plus the 2-byte header.
+    assert 'size_t offset = 3;' in body
+
+
 def test_feature_report_layout_matches_sdl_struct():
     """FeatureReportHeader is {type, length} then packed 3-byte ControllerSetting
     entries of {settingNum, little-endian settingValue}, in a 64-byte report."""
     assert 'TRITON_FEATURE_REPORT_BYTES = 64' in SDL
+    assert 'TRITON_SETTING_BYTES = 3' in SDL
     body = SDL.split('static bool sendTritonSettings', 1)[1].split('\n\t}', 1)[0]
-    assert 'buffer[0] = TRITON_ID_SET_SETTINGS_VALUES;' in body
-    assert 'buffer[1] = uint8_t(settings.size() * 3);' in body
     assert 'uint8_t(setting.second & 0xFF)' in body
     assert 'uint8_t((setting.second >> 8) & 0xFF)' in body
     assert 'SDL_SendGamepadEffect(gamepad' in body
+    # Length counts the settings actually written, not the ones requested: the
+    # loop stops early if they would not fit, and a length longer than the
+    # payload would have the controller read past what was sent.
+    assert 'buffer[2] = uint8_t(written * TRITON_SETTING_BYTES);' in body
+    assert body.index('++written;') < body.index('buffer[2] =')
 
 
 def test_unset_thresholds_never_overwrite_the_firmware():

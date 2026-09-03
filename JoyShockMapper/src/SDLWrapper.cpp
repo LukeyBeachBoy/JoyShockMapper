@@ -3,6 +3,7 @@
 #include "JSMVariable.hpp"
  #include "TriggerEffectGenerator.h"
 #include "SettingsManager.h"
+#include "InputHelpers.h"
 #include "SDL3/SDL.h"
 #include <map>
 #include <mutex>
@@ -541,28 +542,48 @@ public:
 	static constexpr uint8_t TRITON_SETTING_TIMP_TOUCH_THRESHOLD_OFF = 73;
 	static constexpr int TRITON_FEATURE_REPORT_BYTES = 64;
 
-	// Builds the packed { type, length, (settingNum, settingValue)... } payload
-	// SDL's FeatureReportMsg describes and hands it to the driver. ControllerSetting
-	// is a 1-byte number followed by a 2-byte little-endian value, inside a
+	// Builds the payload SDL's FeatureReportMsg describes and hands it to the
+	// driver:
+	//
+	//   [0]     HID report id, always 1
+	//   [1]     FeatureReportHeader.type
+	//   [2]     FeatureReportHeader.length, in bytes
+	//   [3...]  ControllerSetting { uint8 settingNum; uint16 settingValue; }
+	//
+	// The leading report id is easy to miss -- it is not part of FeatureReportMsg,
+	// SDL's own SetSensorsEnabled writes it by building the message at buffer + 1 --
+	// and without it every field lands one byte early and the controller ignores
+	// the report. That is exactly what happened the first time: setting a grip
+	// range changed nothing on the device.
+	//
+	// ControllerSetting is 3 bytes because the whole header is inside a
 	// #pragma pack(1) region, so the layout is written out by hand here rather
 	// than depending on SDL's private headers.
+	static constexpr uint8_t TRITON_HID_REPORT_ID = 1;
+	static constexpr size_t TRITON_SETTING_BYTES = 3;
+
 	static bool sendTritonSettings(SDL_Gamepad *gamepad, const vector<pair<uint8_t, uint16_t>> &settings)
 	{
 		if (gamepad == nullptr || settings.empty())
 			return false;
 
 		uint8_t buffer[TRITON_FEATURE_REPORT_BYTES] = { 0 };
-		buffer[0] = TRITON_ID_SET_SETTINGS_VALUES;
-		buffer[1] = uint8_t(settings.size() * 3); // sizeof(ControllerSetting)
-		size_t offset = 2;
+		buffer[0] = TRITON_HID_REPORT_ID;
+		buffer[1] = TRITON_ID_SET_SETTINGS_VALUES;
+		size_t offset = 3;
+		size_t written = 0;
 		for (const auto &setting : settings)
 		{
-			if (offset + 3 > sizeof(buffer))
+			if (offset + TRITON_SETTING_BYTES > sizeof(buffer))
 				break;
 			buffer[offset++] = setting.first;
 			buffer[offset++] = uint8_t(setting.second & 0xFF);
 			buffer[offset++] = uint8_t((setting.second >> 8) & 0xFF);
+			++written;
 		}
+		// Length counts only the settings, not the header, and must match what was
+		// actually written rather than what was asked for.
+		buffer[2] = uint8_t(written * TRITON_SETTING_BYTES);
 		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
 	}
 
@@ -651,6 +672,11 @@ public:
 				// Perform rumble
 				SDL_RumbleGamepad(iter->second->_sdlController, iter->second->_big_rumble, iter->second->_small_rumble, Uint32(tick_time + 5));
 			}
+
+			// One mouse event per tick, no matter how many sources moved it: both
+			// pads in mouse mode plus gyro used to emit three separate OS events
+			// microseconds apart, all describing one intended cursor position.
+			flushMouseMotion();
 		}
 
 		return 1;

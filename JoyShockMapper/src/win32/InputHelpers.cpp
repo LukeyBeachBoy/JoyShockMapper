@@ -147,13 +147,22 @@ void moveMouse(float x, float y)
 {
 	accumulatedX += x;
 	accumulatedY += y;
+}
 
+void flushMouseMotion()
+{
+	// Whole pixels go out; the sub-pixel remainder stays for the next tick, which
+	// is what lets a slow swipe move at all instead of rounding to nothing.
 	int applicableX = (int)accumulatedX;
 	int applicableY = (int)accumulatedY;
 
+	if (applicableX == 0 && applicableY == 0)
+	{
+		return;
+	}
+
 	accumulatedX -= applicableX;
 	accumulatedY -= applicableY;
-	//COUT << setprecision(4) << accumulatedX << ' ' << accumulatedY << '\n';
 
 	INPUT input;
 	input.type = INPUT_MOUSE;

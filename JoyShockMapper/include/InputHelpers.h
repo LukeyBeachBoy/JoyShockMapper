@@ -43,7 +43,18 @@ int pressMouse(KeyCode vkKey, bool isPressed);
 // send key press
 int pressKey(KeyCode vkKey, bool pressed);
 
+// Accumulates relative mouse motion. Nothing reaches the OS until
+// flushMouseMotion() runs, which is once per poll tick.
 void moveMouse(float x, float y);
+
+// Emits everything moveMouse() has accumulated as a single event.
+//
+// A tick can produce motion from several sources at once -- both pads in mouse
+// mode, plus gyro, plus a touch stick -- and each used to be its own OS-level
+// mouse event a few hundred microseconds apart. The cursor only ever needed to
+// end up in one place per tick, so the extra events bought nothing and gave the
+// compositor more chances to repaint the pointer mid-move.
+void flushMouseMotion();
 
 void setMouseNorm(float x, float y);
 

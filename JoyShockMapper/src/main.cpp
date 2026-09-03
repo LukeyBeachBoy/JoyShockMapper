@@ -1778,6 +1778,14 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		jc->_context->nn = (jc->_context->nn + 1) % 22;
 	}
 	jc->_context->callback_lock.unlock();
+
+#ifndef SDL
+	// The SDL backend flushes once per poll tick, after every device, so all of a
+	// tick's motion becomes one mouse event. JoyShockLibrary drives these
+	// callbacks itself with no such seam, so the flush has to happen here or the
+	// accumulated motion would never reach the OS at all.
+	flushMouseMotion();
+#endif
 }
 
 void connectDevices(bool mergeJoycons = true, const vector<int>& selectedDeviceIds = {})
@@ -3510,12 +3518,17 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(touch_accel);
 	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCELERATION", *touch_accel))->setHelp("Velocity-based touchpad mouse acceleration."));
 
-	// Grip range, per hand. The grip signal reaching the host is a single bit --
-	// SDL exposes it as capacitive sense, and the report carries no analog grip
-	// channel -- so how hard you have to squeeze is decided in the controller,
-	// which is also why Steam Input's grip slider lives on the device side.
-	// Separate left and right values because a right-handed grip on a controller
-	// is genuinely not the same squeeze as the left.
+	// Grip range, per hand: the force each grip must reach before the controller
+	// calls it a squeeze. The grip signal reaching the host is a single bit -- the
+	// report carries no analog grip channel -- so the threshold behind it is a
+	// firmware setting, which is also why Steam Input's grip slider lives on the
+	// device side. Separate left and right values because a right-handed grip on a
+	// controller is genuinely not the same squeeze as the left.
+	//
+	// These write LEFT/RIGHT_GRIP_CLICK_PRESSURE, the force threshold for the grip
+	// buttons. The firmware exposes no threshold for the grips' capacitive
+	// hand-presence bit, so if you have bound the capsense grip rather than the
+	// grip button, these will not move it.
 	auto left_grip_range = new JSMSetting<float>(SettingID::LEFT_GRIP_RANGE, -1.f);
 	left_grip_range->setFilter(&filterFirmwareThreshold);
 	SettingsManager::add(left_grip_range);
