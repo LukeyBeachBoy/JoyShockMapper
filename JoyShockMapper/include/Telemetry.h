@@ -31,6 +31,12 @@ struct TelemetryPadState
 	bool touched = false;  // finger on pad
 };
 
+struct TelemetryGripState
+{
+	float value = 0.0f;    // 0..1 raw squeeze distance, BEFORE the threshold/hysteresis gate
+	bool pressed = false;  // digital state after GRIP_THRESHOLD/GRIP_HYSTERESIS (matches the bound button)
+};
+
 struct TelemetryDeviceStatus
 {
 	uint64_t buttons = 0;
@@ -40,6 +46,8 @@ struct TelemetryDeviceStatus
 	TelemetryGyroState gyro;
 	TelemetryPadState leftPad;
 	TelemetryPadState rightPad;
+	TelemetryGripState leftGrip;
+	TelemetryGripState rightGrip;
 };
 
 struct TelemetryDevice

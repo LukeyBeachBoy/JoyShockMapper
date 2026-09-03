@@ -126,6 +126,8 @@ public:
 					    << ",\"gyro\":{\"x\":" << status.gyro.x << ",\"y\":" << status.gyro.y << ",\"z\":" << status.gyro.z << "}"
 					    << ",\"leftPad\":{\"x\":" << status.leftPad.x << ",\"y\":" << status.leftPad.y << ",\"touched\":" << (status.leftPad.touched ? "true" : "false") << "}"
 					    << ",\"rightPad\":{\"x\":" << status.rightPad.x << ",\"y\":" << status.rightPad.y << ",\"touched\":" << (status.rightPad.touched ? "true" : "false") << "}"
+					    << ",\"leftGrip\":{\"value\":" << status.leftGrip.value << ",\"pressed\":" << (status.leftGrip.pressed ? "true" : "false") << "}"
+					    << ",\"rightGrip\":{\"value\":" << status.rightGrip.value << ",\"pressed\":" << (status.rightGrip.pressed ? "true" : "false") << "}"
 					    << "}";
 				}
 				oss << "}";

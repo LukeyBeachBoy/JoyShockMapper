@@ -322,6 +322,12 @@ public:
 	virtual float GetRightY(int deviceId) = 0;
 	virtual float GetLeftTrigger(int deviceId) = 0;
 	virtual float GetRightTrigger(int deviceId) = 0;
+	// Raw grip sensor reading, 0..1, BEFORE the GRIP_THRESHOLD/GRIP_HYSTERESIS
+	// digital gate (that gate is applied inside GetButtons(), the same as every
+	// other digital input). For telemetry/preview only. 0 on controllers without
+	// grip sensors.
+	virtual float GetLeftGrip(int deviceId) = 0;
+	virtual float GetRightGrip(int deviceId) = 0;
 	virtual float GetGyroX(int deviceId) = 0;
 	virtual float GetGyroY(int deviceId) = 0;
 	virtual float GetGyroZ(int deviceId) = 0;

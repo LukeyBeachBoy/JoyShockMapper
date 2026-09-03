@@ -1385,6 +1385,15 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			status.rightPad.x = touch.t1X * 2.f - 1.f;
 			status.rightPad.y = touch.t1Y * 2.f - 1.f;
 			status.rightPad.touched = touch.t1Down;
+
+			// Grip sensors: raw analog value for the live meter, plus the digital
+			// state GRIP_THRESHOLD/GRIP_HYSTERESIS already derived for GetButtons()
+			// (JSOFFSET_MISC6 = left, JSOFFSET_MISC5 = right), so the preview shows
+			// exactly what the bound action sees rather than recomputing its own gate.
+			status.leftGrip.value = jsl->GetLeftGrip(device->_handle);
+			status.leftGrip.pressed = (status.buttons & (1ULL << JSOFFSET_MISC6)) != 0;
+			status.rightGrip.value = jsl->GetRightGrip(device->_handle);
+			status.rightGrip.pressed = (status.buttons & (1ULL << JSOFFSET_MISC5)) != 0;
 		}
 		dev.status = status;
 #endif
@@ -3487,6 +3496,23 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	touch_accel->setFilter(&filterPositive);
 	SettingsManager::add(touch_accel);
 	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCELERATION", *touch_accel))->setHelp("Velocity-based touchpad mouse acceleration."));
+
+	// Grip sensor (Steam Controller 2026). The raw squeeze distance is analog and
+	// has no driver-level digital signal to fall back on, unlike touch contact --
+	// GRIP_THRESHOLD/GRIP_HYSTERESIS are the only gate, applied in GetButtons().
+	// Hysteresis puts the release point below the press point (never above), so
+	// resting exactly on the threshold can't chatter the bound action on/off.
+	auto grip_threshold = new JSMSetting<float>(SettingID::GRIP_THRESHOLD, 0.5f);
+	grip_threshold->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
+	SettingsManager::add(grip_threshold);
+	commandRegistry->add((new JSMAssignment<float>("GRIP_THRESHOLD", *grip_threshold))
+	                       ->setHelp("Squeeze distance (0-1) at which the grip sensors register as pressed."));
+
+	auto grip_hysteresis = new JSMSetting<float>(SettingID::GRIP_HYSTERESIS, 0.08f);
+	grip_hysteresis->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
+	SettingsManager::add(grip_hysteresis);
+	commandRegistry->add((new JSMAssignment<float>("GRIP_HYSTERESIS", *grip_hysteresis))
+	                       ->setHelp("Gap below GRIP_THRESHOLD the squeeze must relax past before the grip sensors release. Prevents chatter from resting right at the threshold."));
 
 	auto hide_minimized = new JSMVariable<Switch>(Switch::OFF);
 	minimizeThread.reset(new PollingThread( "Minimize thread", [] (void *param)

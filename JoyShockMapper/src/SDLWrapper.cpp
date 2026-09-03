@@ -328,6 +328,10 @@ public:
 	// without gating on an absolute force threshold.
 	float _padPeakPressure[2] = { 0.f, 0.f };
 	float _padPrevPressure[2] = { 0.f, 0.f };
+	// Grip sensor digital state (Schmitt trigger over the analog reading, index 0 =
+	// left, 1 = right). Persisted per device so GRIP_HYSTERESIS has a "was it
+	// already pressed" edge to compare against; see GetButtons().
+	bool _gripPressed[2] = { false, false };
 };
 
 struct SdlInstance : public JslWrapper
@@ -934,9 +938,32 @@ public:
 			buttons |= SDL_GetJoystickButton(joy, 16) ? 1ULL << JSOFFSET_MISC2 : 0;
 			buttons |= SDL_GetJoystickButton(joy, 17) ? 1ULL << JSOFFSET_MISC3 : 0;
 			// Stick capacitive touch (LTOUCH/RTOUCH already exposed via cap-sense)
-			// Left grip (raw 20 / SDL_MISC6), Right grip (raw 21 / SDL_MISC5)
-			buttons |= SDL_GetJoystickButton(joy, 20) ? 1ULL << JSOFFSET_MISC6 : 0;
-			buttons |= SDL_GetJoystickButton(joy, 21) ? 1ULL << JSOFFSET_MISC5 : 0;
+			// Grip sensors report an analog squeeze distance (raw joystick axis
+			// indices 6/7, left/right), not a pre-thresholded button -- unlike
+			// touch contact, there is no separate driver-level digital signal to
+			// fall back on here, so GRIP_THRESHOLD/GRIP_HYSTERESIS are the only
+			// gate. A Schmitt trigger (a lower release point than the press
+			// point) keeps a squeeze held right at the threshold from chattering
+			// on sensor noise; the previous digital state is required to know
+			// which edge currently applies, so it is persisted per device.
+			{
+				auto *device = _controllerMap[deviceId];
+				const float pressThreshold = SettingsManager::get<float>(SettingID::GRIP_THRESHOLD)->value();
+				const float hysteresis = SettingsManager::get<float>(SettingID::GRIP_HYSTERESIS)->value();
+				const float releaseThreshold = std::max(0.f, pressThreshold - hysteresis);
+				const float gripRaw[2] = {
+					std::clamp(SDL_GetJoystickAxis(joy, 6) / float(SDL_JOYSTICK_AXIS_MAX), 0.f, 1.f),
+					std::clamp(SDL_GetJoystickAxis(joy, 7) / float(SDL_JOYSTICK_AXIS_MAX), 0.f, 1.f),
+				};
+				for (int side = 0; side < 2; ++side)
+				{
+					bool &pressed = device->_gripPressed[side];
+					pressed = pressed ? (gripRaw[side] > releaseThreshold) : (gripRaw[side] >= pressThreshold);
+				}
+				// Left grip -> MISC6, Right grip -> MISC5 (matches the raw axis order).
+				buttons |= device->_gripPressed[0] ? 1ULL << JSOFFSET_MISC6 : 0;
+				buttons |= device->_gripPressed[1] ? 1ULL << JSOFFSET_MISC5 : 0;
+			}
 		}
 		break;
 		case JS_TYPE_DS:
@@ -1054,6 +1081,22 @@ public:
 	float GetRightTrigger(int deviceId) override
 	{
 		return (SDL_GetGamepadAxis(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) / (float)(SDL_JOYSTICK_AXIS_MAX);
+	}
+
+	float GetLeftGrip(int deviceId) override
+	{
+		if (_controllerMap[deviceId] == nullptr || _controllerMap[deviceId]->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
+			return 0.f;
+		SDL_Joystick *joy = SDL_GetGamepadJoystick(_controllerMap[deviceId]->_sdlController);
+		return std::clamp(SDL_GetJoystickAxis(joy, 6) / float(SDL_JOYSTICK_AXIS_MAX), 0.f, 1.f);
+	}
+
+	float GetRightGrip(int deviceId) override
+	{
+		if (_controllerMap[deviceId] == nullptr || _controllerMap[deviceId]->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
+			return 0.f;
+		SDL_Joystick *joy = SDL_GetGamepadJoystick(_controllerMap[deviceId]->_sdlController);
+		return std::clamp(SDL_GetJoystickAxis(joy, 7) / float(SDL_JOYSTICK_AXIS_MAX), 0.f, 1.f);
 	}
 
 	float GetGyroX(int deviceId) override
