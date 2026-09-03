@@ -34,8 +34,10 @@ struct TelemetryPadState
 
 struct TelemetryGripState
 {
-	float value = 0.0f;    // 0..1 raw squeeze distance, BEFORE the threshold/hysteresis gate
-	bool pressed = false;  // digital state after GRIP_THRESHOLD/GRIP_HYSTERESIS (matches the bound button)
+	// The grip signal is a single bit on the wire (SDL capacitive sense over
+	// TRITON_LEFT/RIGHT_GRIP_TOUCH); how hard you must squeeze to set it is
+	// decided in the controller from LEFT_GRIP_RANGE / RIGHT_GRIP_RANGE.
+	bool pressed = false;
 };
 
 struct TelemetryDeviceStatus

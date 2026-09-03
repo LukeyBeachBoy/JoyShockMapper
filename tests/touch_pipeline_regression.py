@@ -14,11 +14,6 @@ MAIN = (ROOT / 'JoyShockMapper/src/main.cpp').read_text()
 SDL = (ROOT / 'JoyShockMapper/src/SDLWrapper.cpp').read_text()
 JSLW = (ROOT / 'JoyShockMapper/include/JslWrapper.h').read_text()
 
-# JoyShockMapper is vendored as a submodule of JSM_Studio; the GUI assertions only
-# run in that layout.
-APP_PATH = ROOT.parent / 'JSM_GUI/jsm_gui_tauri/src/App.tsx'
-
-
 def test_touch_deltas_are_never_truncated_to_integers():
     """The original bug: a slow swipe yields <1 pad unit per 3ms poll, and an
     int16_t cast turned every one of those into zero."""
@@ -62,50 +57,35 @@ def test_steam_controller_pads_are_square():
     assert 'sizeY = 1920;' in steam
 
 
-def test_pressure_threshold_promotes_contact_but_never_vetoes_it():
-    """`(A || B) && B` reduces to `B`, which discarded SDL's capacitive down bit
-    entirely and forced users to press hard."""
-    body = SDL.split('TOUCH_STATE readTouchState', 1)[1].split('bool GetTouchpadDimension', 1)[0]
-    assert 'state.t0Down = state.t0Down || pressure0 >= promoteThreshold;' in body
-    assert 'state.t1Down = state.t1Down || pressure1 >= promoteThreshold;' in body
-    assert '&& pressure0 >= promoteThreshold;' not in body
-    assert '&& pressure1 >= promoteThreshold;' not in body
-    assert 'state.t0Down = pressure0 >=' not in body
-    assert 'state.t1Down = pressure1 >=' not in body
+def test_host_side_contact_gating_is_gone_entirely():
+    """Three host-side gates used to sit on top of the driver's touch bit: a
+    pressure veto (`(A || B) && B`, which reduces to `B` and threw the capacitive
+    down bit away), an opt-in position fallback, and a decaying-peak liftoff
+    tracker. All three were second-guessing a decision the controller already
+    makes with a proper Schmitt trigger, and the pressure one is what forced
+    people to press hard. The firmware thresholds replace all of them."""
+    body = SDL.split('TOUCH_STATE GetTouchState', 1)[1].split('bool GetTouchpadDimension', 1)[0]
+    steam = body.split('if (isSteam', 1)[1].split('else', 1)[0]
+    # SDL's own down bit reaches TOUCH_STATE untouched.
+    assert 'SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 0, &state.t0Down' in steam
+    assert 'SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 1, 0, &state.t1Down' in steam
+    for gate in ('promoteThreshold', 'state.t0Down =', 'state.t1Down =',
+                 'TOUCHPAD_POSITION_FALLBACK', 'lifting', 'Lifting'):
+        assert gate not in steam, f'host-side gate {gate!r} is back'
+    # Pressure is still surfaced, purely as a readout.
+    assert 'state.t0Pressure = pressure0;' in steam
+    assert 'state.t1Pressure = pressure1;' in steam
 
 
-def test_position_only_contact_fallback_is_opt_in():
-    """In-range coordinates latch the pad permanently down (an idle finger still
-    reports an in-range 0,0), so this can never be the default."""
-    assert 'SettingID::TOUCHPAD_POSITION_FALLBACK, Switch::OFF' in MAIN
-    body = SDL.split('TOUCH_STATE readTouchState', 1)[1].split('bool GetTouchpadDimension', 1)[0]
-    guard = 'getV<Switch>(SettingID::TOUCHPAD_POSITION_FALLBACK)->value() == Switch::ON'
-    assert guard in body
-    # Every coordinate-range test must sit inside that guard.
-    after_guard = body.split(guard, 1)[1]
-    assert body.count('state.t0X <= 1.f') == after_guard.count('state.t0X <= 1.f') == 1
-
-
-def test_liftoff_state_machine_only_advances_on_the_polling_path():
-    """joyShockPollCallback reads the touch state for telemetry before the poll
-    loop reads it for the touch callback. Advancing the decaying-peak tracker
-    twice per poll leaves `pressure < prevPressure` permanently false, which
-    silently disables TOUCHPAD_LIFTOFF_RATIO."""
-    assert 'return readTouchState(deviceId, false);' in SDL
-    assert 'readTouchState(iter->first, true);' in SDL
-    assert 'for (int pad = 0; advanceLiftoff && pad < 2; ++pad)' in SDL
-    assert 'bool t0Lifting;' in JSLW and 'bool t1Lifting;' in JSLW
-
-
-def test_liftoff_suppresses_motion_without_dropping_tracking():
-    body = MAIN.split('static void processTouchMouse', 1)[1].split('\nvoid touchCallback', 1)[0]
-    # Return before momentum is latched, so the involuntary tail cannot be flung.
-    assert 'if (point.lifting)' in body
-    lifting_idx = body.index('if (point.lifting)')
-    assert body.index('pipe.momentumX = moved.x();') > lifting_idx
-    assert body.index('moveMouse(moved.x(), moved.y());') > lifting_idx
-    # Position tracking still ran, so the filter stays primed through the release.
-    assert body.index('pipe.step(') < lifting_idx
+def test_touch_state_is_read_once_per_poll_with_no_hidden_state():
+    """The liftoff tracker had to be split out of GetTouchState because telemetry
+    and the poll loop both call it, advancing a stateful gate twice per poll. With
+    the gate gone the read is pure again, so the split is dead weight -- and any
+    new per-call state here would silently reintroduce that bug."""
+    assert 'readTouchState' not in SDL
+    assert 'TOUCH_STATE GetTouchState(int deviceId, bool previous) override' in SDL
+    assert 'GetTouchState(iter->first, false)' in SDL
+    assert 'bool t0Lifting' not in JSLW and 'bool t1Lifting' not in JSLW
 
 
 def test_pipelines_are_not_wiped_on_finger_up():
@@ -119,8 +99,13 @@ def test_pipelines_are_not_wiped_on_finger_up():
 
 def test_new_tuning_settings_are_registered():
     for name in ('TOUCHPAD_MIN_CUTOFF', 'TOUCHPAD_SPEED_COEFF',
-                 'TOUCHPAD_LIFTOFF_RATIO', 'TOUCHPAD_POSITION_FALLBACK'):
+                 'TOUCHPAD_TOUCH_ON', 'TOUCHPAD_TOUCH_OFF'):
         assert f'SettingID::{name}' in MAIN, name
+    # The superseded host-side knobs must be gone, not left as dead aliases the
+    # GUI could still write to.
+    for name in ('TOUCHPAD_LIGHT_TOUCH_THRESHOLD', 'TOUCHPAD_LIFTOFF_RATIO',
+                 'TOUCHPAD_POSITION_FALLBACK'):
+        assert name not in MAIN, name
     # Old configs must still parse even though the setting no longer does anything.
     assert 'TOUCHPAD_SMOOTHING' in MAIN
     assert 'Deprecated' in MAIN.split('"TOUCHPAD_SMOOTHING"', 1)[1][:400]
@@ -155,14 +140,6 @@ def test_touchpad_coast_is_a_dedicated_opt_in_setting_defaulting_off():
     assert 'SettingID::TRACKBALL_DECAY)' not in body, \
         'processTouchMouse must not read the legacy shared TRACKBALL_DECAY setting'
     assert 'if (decaySetting <= 0.f)' in body and 'pipe.reset();' in body.split('if (decaySetting <= 0.f)', 1)[1][:80]
-
-
-def test_keymap_call_sites_forward_light_touch_threshold():
-    if not APP_PATH.exists():
-        return  # standalone checkout, not vendored under JSM_Studio
-    app = APP_PATH.read_text()
-    assert app.count('lightTouchThreshold={lightTouchThreshold}') >= 2
-    assert app.count('onLightTouchThresholdChange={handleLightTouchThresholdChange}') >= 2
 
 
 if __name__ == '__main__':

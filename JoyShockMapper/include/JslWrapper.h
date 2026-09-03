@@ -262,12 +262,6 @@ typedef struct TOUCH_STATE
 	float t1Y;
 	float t0Pressure;
 	float t1Pressure;
-	// True while contact is still registered but pressure is collapsing, i.e. the
-	// finger is being lifted. Motion during this window is the involuntary tail of
-	// a swipe and should not be forwarded to the mouse. Kept separate from tXDown
-	// so that position tracking continues uninterrupted through the release.
-	bool t0Lifting;
-	bool t1Lifting;
 } TOUCH_STATE;
 
 #endif
@@ -322,12 +316,6 @@ public:
 	virtual float GetRightY(int deviceId) = 0;
 	virtual float GetLeftTrigger(int deviceId) = 0;
 	virtual float GetRightTrigger(int deviceId) = 0;
-	// Raw grip sensor reading, 0..1, BEFORE the GRIP_THRESHOLD/GRIP_HYSTERESIS
-	// digital gate (that gate is applied inside GetButtons(), the same as every
-	// other digital input). For telemetry/preview only. 0 on controllers without
-	// grip sensors.
-	virtual float GetLeftGrip(int deviceId) = 0;
-	virtual float GetRightGrip(int deviceId) = 0;
 	virtual float GetGyroX(int deviceId) = 0;
 	virtual float GetGyroY(int deviceId) = 0;
 	virtual float GetGyroZ(int deviceId) = 0;

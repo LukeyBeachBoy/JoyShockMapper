@@ -231,7 +231,6 @@ enum class SettingID
 	TOUCH_DEADZONE_INNER,
 	TOUCH_RING_MODE,
 	TOUCHPAD_SENS,
-	TOUCHPAD_LIGHT_TOUCH_THRESHOLD,
 	TOUCHPAD_SMOOTHING,
 	TOUCHPAD_ACCELERATION,
 	LIGHT_BAR,
@@ -295,23 +294,23 @@ enum class SettingID
 	// almost none during a flick.
 	TOUCHPAD_MIN_CUTOFF,
 	TOUCHPAD_SPEED_COEFF,
-	// Fraction of recent peak pressure below which a falling contact counts as a
-	// liftoff and stops producing mouse motion. 0 disables liftoff rejection.
-	TOUCHPAD_LIFTOFF_RATIO,
-	// Opt-in last-resort contact detection for drivers that report neither a down
-	// bit nor any pressure while a finger rests on the pad. Latches the pad down,
-	// so it is OFF by default.
-	TOUCHPAD_POSITION_FALLBACK,
 	// Post-liftoff mouse coast, separate from the legacy TRACKBALL_DECAY (which is
 	// shared with an unrelated stick-based trackball feature and must not change
 	// behaviour for it). 0 disables coasting entirely: the cursor stops the instant
 	// contact ends, matching Steam Input's Mouse touch style. This is the default.
 	TOUCHPAD_TRACKBALL_DECAY,
-	// Grip sensor (Steam Controller 2026). The raw sensor is analog; GRIP_L/GRIP_R
-	// are derived from it with a press threshold and a separate release threshold
-	// (threshold - hysteresis) so resting exactly on the border doesn't chatter.
-	GRIP_THRESHOLD,
-	GRIP_HYSTERESIS,
+	// Contact detection lives in the controller's own firmware (Steam Controller
+	// 2026), which is where Steam Input sets it too: a capacitive touch threshold
+	// with a separate, lower release threshold. Doing it there means zero host
+	// latency and no second gate fighting the driver's touch bit. -1 leaves the
+	// firmware's own value alone, which is the default.
+	TOUCHPAD_TOUCH_ON,
+	TOUCHPAD_TOUCH_OFF,
+	// Squeeze force each grip must reach to register, set per hand in firmware --
+	// you naturally hold one side harder than the other. -1 leaves the firmware's
+	// own value alone, which is the default.
+	LEFT_GRIP_RANGE,
+	RIGHT_GRIP_RANGE,
 };
 
 // constexpr are like #define but with respect to typeness

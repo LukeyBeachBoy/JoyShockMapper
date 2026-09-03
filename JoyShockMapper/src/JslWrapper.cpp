@@ -96,18 +96,6 @@ public:
 		return JslGetRightTrigger(deviceId);
 	}
 
-	// Grip sensors are Steam Controller 2026-specific and only reachable through
-	// the SDL backend; the vendor JSL library has no equivalent input.
-	float GetLeftGrip(int deviceId) override
-	{
-		return 0.f;
-	}
-
-	float GetRightGrip(int deviceId) override
-	{
-		return 0.f;
-	}
-
 	float GetGyroX(int deviceId) override
 	{
 		return JslGetGyroX(deviceId);
