@@ -40,6 +40,19 @@ struct OneEuroFilter
 	// than gyro in degrees/sec, so sharing one pair of settings does not work.
 	float filter(float x, float dt, float minCutoff, float beta);
 	void reset() { initialized = false; xFilt.reset(); dxFilt.reset(); }
+	// Forces the filter's state to "has been perfectly tracking x, stationary,
+	// for a long time" -- the correct terminal state once a raw signal is
+	// confirmed to have genuinely stopped changing, used instead of running the
+	// normal recursive update so that reaching it emits no output of its own.
+	void snapTo(float x)
+	{
+		xPrev = x;
+		initialized = true;
+		xFilt.prev = x;
+		xFilt.initialized = true;
+		dxFilt.prev = 0.f;
+		dxFilt.initialized = true;
+	}
 };
 
 struct TouchMousePipeline
@@ -118,12 +131,42 @@ struct TouchMousePipeline
 		// wait instead. kMaxDeferredDt is comfortably longer than any plausible
 		// report interval and far too short to notice as settling lag.
 		constexpr float kMaxDeferredDt = 0.016f;
-		if (initialized && rawX == lastRawX && rawY == lastRawY && pendingDt < kMaxDeferredDt)
+		bool sameAsLast = initialized && rawX == lastRawX && rawY == lastRawY;
+		if (sameAsLast)
 		{
 			pendingDt += dt;
+			if (pendingDt >= kMaxDeferredDt && minCutoff > 0.f)
+			{
+				// Long enough that this is a confirmed stall, not a still-pending
+				// HID duplicate: bring the filter directly to the value it has
+				// already been telling us is true, rather than continuing to
+				// defer and later resolving the wait by actually PROCESSING this
+				// still-unchanged value. That fallthrough used to hand the
+				// filter a dt inflated by the whole deferred span for a sample
+				// where x == xPrev, so dx read exactly zero either way -- the
+				// only thing the big dt did was raise alpha on the position
+				// low-pass, snapping whatever lag the filter's smoothed output
+				// had accumulated during the stall onto the raw value in one
+				// oversized step instead of the several small ones continuous
+				// processing would have taken. A slow drag or a long, low-decay
+				// coast made that teleport highly visible, repeating on every
+				// quantisation-driven stall a steady slow swipe produces. Snapping
+				// silently instead emits nothing on this tick and leaves nothing
+				// to catch up on the next one either.
+				posFilterX.snapTo(rawX);
+				posFilterY.snapTo(rawY);
+				lastX = rawX;
+				lastY = rawY;
+			}
 			sampleConsumed = false;
 			return { 0.f, 0.f };
 		}
+
+		// A genuinely new position needs the true elapsed time, deferral
+		// included: dx = (x - xPrev)/dt has to reflect how long the finger has
+		// actually been travelling to correctly un-smooth a big jump after
+		// several stale HID duplicates, which is the whole reason the deferral
+		// above exists.
 		dt += pendingDt;
 		pendingDt = 0.f;
 		sampleConsumed = true;

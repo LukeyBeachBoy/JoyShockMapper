@@ -24,6 +24,7 @@ HARNESSES = [
     Path(__file__).parent / 'touch_pipeline_harness.cpp',
     Path(__file__).parent / 'touch_short_gesture_harness.cpp',
     Path(__file__).parent / 'touch_retouch_harness.cpp',
+    Path(__file__).parent / 'touch_stall_catchup_harness.cpp',
 ]
 
 BEGIN = 'struct LowPassFilter1E'
@@ -31,24 +32,39 @@ END = '// An instance of this class represents'
 
 
 def check_defaults_in_sync() -> bool:
+    # Every harness that declares one of these SHIPPED_* constants is checked
+    # against main.cpp, not just one designated file -- touch_pipeline_harness.cpp
+    # used to hardcode 0.8f/0.015f inline, labelled "shipped defaults" in a
+    # comment, and stayed that way silently after TOUCHPAD_MIN_CUTOFF/
+    # TOUCHPAD_SPEED_COEFF were retuned to 6.0f/0.6f, because this check only
+    # ever looked at touch_short_gesture_harness.cpp.
     main_src = MAIN.read_text(encoding='utf-8')
-    harness_src = HARNESSES[1].read_text(encoding='utf-8')
     checks = [
-        ('SettingID::TOUCHPAD_MIN_CUTOFF, (\\d+\\.?\\d*)f\\)', 'SHIPPED_MIN_CUTOFF = (\\d+\\.?\\d*)f;'),
-        ('SettingID::TOUCHPAD_SPEED_COEFF, (\\d+\\.?\\d*)f\\)', 'SHIPPED_SPEED_COEFF = (\\d+\\.?\\d*)f;'),
-        ('SettingID::TOUCHPAD_TRACKBALL_DECAY, (\\d+\\.?\\d*)f\\)', 'SHIPPED_TRACKBALL_DECAY = (\\d+\\.?\\d*)f;'),
+        ('SettingID::TOUCHPAD_MIN_CUTOFF, (\\d+\\.?\\d*)f\\)', 'SHIPPED_MIN_CUTOFF\\s*=\\s*(\\d+\\.?\\d*)f;'),
+        ('SettingID::TOUCHPAD_SPEED_COEFF, (\\d+\\.?\\d*)f\\)', 'SHIPPED_SPEED_COEFF\\s*=\\s*(\\d+\\.?\\d*)f;'),
+        ('SettingID::TOUCHPAD_TRACKBALL_DECAY, (\\d+\\.?\\d*)f\\)', 'SHIPPED_TRACKBALL_DECAY\\s*=\\s*(\\d+\\.?\\d*)f;'),
     ]
     ok = True
-    for main_pat, harness_pat in checks:
-        main_m = re.search(main_pat, main_src)
-        harness_m = re.search(harness_pat, harness_src)
-        if not main_m or not harness_m:
-            print(f'FAIL: could not find pattern {main_pat!r} or {harness_pat!r}')
-            ok = False
-            continue
-        if float(main_m.group(1)) != float(harness_m.group(1)):
-            print(f'FAIL: main.cpp registers {main_m.group(1)} but harness asserts {harness_m.group(1)} for {main_pat}')
-            ok = False
+    checked_any = False
+    for harness in HARNESSES:
+        harness_src = harness.read_text(encoding='utf-8')
+        for main_pat, harness_pat in checks:
+            harness_m = re.search(harness_pat, harness_src)
+            if not harness_m:
+                continue  # this harness doesn't declare this particular constant
+            checked_any = True
+            main_m = re.search(main_pat, main_src)
+            if not main_m:
+                print(f'FAIL: could not find pattern {main_pat!r} in main.cpp')
+                ok = False
+                continue
+            if float(main_m.group(1)) != float(harness_m.group(1)):
+                print(f'FAIL: main.cpp registers {main_m.group(1)} but {harness.name} asserts '
+                      f'{harness_m.group(1)} for {main_pat}')
+                ok = False
+    if not checked_any:
+        print('FAIL: no harness declared any SHIPPED_* default to check')
+        return False
     return ok
 
 
