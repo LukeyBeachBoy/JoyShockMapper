@@ -76,6 +76,20 @@ void initConsole(std::function<void()>);
 #ifndef _WIN32
 void initFifoCommandListener();
 #endif
+// Module name only (e.g. "game.exe"), no window title. On win32 this is a
+// kernel-level QueryFullProcessImageName lookup with no cross-process message
+// round trip, so it is safe to call on a tight, unconditional poll -- unlike
+// GetActiveWindowName below, which also fetches the window title and can block
+// for as long as the foreground process's own message pump is busy.
+string GetActiveWindowModule();
+
+// Module name and window title together. The title comes from GetWindowText,
+// which on win32 sends WM_GETTEXT to a window owned by another process and
+// waits for that process to service it -- fine for an occasional, one-off
+// lookup (an actual app switch), but calling it on every tick of a poll loop
+// stalls that thread for however long the foreground app (a game, most often)
+// takes to get around to its message queue, repeating on whatever the poll's
+// own period is.
 tuple<string, string> GetActiveWindowName();
 
 vector<string> ListDirectory(string directory);

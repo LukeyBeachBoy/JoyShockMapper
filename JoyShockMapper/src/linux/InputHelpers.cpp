@@ -704,6 +704,17 @@ std::tuple<std::string, std::string> GetActiveWindowName()
 	return result;
 }
 
+std::string GetActiveWindowModule()
+{
+	// X11's XFetchName/XGetWindowProperty query the X server's own cached window
+	// state, not the target application's message loop, so there is no
+	// equivalent here to win32's GetWindowText hang risk (see the win32
+	// implementation and InputHelpers.h) that motivated splitting this out.
+	// Kept as a thin wrapper so AutoLoad.cpp's poll loop, which is shared
+	// between platforms, has one function to call either way.
+	return std::get<0>(GetActiveWindowName());
+}
+
 std::vector<std::string> ListDirectory(std::string directory)
 {
 	std::vector<std::string> fileListing;

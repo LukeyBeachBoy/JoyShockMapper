@@ -265,36 +265,51 @@ void initConsole()
 	SetConsoleCtrlHandler(&ConsoleCtrlHandler, TRUE);
 }
 
+// Shared by both functions below: PID -> exe basename via QueryFullProcessImageName,
+// a kernel-level lookup that never has to wait on the target process itself.
+static string ModuleNameFromWindow(HWND activeWindow)
+{
+	DWORD pid;
+	// https://stackoverflow.com/questions/14745320/get-active-processname-in-vc
+	if (!GetWindowThreadProcessId(activeWindow, &pid))
+		return "";
+	HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+	if (!hProcess)
+		return "";
+	string module(256, '\0');
+	DWORD len = DWORD(module.size());
+	bool ok = QueryFullProcessImageNameA(hProcess, 0, &module[0], &len);
+	CloseHandle(hProcess);
+	if (!ok)
+		return "";
+	auto pos = module.find_last_of("\\");
+	module = module.substr(pos + 1, module.size() - pos);
+	module.resize(strlen(module.c_str()));
+	return module;
+}
+
+string GetActiveWindowModule()
+{
+	HWND activeWindow = GetForegroundWindow();
+	return activeWindow ? ModuleNameFromWindow(activeWindow) : "";
+}
+
 tuple<string, string> GetActiveWindowName()
 {
 	HWND activeWindow = GetForegroundWindow();
 	if (activeWindow)
 	{
-		string module(256, '\0');
 		string title(256, '\0');
 		GetWindowTextA(activeWindow, &title[0], title.size()); //note: C++11 only
 		title.resize(strlen(title.c_str()));
-		DWORD pid;
-		// https://stackoverflow.com/questions/14745320/get-active-processname-in-vc
-		if (GetWindowThreadProcessId(activeWindow, &pid))
+		string module = ModuleNameFromWindow(activeWindow);
+		if (!module.empty())
 		{
-			HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
-			if (hProcess)
+			if (title.empty())
 			{
-				DWORD len = DWORD(module.size());
-				if (QueryFullProcessImageNameA(hProcess, 0, &module[0], &len))
-				{
-					auto pos = module.find_last_of("\\");
-					module = module.substr(pos + 1, module.size() - pos);
-					module.resize(strlen(module.c_str()));
-					if (title.empty())
-					{
-						title = module;
-					}
-				}
-				CloseHandle(hProcess);
-				return { module, title };
+				title = module;
 			}
+			return { module, title };
 		}
 	}
 	return { "", "" };
