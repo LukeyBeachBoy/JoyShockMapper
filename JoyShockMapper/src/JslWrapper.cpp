@@ -56,6 +56,12 @@ public:
 		return JslGetTouchState(deviceId, previous);
 	}
 
+	bool GetStickTouch(int deviceId, bool rightStick) override
+	{
+		// No capacitive sticks on any controller this backend supports.
+		return false;
+	}
+
 	bool GetTouchpadDimension(int deviceId, int& sizeX, int& sizeY) override
 	{
 		return JslGetTouchpadDimension(deviceId, sizeX, sizeY);

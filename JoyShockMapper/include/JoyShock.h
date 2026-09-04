@@ -55,8 +55,15 @@ struct TouchMousePipeline
 	// to restart when the source finger changes, otherwise handing over between two
 	// contacts teleports the cursor.
 	int sourceIndex = -1;
+	// Coast velocity in mouse units per SECOND, not per poll. Storing a per-poll
+	// displacement made the coast speed track however long the last tick happened
+	// to be, so it visibly stuttered whenever the poll interval jittered.
 	float momentumX = 0.f, momentumY = 0.f;
+	// active: a coast is in flight. contact: a finger is on the pad RIGHT NOW.
+	// These are not the same thing, and conflating them is what let a re-touch
+	// mid-coast differentiate the gap between liftoff and touchdown.
 	bool active = false;
+	bool contact = false;
 
 	void reset()
 	{
@@ -67,6 +74,7 @@ struct TouchMousePipeline
 		sourceIndex = -1;
 		momentumX = momentumY = 0.f;
 		active = false;
+		contact = false;
 	}
 
 	// rawX / rawY: normalised pad position in [0, 1]. dt in SECONDS.

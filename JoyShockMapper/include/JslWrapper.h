@@ -308,6 +308,10 @@ public:
 	virtual IMU_STATE GetIMUState(int deviceId) = 0;
 	virtual MOTION_STATE GetMotionState(int deviceId) = 0;
 	virtual TOUCH_STATE GetTouchState(int deviceId, bool previous = false) = 0;
+	// Capacitive thumbstick contact. Display only: it drives the live preview so a
+	// resting thumb is visible alongside the pads and grips, and is not a bindable
+	// button (the controller has no MISC slots left for it).
+	virtual bool GetStickTouch(int deviceId, bool rightStick) = 0;
 	virtual bool GetTouchpadDimension(int deviceId, int& sizeX, int& sizeY) = 0;
 	virtual uint64_t GetButtons(int deviceId) = 0;
 	virtual float GetLeftX(int deviceId) = 0;

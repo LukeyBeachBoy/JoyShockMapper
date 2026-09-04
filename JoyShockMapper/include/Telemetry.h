@@ -51,6 +51,9 @@ struct TelemetryDeviceStatus
 	TelemetryPadState rightPad;
 	TelemetryGripState leftGrip;
 	TelemetryGripState rightGrip;
+	// Capacitive thumbstick contact, the same kind of signal as the pads and grips.
+	bool leftStickTouch = false;
+	bool rightStickTouch = false;
 };
 
 struct TelemetryDevice

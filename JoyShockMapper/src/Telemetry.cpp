@@ -128,6 +128,8 @@ public:
 					    << ",\"rightPad\":{\"x\":" << status.rightPad.x << ",\"y\":" << status.rightPad.y << ",\"touched\":" << (status.rightPad.touched ? "true" : "false") << ",\"pressure\":" << status.rightPad.pressure << "}"
 					    << ",\"leftGrip\":{\"pressed\":" << (status.leftGrip.pressed ? "true" : "false") << "}"
 					    << ",\"rightGrip\":{\"pressed\":" << (status.rightGrip.pressed ? "true" : "false") << "}"
+				    << ",\"leftStickTouch\":" << (status.leftStickTouch ? "true" : "false")
+				    << ",\"rightStickTouch\":" << (status.rightStickTouch ? "true" : "false")
 					    << "}";
 				}
 				oss << "}";

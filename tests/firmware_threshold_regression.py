@@ -1,19 +1,24 @@
-"""Source-level guards for the controller-side grip range and touch gate.
+"""Source-level guards for the controller-side grip sensor calibration.
 
-Both of these went through two wrong designs before this one, so the wrong
-designs are asserted *out* as well as the right one in:
+The grip sensors are the capacitive strips inside the handles: they sense how
+near your hands are, not how hard you squeeze. Three wrong designs preceded the
+right one, so all three are asserted *out*:
 
   * An analog grip axis (SDL_GetJoystickAxis(joy, 6/7)) gated by a host-side
     Schmitt trigger. There is no analog grip channel: SDL's Triton driver
     derives the grip purely from the TRITON_LEFT/RIGHT_GRIP_TOUCH bits and
     publishes it as capacitive sense, so that read returned nothing.
   * A millisecond debounce on the grip bit. Time is not the quantity anyone
-    wants to tune about a squeeze, and it cannot make a light grip register.
+    wants to tune about a grip, and it cannot make a light one register.
+  * LEFT/RIGHT_GRIP_CLICK_PRESSURE. Those are force thresholds for the physical
+    back buttons (L4/R4/L5/R5), which have nothing to do with the capacitive
+    strips, so writing them changed nothing a grip sensor does.
 
-What is actually adjustable is the threshold the controller's own firmware
-uses, per side for the grips and as an on/off pair for touch -- the same
-settings Steam Input drives. They are written with an ID_SET_SETTINGS_VALUES
-feature report through SDL_SendGamepadEffect.
+What is actually adjustable is TIMP_TOUCH_THRESHOLD_ON/OFF, the firmware's one
+capacitive threshold pair -- the same pair behind Steam Input's Grip Sensor
+Calibration page, where it appears as "Grip Sensor Range" and "Flicker Guard
+Size". Written with an ID_SET_SETTINGS_VALUES feature report through
+SDL_SendGamepadEffect.
 """
 import re
 from pathlib import Path
@@ -43,7 +48,9 @@ def test_abandoned_grip_designs_are_gone():
     for gone in ('GRIP_THRESHOLD', 'GRIP_HYSTERESIS', '_gripPressed',
                  'GetLeftGrip', 'GetRightGrip',
                  'LEFT_GRIP_ON_MS', 'RIGHT_GRIP_ON_MS',
-                 'LEFT_GRIP_OFF_MS', 'RIGHT_GRIP_OFF_MS'):
+                 'LEFT_GRIP_OFF_MS', 'RIGHT_GRIP_OFF_MS',
+                 'LEFT_GRIP_RANGE', 'RIGHT_GRIP_RANGE',
+                 'GRIP_CLICK_PRESSURE'):
         for name, text in (('SDLWrapper.cpp', SDL), ('main.cpp', MAIN),
                            ('JslWrapper.h', JSLW_H), ('JslWrapper.cpp', JSLW_CPP),
                            ('JoyShockMapper.h', JSM_H)):
@@ -55,10 +62,9 @@ def test_firmware_setting_numbers_match_sdl_header():
     by contract, so a mismatch here means someone mistyped an index."""
     expected = {
         'TRITON_ID_SET_SETTINGS_VALUES': 0x87,
-        'TRITON_SETTING_LEFT_GRIP_CLICK_PRESSURE': 56,
-        'TRITON_SETTING_RIGHT_GRIP_CLICK_PRESSURE': 57,
         'TRITON_SETTING_TIMP_TOUCH_THRESHOLD_ON': 72,
         'TRITON_SETTING_TIMP_TOUCH_THRESHOLD_OFF': 73,
+        'TRITON_ID_OUT_REPORT_HAPTIC_PULSE': 0x81,
     }
     for name, value in expected.items():
         match = re.search(rf'{name} = (0x[0-9A-Fa-f]+|\d+);', SDL)
@@ -101,20 +107,40 @@ def test_unset_thresholds_never_overwrite_the_firmware():
     and a bad guess at the raw units could leave the pads unresponsive."""
     body = SDL.split('void applyTritonSettings', 1)[1].split('\n\tint pollDevices', 1)[0]
     assert 'value < 0.f ? -1' in body
-    for setting in ('leftGrip', 'rightGrip', 'touchOn', 'touchOff'):
+    for setting in ('range', 'releasePoint'):
         assert f'{setting} >= 0 && {setting} != device->_applied' in body, setting
-    # Every registered firmware threshold defaults to the sentinel.
-    for name in ('TOUCHPAD_TOUCH_ON', 'TOUCHPAD_TOUCH_OFF',
-                 'LEFT_GRIP_RANGE', 'RIGHT_GRIP_RANGE'):
+    for name in ('GRIP_SENSOR_RANGE', 'GRIP_FLICKER_GUARD'):
         assert re.search(rf'SettingID::{name}, -1\.f\)', MAIN), name
         assert re.search(rf'{name}[\s\S]{{0,400}}?setFilter\(&filterFirmwareThreshold\)', MAIN), name
     assert 'if (next < 0.f)' in MAIN.split('float filterFirmwareThreshold', 1)[1][:300]
 
 
-def test_release_threshold_cannot_sit_above_the_press_threshold():
-    """Touch hysteresis only makes sense downward; inverted, the pad latches on."""
+def test_flicker_guard_is_a_distance_below_the_trip_point():
+    """The user sets a guard *size*, the way Steam Input presents it; the firmware
+    wants the release point itself. Converting in the wrong direction, or letting
+    the release point rise above the trip point, latches the sensor on."""
     body = SDL.split('void applyTritonSettings', 1)[1].split('\n\tint pollDevices', 1)[0]
-    assert 'touchOff = std::min(touchOff, touchOn);' in body
+    assert 'releasePoint = guard >= 0 ? std::max(0, range - guard) : range;' in body
+
+
+def test_grip_haptics_are_edge_triggered_and_off_by_default():
+    """Level-triggered, this would buzz for as long as a hand rested on the grip."""
+    assert re.search(r'SettingID::GRIP_HAPTIC_INTENSITY, 0\.f\)', MAIN), \
+        'grip haptics must default to off'
+    body = SDL.split('void updateGripHaptics', 1)[1].split('\n\t}', 1)[0]
+    assert 'left && !device->_leftGripWasOn' in body
+    assert 'right && !device->_rightGripWasOn' in body
+    # The previous state has to be tracked even while haptics are off, or enabling
+    # them mid-session fires for a hand that was already there.
+    assert body.index('device->_leftGripWasOn = left;') > body.index('sendGripHaptic')
+    assert 'if (gamepad == nullptr || intensity <= 0.f)' in SDL
+
+
+def test_grip_haptic_uses_the_output_report_the_sdl_patch_allows():
+    body = SDL.split('static void sendGripHaptic', 1)[1].split('\n\t}', 1)[0]
+    assert 'buffer[0] = TRITON_ID_OUT_REPORT_HAPTIC_PULSE;' in body
+    assert 'TRITON_HAPTIC_PULSE_BYTES = 10' in SDL
+    assert 'buffer[1] = rightSide ? 1 : 0;' in body
 
 
 def test_settings_are_pushed_from_the_poll_loop_only_on_change():
@@ -125,8 +151,7 @@ def test_settings_are_pushed_from_the_poll_loop_only_on_change():
     assert 'if (pending.empty())' in body
     assert 'if (sendTritonSettings(device->_sdlController, pending))' in body
     # Cached per device, so a reconnect (which rebuilds the struct) re-applies.
-    for field in ('_appliedLeftGripRange', '_appliedRightGripRange',
-                  '_appliedTouchOn', '_appliedTouchOff'):
+    for field in ('_appliedGripRange', '_appliedGripRelease'):
         assert f'int {field} = -1;' in SDL, field
 
 
@@ -151,8 +176,8 @@ def test_telemetry_reports_grip_as_the_bit_it_is():
 
 
 def test_setting_ids_reserved():
-    for name in ('TOUCHPAD_TOUCH_ON,', 'TOUCHPAD_TOUCH_OFF,',
-                 'LEFT_GRIP_RANGE,', 'RIGHT_GRIP_RANGE,'):
+    for name in ('GRIP_SENSOR_RANGE,', 'GRIP_FLICKER_GUARD,',
+                 'GRIP_HAPTIC_INTENSITY,'):
         assert name in JSM_H, name
 
 

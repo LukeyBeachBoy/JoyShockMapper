@@ -56,8 +56,31 @@ function(patch_sdl_triton_touch SDL_SOURCE_DIR)
         set(_patched FALSE)
     endforeach()
 
+    # --- Let a haptic pulse through SendJoystickEffect ------------------------
+    #
+    # The grips have their own haptic actuators, driven by an OUTPUT report
+    # (ID_OUT_REPORT_HAPTIC_PULSE, 10 bytes) rather than the feature report
+    # SendJoystickEffect accepts, so there is no way to reach them from outside
+    # SDL at all. The driver already writes output reports for rumble; this just
+    # accepts the one length that identifies a haptic pulse and writes it the
+    # same way. Any other size still returns SDL_Unsupported exactly as before.
+    set(_effect_original "    if (size == HID_FEATURE_REPORT_BYTES) {")
+    set(_effect_replacement "    if (size == HID_HAPTIC_PULSE_OUTPUT_REPORT_BYTES) {\n        return SDL_hid_write(device->dev, data, size) == size;\n    }\n    if (size == HID_FEATURE_REPORT_BYTES) {")
+
+    string(FIND "${_source}" "HID_HAPTIC_PULSE_OUTPUT_REPORT_BYTES) {" _haptic_already)
+    if(_haptic_already LESS 0)
+        string(FIND "${_source}" "${_effect_original}" _found)
+        if(_found LESS 0)
+            message(FATAL_ERROR
+                "Steam Controller haptic patch: could not find SendJoystickEffect's "
+                "feature-report branch in SDL_hidapi_steam_triton.c.")
+        endif()
+        string(REPLACE "${_effect_original}" "${_effect_replacement}" _source "${_source}")
+        set(_patched FALSE)
+    endif()
+
     if(NOT _patched)
         file(WRITE "${_driver}" "${_source}")
-        message(STATUS "Patched SDL: Steam Controller pads report capacitive contact")
+        message(STATUS "Patched SDL: capacitive pad contact + grip haptic pulses")
     endif()
 endfunction()

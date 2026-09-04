@@ -23,6 +23,7 @@ MAIN = ROOT / 'JoyShockMapper/src/main.cpp'
 HARNESSES = [
     Path(__file__).parent / 'touch_pipeline_harness.cpp',
     Path(__file__).parent / 'touch_short_gesture_harness.cpp',
+    Path(__file__).parent / 'touch_retouch_harness.cpp',
 ]
 
 BEGIN = 'struct LowPassFilter1E'

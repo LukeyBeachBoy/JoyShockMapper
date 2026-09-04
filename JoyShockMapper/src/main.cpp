@@ -200,17 +200,30 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 {
 	TouchMousePipeline &pipe = js->touchPipelines[padIndex];
 
+	// Real elapsed seconds, guarded once here so both branches agree on it.
+	const float dt = (delta_time > 0.f && delta_time <= 0.1f) ? delta_time : 0.003f;
+
 	if (point.isDown())
 	{
-		// A fresh contact, or a handover to a different finger, restarts the filter so
-		// the position discontinuity is never differentiated into a cursor jump.
-		if (!pipe.active || pipe.sourceIndex != sourceIndex)
+		// Every no-contact -> contact transition restarts the filter and kills any
+		// coast in flight, which is what grabbing a trackball does.
+		//
+		// pipe.active cannot stand in for "a finger is down": it stays true for the
+		// whole coast. Touching the pad mid-coast therefore skipped this reset, and
+		// the very next step() differentiated the gap between where the finger lifted
+		// and where it landed -- the cursor shot across the screen to "meet" the
+		// finger, and that huge delta became the momentum for the next coast, so
+		// releasing flung it again. A single stray capacitive sample during a coast
+		// did the same thing in miniature, which is the cursor jumping back to a
+		// position it had already passed.
+		if (!pipe.contact || pipe.sourceIndex != sourceIndex)
 		{
 			pipe.reset();
 			pipe.sourceIndex = sourceIndex;
 		}
+		pipe.contact = true;
 
-		FloatXY normalised = pipe.step(point.posX, point.posY, delta_time,
+		FloatXY normalised = pipe.step(point.posX, point.posY, dt,
 		  js->getSetting(SettingID::TOUCHPAD_MIN_CUTOFF),
 		  js->getSetting(SettingID::TOUCHPAD_SPEED_COEFF));
 
@@ -219,12 +232,19 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		  js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
 
 		pipe.active = true;
-		pipe.momentumX = moved.x();
-		pipe.momentumY = moved.y();
+		// Velocity, not this tick's displacement: the coast below re-integrates it
+		// against its own dt, so a jittering poll interval no longer shows up as a
+		// stuttering coast.
+		pipe.momentumX = moved.x() / dt;
+		pipe.momentumY = moved.y() / dt;
 		moveMouse(moved.x(), moved.y());
 	}
-	else if (pipe.active)
+	else
 	{
+		pipe.contact = false;
+		if (!pipe.active)
+			return;
+
 		// Post-liftoff coast, opt-in via TOUCHPAD_TRACKBALL_DECAY (default 0 = off,
 		// matching Steam Input: the cursor stops the instant contact ends). This is
 		// deliberately NOT the legacy TRACKBALL_DECAY setting -- that one belongs to
@@ -236,13 +256,15 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 			pipe.reset();
 			return;
 		}
-		float decay = exp2f(-delta_time * decaySetting);
+		float decay = exp2f(-dt * decaySetting);
 		pipe.momentumX *= decay;
 		pipe.momentumY *= decay;
-		if (fabsf(pipe.momentumX) < 0.1f && fabsf(pipe.momentumY) < 0.1f)
+		// Stop below roughly a third of a pixel per tick at the nominal 333Hz, in the
+		// velocity units momentum now carries.
+		if (fabsf(pipe.momentumX) < 40.f && fabsf(pipe.momentumY) < 40.f)
 			pipe.reset();
 		else
-			moveMouse(pipe.momentumX, pipe.momentumY);
+			moveMouse(pipe.momentumX * dt, pipe.momentumY * dt);
 	}
 }
 
@@ -1382,10 +1404,14 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 
 			// Grip is a capacitive contact bit, not an analog channel -- the squeeze
 			// force needed to trip it is set in the controller's firmware from
-			// LEFT_GRIP_RANGE / RIGHT_GRIP_RANGE. JSOFFSET_MISC6 = left grip,
+			// GRIP_SENSOR_RANGE / GRIP_FLICKER_GUARD. JSOFFSET_MISC6 = left grip,
 			// JSOFFSET_MISC5 = right, the same bits a binding sees.
 			status.leftGrip.pressed = (status.buttons & (1ULL << JSOFFSET_MISC6)) != 0;
 			status.rightGrip.pressed = (status.buttons & (1ULL << JSOFFSET_MISC5)) != 0;
+			// Same family of signal as the pads and the grips: a capacitive contact
+			// bit. Display only -- there is no MISC slot left to bind it to.
+			status.leftStickTouch = jsl->GetStickTouch(device->_handle, false);
+			status.rightStickTouch = jsl->GetStickTouch(device->_handle, true);
 		}
 		dev.status = status;
 #endif
@@ -3451,10 +3477,6 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<FloatXY>(*touchpad_sens))
 	                       ->setHelp("Changes the sensitivity of the touchpad when set as a mouse. Enter a second value for a different vertical sensitivity."));
 
-	auto touch_smoothing = new JSMSetting<float>(SettingID::TOUCHPAD_SMOOTHING, 0.f);
-	touch_smoothing->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
-	SettingsManager::add(touch_smoothing);
-	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_SMOOTHING", *touch_smoothing))->setHelp("Deprecated: superseded by TOUCHPAD_MIN_CUTOFF and TOUCHPAD_SPEED_COEFF. No longer affects mouse output."));
 
 	// One Euro filter on pad position. Lower cutoff means heavier smoothing at low
 	// finger speed; the speed coefficient raises the cutoff as you swipe faster, so
@@ -3490,56 +3512,40 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(touch_trackball_decay);
 	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_TRACKBALL_DECAY", *touch_trackball_decay))->setHelp("Coast the mouse briefly after the finger lifts, using whatever the filter hadn't yet caught up on. 0 (default) disables coasting: the cursor stops the instant contact ends. Higher decays faster; try 30-40 for a short flick-only coast."));
 
-	// Contact detection is the controller's job, not ours. The Steam Controller
-	// 2026 firmware runs a Schmitt trigger on the capacitive touch signal -- a
-	// press threshold and a lower release threshold -- and that is exactly the
-	// knob Steam Input turns. Setting it here instead of second-guessing the
-	// driver's touch bit on the host costs no latency, can't fight the driver,
-	// and is the only place a release threshold can sit *below* the press
-	// threshold on the raw signal rather than on an already-quantized bit.
-	//
-	// Values are raw firmware units; the usable span is small and sensor
-	// specific, so -1 (the default) leaves whatever the firmware already has --
-	// out of the box the pads behave exactly as they do under Steam.
-	auto touch_on = new JSMSetting<float>(SettingID::TOUCHPAD_TOUCH_ON, -1.f);
-	touch_on->setFilter(&filterFirmwareThreshold);
-	SettingsManager::add(touch_on);
-	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_TOUCH_ON", *touch_on))
-	                       ->setHelp("Capacitive signal a finger must reach for the controller to report a touch, in raw firmware units. Lower registers lighter touches. -1 (default) keeps the controller's own value."));
-
-	auto touch_off = new JSMSetting<float>(SettingID::TOUCHPAD_TOUCH_OFF, -1.f);
-	touch_off->setFilter(&filterFirmwareThreshold);
-	SettingsManager::add(touch_off);
-	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_TOUCH_OFF", *touch_off))
-	                       ->setHelp("Release threshold for touch contact, in the same units as TOUCHPAD_TOUCH_ON. The gap between the two is the hysteresis that stops a finger resting on the threshold from chattering. Clamped to at most TOUCHPAD_TOUCH_ON. -1 (default) keeps the controller's own value."));
-
 	auto touch_accel = new JSMSetting<float>(SettingID::TOUCHPAD_ACCELERATION, 0.f);
 	touch_accel->setFilter(&filterPositive);
 	SettingsManager::add(touch_accel);
 	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCELERATION", *touch_accel))->setHelp("Velocity-based touchpad mouse acceleration."));
 
-	// Grip range, per hand: the force each grip must reach before the controller
-	// calls it a squeeze. The grip signal reaching the host is a single bit -- the
-	// report carries no analog grip channel -- so the threshold behind it is a
-	// firmware setting, which is also why Steam Input's grip slider lives on the
-	// device side. Separate left and right values because a right-handed grip on a
-	// controller is genuinely not the same squeeze as the left.
+	// Grip sensors: the capacitive strips inside the handles. They sense how near
+	// your hands are, not how hard you squeeze -- the grip *buttons* (L4/R4/L5/R5)
+	// are separate physical switches with their own force thresholds, and none of
+	// this touches them.
 	//
-	// These write LEFT/RIGHT_GRIP_CLICK_PRESSURE, the force threshold for the grip
-	// buttons. The firmware exposes no threshold for the grips' capacitive
-	// hand-presence bit, so if you have bound the capsense grip rather than the
-	// grip button, these will not move it.
-	auto left_grip_range = new JSMSetting<float>(SettingID::LEFT_GRIP_RANGE, -1.f);
-	left_grip_range->setFilter(&filterFirmwareThreshold);
-	SettingsManager::add(left_grip_range);
-	commandRegistry->add((new JSMAssignment<float>("LEFT_GRIP_RANGE", *left_grip_range))
-	                       ->setHelp("Squeeze force the left grip must reach to register, in raw firmware units. Lower means a lighter squeeze is enough. -1 (default) keeps the controller's own value."));
+	// Both knobs live in the controller, which is the only place a threshold on a
+	// capacitive signal can act; by the time the host sees it, it is one bit. They
+	// are the pair behind Steam Input's Grip Sensor Calibration page. The firmware
+	// carries a single capacitive threshold pair rather than one per side, which is
+	// also why Steam Input shows a single Range and a single Flicker Guard.
+	auto grip_sensor_range = new JSMSetting<float>(SettingID::GRIP_SENSOR_RANGE, -1.f);
+	grip_sensor_range->setFilter(&filterFirmwareThreshold);
+	SettingsManager::add(grip_sensor_range);
+	commandRegistry->add((new JSMAssignment<float>("GRIP_SENSOR_RANGE", *grip_sensor_range))
+	                       ->setHelp("How near your hand must come to the grip before the sensor trips, in raw firmware units. Lower detects your hands sooner. -1 (default) keeps the controller's own value."));
 
-	auto right_grip_range = new JSMSetting<float>(SettingID::RIGHT_GRIP_RANGE, -1.f);
-	right_grip_range->setFilter(&filterFirmwareThreshold);
-	SettingsManager::add(right_grip_range);
-	commandRegistry->add((new JSMAssignment<float>("RIGHT_GRIP_RANGE", *right_grip_range))
-	                       ->setHelp("Squeeze force the right grip must reach to register, in raw firmware units. Lower means a lighter squeeze is enough. -1 (default) keeps the controller's own value."));
+	auto grip_flicker_guard = new JSMSetting<float>(SettingID::GRIP_FLICKER_GUARD, -1.f);
+	grip_flicker_guard->setFilter(&filterFirmwareThreshold);
+	SettingsManager::add(grip_flicker_guard);
+	commandRegistry->add((new JSMAssignment<float>("GRIP_FLICKER_GUARD", *grip_flicker_guard))
+	                       ->setHelp("Extra distance your hand must move away before the grip sensor releases, so resting right at the edge of the range can't flicker it on and off. Same units as GRIP_SENSOR_RANGE. -1 (default) keeps the controller's own value."));
+
+	// The grips have their own haptic actuators. Off by default: an unasked-for
+	// buzz every time you adjust your hands would be worse than no feature.
+	auto grip_haptic = new JSMSetting<float>(SettingID::GRIP_HAPTIC_INTENSITY, 0.f);
+	grip_haptic->setFilter([](auto, auto next) { return clamp(next, 0.f, 100.f); });
+	SettingsManager::add(grip_haptic);
+	commandRegistry->add((new JSMAssignment<float>("GRIP_HAPTIC_INTENSITY", *grip_haptic))
+	                       ->setHelp("Strength of the pulse the grip actuator fires when that grip sensor trips, 0-100. 0 (default) disables grip haptics entirely."));
 
 	auto hide_minimized = new JSMVariable<Switch>(Switch::OFF);
 	minimizeThread.reset(new PollingThread( "Minimize thread", [] (void *param)

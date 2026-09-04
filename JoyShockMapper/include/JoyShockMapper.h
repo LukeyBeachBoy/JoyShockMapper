@@ -231,7 +231,6 @@ enum class SettingID
 	TOUCH_DEADZONE_INNER,
 	TOUCH_RING_MODE,
 	TOUCHPAD_SENS,
-	TOUCHPAD_SMOOTHING,
 	TOUCHPAD_ACCELERATION,
 	LIGHT_BAR,
 	SCROLL_SENS,
@@ -299,18 +298,22 @@ enum class SettingID
 	// behaviour for it). 0 disables coasting entirely: the cursor stops the instant
 	// contact ends, matching Steam Input's Mouse touch style. This is the default.
 	TOUCHPAD_TRACKBALL_DECAY,
-	// Contact detection lives in the controller's own firmware (Steam Controller
-	// 2026), which is where Steam Input sets it too: a capacitive touch threshold
-	// with a separate, lower release threshold. Doing it there means zero host
-	// latency and no second gate fighting the driver's touch bit. -1 leaves the
-	// firmware's own value alone, which is the default.
-	TOUCHPAD_TOUCH_ON,
-	TOUCHPAD_TOUCH_OFF,
-	// Squeeze force each grip must reach to register, set per hand in firmware --
-	// you naturally hold one side harder than the other. -1 leaves the firmware's
-	// own value alone, which is the default.
-	LEFT_GRIP_RANGE,
-	RIGHT_GRIP_RANGE,
+	// Grip sensors (Steam Controller 2026): the capacitive strips inside the
+	// handles, which sense how near your hands are rather than how hard you
+	// squeeze. The controller decides the bit, so the two knobs live in its
+	// firmware -- the same pair Steam Input's Grip Sensor Calibration drives:
+	//
+	//   GRIP_SENSOR_RANGE   how near a hand must be before the sensor trips
+	//   GRIP_FLICKER_GUARD  extra travel needed to trip it back off, so a hand
+	//                       resting at the edge of range can't chatter
+	//
+	// One pair, not one per side: the firmware carries a single capacitive
+	// threshold pair, which is also why Steam Input shows a single pair.
+	// -1 leaves the firmware's own value alone, which is the default.
+	GRIP_SENSOR_RANGE,
+	GRIP_FLICKER_GUARD,
+	// Haptic pulse fired by the grip actuators when a grip sensor trips. 0 = off.
+	GRIP_HAPTIC_INTENSITY,
 };
 
 // constexpr are like #define but with respect to typeness

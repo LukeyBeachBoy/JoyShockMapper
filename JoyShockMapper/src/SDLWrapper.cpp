@@ -328,10 +328,11 @@ public:
 	// Last values pushed to the controller's firmware, so the settings feature
 	// report is only re-sent when something actually changed. -1 = never applied,
 	// which also forces a re-apply after a reconnect (the struct is rebuilt).
-	int _appliedLeftGripRange = -1;
-	int _appliedRightGripRange = -1;
-	int _appliedTouchOn = -1;
-	int _appliedTouchOff = -1;
+	int _appliedGripRange = -1;
+	int _appliedGripRelease = -1;
+	// Rising edge of each grip sensor, for the haptic pulse.
+	bool _leftGripWasOn = false;
+	bool _rightGripWasOn = false;
 };
 
 struct SdlInstance : public JslWrapper
@@ -531,15 +532,20 @@ public:
 	// enum is append-only by contract, so these are stable.
 	static constexpr uint8_t TRITON_ID_SET_SETTINGS_VALUES = 0x87;
 	//
-	// Touch contact uses TIMP_TOUCH_THRESHOLD_ON/OFF rather than TRACKPAD_Z_*:
-	// the Z settings gate the pad's *pressure* axis, while the touch bit in the
-	// report is capacitive, and these two are the pair that gates it -- a press
-	// threshold with its own lower release threshold, i.e. hysteresis in the one
-	// place it can act on the raw signal instead of on an already-quantized bit.
-	static constexpr uint8_t TRITON_SETTING_LEFT_GRIP_CLICK_PRESSURE = 56;
-	static constexpr uint8_t TRITON_SETTING_RIGHT_GRIP_CLICK_PRESSURE = 57;
+	// TIMP_TOUCH_THRESHOLD_ON/OFF is the capacitive threshold pair -- a trip point
+	// and its own lower release point. It is what Steam Input's Grip Sensor
+	// Calibration drives as "Grip Sensor Range" and "Flicker Guard Size", and it is
+	// the only capacitive pair the firmware has. The *_GRIP_CLICK_PRESSURE settings
+	// nearby are force thresholds for the physical back buttons and have nothing to
+	// do with the capacitive strips in the handles.
 	static constexpr uint8_t TRITON_SETTING_TIMP_TOUCH_THRESHOLD_ON = 72;
 	static constexpr uint8_t TRITON_SETTING_TIMP_TOUCH_THRESHOLD_OFF = 73;
+
+	// Grip haptics ride an OUTPUT report rather than a feature report. SDL's
+	// SendJoystickEffect only forwarded feature reports until the build's SDL patch
+	// added the 10-byte pulse length; see cmake/PatchSdlTritonTouch.cmake.
+	static constexpr uint8_t TRITON_ID_OUT_REPORT_HAPTIC_PULSE = 0x81;
+	static constexpr int TRITON_HAPTIC_PULSE_BYTES = 10;
 	static constexpr int TRITON_FEATURE_REPORT_BYTES = 64;
 
 	// Builds the payload SDL's FeatureReportMsg describes and hands it to the
@@ -587,6 +593,63 @@ public:
 		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
 	}
 
+	// Fires the grip actuator on the side whose sensor just tripped.
+	//
+	// MsgHapticPulse is { side, on_us, off_us, repeat_count, gain_db }, little
+	// endian, behind a 1-byte output report id. A single short burst is what a
+	// grip detection wants -- one tick as your hand arrives, not a rumble -- so
+	// repeat_count stays at 1 and off_us at 0.
+	static void sendGripHaptic(SDL_Gamepad *gamepad, bool rightSide, float intensity)
+	{
+		if (gamepad == nullptr || intensity <= 0.f)
+			return;
+
+		const float scale = std::clamp(intensity, 0.f, 100.f) / 100.f;
+		// A 2-12ms burst: below ~2ms the actuator barely moves, and much above
+		// 12ms stops reading as a tick and starts reading as a buzz.
+		const uint16_t onUs = uint16_t(2000.f + scale * 10000.f);
+		const uint16_t gainDb = uint16_t(scale * 100.f);
+
+		uint8_t buffer[TRITON_HAPTIC_PULSE_BYTES] = { 0 };
+		buffer[0] = TRITON_ID_OUT_REPORT_HAPTIC_PULSE;
+		buffer[1] = rightSide ? 1 : 0;
+		buffer[2] = uint8_t(onUs & 0xFF);
+		buffer[3] = uint8_t((onUs >> 8) & 0xFF);
+		buffer[4] = 0; // off_us
+		buffer[5] = 0;
+		buffer[6] = 1; // repeat_count
+		buffer[7] = 0;
+		buffer[8] = uint8_t(gainDb & 0xFF);
+		buffer[9] = uint8_t((gainDb >> 8) & 0xFF);
+		SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
+	}
+
+	// Pulses whichever grip sensor just went from off to on. Edge-triggered on
+	// purpose: a level-triggered pulse would buzz continuously for as long as you
+	// held the controller.
+	void updateGripHaptics(ControllerDevice *device)
+	{
+		if (device == nullptr || device->_sdlController == nullptr ||
+		    device->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
+		{
+			return;
+		}
+
+		const float intensity = SettingsManager::get<float>(SettingID::GRIP_HAPTIC_INTENSITY)->value();
+		const bool left = SDL_GetGamepadCapSense(device->_sdlController, SDL_GAMEPAD_CAPSENSE_LEFT_GRIP);
+		const bool right = SDL_GetGamepadCapSense(device->_sdlController, SDL_GAMEPAD_CAPSENSE_RIGHT_GRIP);
+
+		if (left && !device->_leftGripWasOn)
+			sendGripHaptic(device->_sdlController, false, intensity);
+		if (right && !device->_rightGripWasOn)
+			sendGripHaptic(device->_sdlController, true, intensity);
+
+		// Tracked even when haptics are off, so turning them on mid-session doesn't
+		// fire for a hand that was already resting there.
+		device->_leftGripWasOn = left;
+		device->_rightGripWasOn = right;
+	}
+
 	// Pushes grip range / touch gate to the controller when the user changes them.
 	// Only writes on an actual change: a feature report is a round trip to the
 	// device and has no business running every poll.
@@ -606,35 +669,28 @@ public:
 			const float value = SettingsManager::get<float>(id)->value();
 			return value < 0.f ? -1 : int(value + 0.5f);
 		};
-		const int leftGrip = readSetting(SettingID::LEFT_GRIP_RANGE);
-		const int rightGrip = readSetting(SettingID::RIGHT_GRIP_RANGE);
-		const int touchOn = readSetting(SettingID::TOUCHPAD_TOUCH_ON);
-		int touchOff = readSetting(SettingID::TOUCHPAD_TOUCH_OFF);
-		// The release threshold must sit at or below the press threshold, or the
-		// pad latches on and never lets go. Clamping here rather than in the
-		// setting's filter keeps the two independently editable in either order.
-		if (touchOff >= 0 && touchOn >= 0)
-			touchOff = std::min(touchOff, touchOn);
+		const int range = readSetting(SettingID::GRIP_SENSOR_RANGE);
+		const int guard = readSetting(SettingID::GRIP_FLICKER_GUARD);
+		// The flicker guard is expressed as a distance below the trip point, which
+		// is how it reads to a user; the firmware wants the release point itself.
+		// It can never sit above the trip point, or the sensor latches on.
+		int releasePoint = -1;
+		if (range >= 0)
+			releasePoint = guard >= 0 ? std::max(0, range - guard) : range;
 
 		vector<pair<uint8_t, uint16_t>> pending;
-		if (leftGrip >= 0 && leftGrip != device->_appliedLeftGripRange)
-			pending.emplace_back(TRITON_SETTING_LEFT_GRIP_CLICK_PRESSURE, uint16_t(leftGrip));
-		if (rightGrip >= 0 && rightGrip != device->_appliedRightGripRange)
-			pending.emplace_back(TRITON_SETTING_RIGHT_GRIP_CLICK_PRESSURE, uint16_t(rightGrip));
-		if (touchOn >= 0 && touchOn != device->_appliedTouchOn)
-			pending.emplace_back(TRITON_SETTING_TIMP_TOUCH_THRESHOLD_ON, uint16_t(touchOn));
-		if (touchOff >= 0 && touchOff != device->_appliedTouchOff)
-			pending.emplace_back(TRITON_SETTING_TIMP_TOUCH_THRESHOLD_OFF, uint16_t(touchOff));
+		if (range >= 0 && range != device->_appliedGripRange)
+			pending.emplace_back(TRITON_SETTING_TIMP_TOUCH_THRESHOLD_ON, uint16_t(range));
+		if (releasePoint >= 0 && releasePoint != device->_appliedGripRelease)
+			pending.emplace_back(TRITON_SETTING_TIMP_TOUCH_THRESHOLD_OFF, uint16_t(releasePoint));
 
 		if (pending.empty())
 			return;
 
 		if (sendTritonSettings(device->_sdlController, pending))
 		{
-			device->_appliedLeftGripRange = leftGrip;
-			device->_appliedRightGripRange = rightGrip;
-			device->_appliedTouchOn = touchOn;
-			device->_appliedTouchOff = touchOff;
+			device->_appliedGripRange = range;
+			device->_appliedGripRelease = releasePoint;
 		}
 		// On failure the cached values stay stale, so the next poll retries.
 	}
@@ -653,8 +709,9 @@ public:
 			SDL_UpdateGamepads();
 			for (auto iter = _controllerMap.begin(); iter != _controllerMap.end(); ++iter)
 			{
-				// No-op unless a grip range / touch gate actually changed.
+				// No-op unless a grip range / flicker guard actually changed.
 				applyTritonSettings(iter->second);
+				updateGripHaptics(iter->second);
 				if (g_callback)
 				{
 					JOY_SHOCK_STATE dummy1;
@@ -913,6 +970,15 @@ public:
 		return state;
 	}
 
+	bool GetStickTouch(int deviceId, bool rightStick) override
+	{
+		auto *jc = _controllerMap[deviceId];
+		if (jc == nullptr || jc->_sdlController == nullptr)
+			return false;
+		return SDL_GetGamepadCapSense(jc->_sdlController,
+		  rightStick ? SDL_GAMEPAD_CAPSENSE_RIGHT_STICK : SDL_GAMEPAD_CAPSENSE_LEFT_STICK);
+	}
+
 	bool GetTouchpadDimension(int deviceId, int &sizeX, int &sizeY) override
 	{
 		// I am assuming a single touchpad (or all _touchpads are the same dimension)?
@@ -1010,11 +1076,11 @@ public:
 			// Grip sensors are capacitive contact bits, not an analog channel: the
 			// Triton report carries them as TRITON_LEFT/RIGHT_GRIP_TOUCH inside
 			// the button field, which SDL surfaces through the capacitive-sense
-			// API rather than as a joystick button or axis. How hard a squeeze has
-			// to be before that bit trips is set in the controller's firmware, per
-			// side, from LEFT_GRIP_RANGE / RIGHT_GRIP_RANGE (see
-			// applyTritonSettings) -- the same thing Steam Input's grip range
-			// slider adjusts. Nothing to threshold here; just read the bit.
+			// API rather than as a joystick button or axis. How near a hand has to
+			// come before that bit trips is set in the controller's firmware, from
+			// GRIP_SENSOR_RANGE / GRIP_FLICKER_GUARD (see applyTritonSettings) --
+			// the pair behind Steam Input's Grip Sensor Calibration page. Nothing
+			// to threshold here; just read the bit.
 			buttons |= SDL_GetGamepadCapSense(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_CAPSENSE_LEFT_GRIP) ? 1ULL << JSOFFSET_MISC6 : 0;
 			buttons |= SDL_GetGamepadCapSense(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_CAPSENSE_RIGHT_GRIP) ? 1ULL << JSOFFSET_MISC5 : 0;
 		}
