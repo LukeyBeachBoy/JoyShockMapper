@@ -762,13 +762,30 @@ public:
 
 	void RefreshDeviceList()
 	{
-		SDL_PumpEvents();
-		SDL_UpdateJoysticks();
-		SDL_UpdateGamepads();
+		{
+			std::lock_guard guard(controller_lock);
+			SDL_PumpEvents();
+			SDL_UpdateJoysticks();
+			SDL_UpdateGamepads();
+		}
+		// Passive wait for the OS/driver to finish enumerating a device that
+		// was just plugged in -- nothing here needs synchronizing against the
+		// poll loop. Previously controller_lock was held across this delay
+		// too, which meant every caller -- including GetDeviceCount(), which
+		// AutoConnect calls unconditionally every 1000ms for the life of the
+		// session -- blocked pollDevices()'s entire per-tick body (touch,
+		// gyro, stick processing, and the mouse flush that all three funnel
+		// through) for a guaranteed 20ms, once a second, forever. That is
+		// exactly the beat and the shape ("distance between the two cursors
+		// scales with speed") of the reported touch/gyro/stick-aim "double
+		// cursor" jitter, and it ran regardless of AutoLoad's state.
 		SDL_Delay(20);
-		SDL_PumpEvents();
-		SDL_UpdateJoysticks();
-		SDL_UpdateGamepads();
+		{
+			std::lock_guard guard(controller_lock);
+			SDL_PumpEvents();
+			SDL_UpdateJoysticks();
+			SDL_UpdateGamepads();
+		}
 	}
 
 	int ConnectDevices() override
@@ -816,8 +833,11 @@ public:
 
 	int GetDeviceCount() override
 	{
-		std::lock_guard guard(controller_lock);
+		// RefreshDeviceList() locks internally, per phase, so that its
+		// passive 20ms settle delay doesn't hold controller_lock against the
+		// poll loop. Only the final read needs the lock here.
 		RefreshDeviceList();
+		std::lock_guard guard(controller_lock);
 		int count = 0;
 		SDL_JoystickID *joysticksArray = SDL_GetJoysticks(&count);
 		SDL_free(joysticksArray);
@@ -826,8 +846,8 @@ public:
 
 	std::vector<ControllerInfo> ListAvailableDevices() override
 	{
-		std::lock_guard guard(controller_lock);
 		RefreshDeviceList();
+		std::lock_guard guard(controller_lock);
 
 		int count = 0;
 		SDL_JoystickID *joysticksArray = SDL_GetJoysticks(&count);
