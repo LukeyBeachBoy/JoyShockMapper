@@ -3627,6 +3627,14 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<float>("GRIP_HAPTIC_INTENSITY", *grip_haptic))
 	                       ->setHelp("Strength of the pulse the grip actuator fires when that grip sensor trips, 0-100. 0 (default) disables grip haptics entirely."));
 
+	// CLICK is the sharp tap Steam Input plays during grip sensor calibration,
+	// which is what people expect a grip to feel like.
+	auto grip_haptic_effect = new JSMSetting<HapticEffect>(SettingID::GRIP_HAPTIC_EFFECT, HapticEffect::CLICK);
+	grip_haptic_effect->setFilter(&filterInvalidValue<HapticEffect, HapticEffect::INVALID>);
+	SettingsManager::add(grip_haptic_effect);
+	commandRegistry->add((new JSMAssignment<HapticEffect>("GRIP_HAPTIC_EFFECT", *grip_haptic_effect))
+	                       ->setHelp("Which effect the grip actuator plays when that grip sensor trips. Valid values are OFF, TICK, CLICK, TONE, RUMBLE, NOISE, SCRIPT and SWEEP. Defaults to CLICK, the tap Steam Input uses for grip calibration."));
+
 	auto hide_minimized = new JSMVariable<Switch>(Switch::OFF);
 	minimizeThread.reset(new PollingThread( "Minimize thread", [] (void *param)
 		{

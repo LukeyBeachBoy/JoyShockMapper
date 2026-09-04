@@ -557,7 +557,6 @@ public:
 	static constexpr int TRITON_HAPTIC_COMMAND_BYTES = 4;
 	static constexpr uint8_t TRITON_HAPTIC_SIDE_LEFT = 0x01;
 	static constexpr uint8_t TRITON_HAPTIC_SIDE_RIGHT = 0x02;
-	static constexpr uint8_t TRITON_HAPTIC_CLICK = 2;
 	static constexpr int TRITON_FEATURE_REPORT_BYTES = 64;
 
 	// Builds the payload SDL's FeatureReportMsg describes and hands it to the
@@ -627,15 +626,15 @@ public:
 	// asked for. Intensity is a 0-100 dial rather than raw decibels because it is
 	// the only haptic a user meets without choosing an effect by name; the scale is
 	// logarithmic, so the low end still has to reach a long way down to be gentle.
-	static void sendGripHaptic(SDL_Gamepad *gamepad, bool rightSide, float intensity)
+	static void sendGripHaptic(SDL_Gamepad *gamepad, bool rightSide, float intensity, HapticEffect effect)
 	{
-		if (intensity <= 0.f)
+		if (intensity <= 0.f || effect == HapticEffect::OFF || effect == HapticEffect::INVALID)
 			return;
 
 		const float scale = std::clamp(intensity, 0.f, 100.f) / 100.f;
 		const int gainDb = int(std::lround(-24.0f + scale * 36.0f));
 		sendHapticEffect(gamepad, rightSide ? TRITON_HAPTIC_SIDE_RIGHT : TRITON_HAPTIC_SIDE_LEFT,
-		  TRITON_HAPTIC_CLICK, gainDb);
+		  uint8_t(effect), gainDb);
 	}
 
 	// Pulses whichever grip sensor just went from off to on. Edge-triggered on
@@ -650,13 +649,14 @@ public:
 		}
 
 		const float intensity = SettingsManager::get<float>(SettingID::GRIP_HAPTIC_INTENSITY)->value();
+		const HapticEffect effect = SettingsManager::get<HapticEffect>(SettingID::GRIP_HAPTIC_EFFECT)->value();
 		const bool left = SDL_GetGamepadCapSense(device->_sdlController, SDL_GAMEPAD_CAPSENSE_LEFT_GRIP);
 		const bool right = SDL_GetGamepadCapSense(device->_sdlController, SDL_GAMEPAD_CAPSENSE_RIGHT_GRIP);
 
 		if (left && !device->_leftGripWasOn)
-			sendGripHaptic(device->_sdlController, false, intensity);
+			sendGripHaptic(device->_sdlController, false, intensity, effect);
 		if (right && !device->_rightGripWasOn)
-			sendGripHaptic(device->_sdlController, true, intensity);
+			sendGripHaptic(device->_sdlController, true, intensity, effect);
 
 		// Tracked even when haptics are off, so turning them on mid-session doesn't
 		// fire for a hand that was already resting there.

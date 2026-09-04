@@ -141,14 +141,21 @@ def test_grip_haptics_are_edge_triggered_and_off_by_default():
     # The previous state has to be tracked even while haptics are off, or enabling
     # them mid-session fires for a hand that was already there.
     assert body.index('device->_leftGripWasOn = left;') > body.index('sendGripHaptic')
-    assert 'if (intensity <= 0.f)' in SDL.split('static void sendGripHaptic', 1)[1][:400]
+    assert 'if (intensity <= 0.f' in SDL.split('static void sendGripHaptic', 1)[1][:400]
 
 
-def test_grip_haptic_asks_for_the_controllers_own_click():
-    """A hand-rolled square burst was barely perceptible; the canned effect is the
-    tap Steam plays while calibrating the grips."""
+def test_grip_haptic_plays_a_canned_effect_of_the_users_choosing():
+    """A hand-rolled square burst was barely perceptible, so this asks the firmware
+    for one of its own effects. Which one is GRIP_HAPTIC_EFFECT's to say -- it
+    defaults to CLICK, the tap Steam plays while calibrating the grips."""
     body = SDL.split('static void sendGripHaptic', 1)[1].split('\n\t}', 1)[0]
-    assert 'TRITON_HAPTIC_CLICK' in body
+    assert 'uint8_t(effect)' in body, 'the grip pulse must play the configured effect'
+    assert 'SettingID::GRIP_HAPTIC_EFFECT' in SDL
+    assert re.search(r'SettingID::GRIP_HAPTIC_EFFECT, HapticEffect::CLICK\)', MAIN), \
+        'the grip effect must still default to CLICK'
+    # OFF is a real firmware effect (stop), so it has to short-circuit rather than
+    # be sent as a pulse.
+    assert 'effect == HapticEffect::OFF' in body
     wire = SDL.split('static bool sendHapticEffect', 1)[1].split('\n\t}', 1)[0]
     assert 'buffer[0] = TRITON_ID_OUT_REPORT_HAPTIC_COMMAND;' in wire
     assert 'TRITON_HAPTIC_COMMAND_BYTES = 4' in SDL

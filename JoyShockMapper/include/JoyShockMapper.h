@@ -373,6 +373,8 @@ enum class SettingID
 	GRIP_FLICKER_GUARD,
 	// Haptic pulse fired by the grip actuators when a grip sensor trips. 0 = off.
 	GRIP_HAPTIC_INTENSITY,
+	// Which of the controller's effects that pulse plays.
+	GRIP_HAPTIC_EFFECT,
 };
 
 // constexpr are like #define but with respect to typeness
@@ -421,6 +423,23 @@ enum class ControllerOrientation
 	JOYCON_SIDEWAYS,
 	INVALID
 };
+// The controller's own haptic effects, in the controller's own order: the
+// ordinal is what goes on the wire, so do not reorder. Shared by the
+// GRIP_HAPTIC_EFFECT setting and by the HAPTIC_<side>_<effect> binding names, so
+// the two can never drift apart.
+enum class HapticEffect
+{
+	OFF,
+	TICK,
+	CLICK,
+	TONE,
+	RUMBLE,
+	NOISE,
+	SCRIPT,
+	SWEEP,
+	INVALID
+};
+
 enum class RingMode
 {
 	OUTER,

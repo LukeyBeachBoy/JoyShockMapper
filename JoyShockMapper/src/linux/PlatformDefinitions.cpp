@@ -442,10 +442,6 @@ std::string parseHapticName(std::string_view keyName)
 		return {};
 	}
 
-	// The effect names are the controller's own, in its own order.
-	static constexpr std::string_view effects[] = {
-		"OFF", "TICK", "CLICK", "TONE", "RUMBLE", "NOISE", "SCRIPT", "SWEEP"
-	};
 	std::string_view effectName = rest;
 	std::string_view gainText;
 	if (auto underscore = rest.find('_'); underscore != std::string_view::npos)
@@ -454,19 +450,14 @@ std::string parseHapticName(std::string_view keyName)
 		gainText = rest.substr(underscore + 1);
 	}
 
-	int effect = -1;
-	for (int i = 0; i < int(std::size(effects)); ++i)
-	{
-		if (effectName == effects[i])
-		{
-			effect = i;
-			break;
-		}
-	}
-	if (effect < 0)
+	// The effect names and their order are HapticEffect's, so a name here and a
+	// GRIP_HAPTIC_EFFECT value there always mean the same thing.
+	auto parsed = magic_enum::enum_cast<HapticEffect>(effectName);
+	if (!parsed || *parsed == HapticEffect::INVALID)
 	{
 		return {};
 	}
+	const int effect = int(*parsed);
 
 	int gain = 0;
 	if (!gainText.empty())

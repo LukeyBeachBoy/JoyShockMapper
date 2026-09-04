@@ -10,7 +10,9 @@ settings" panel would have had to be re-plumbed for each of those.
 
 Run: python3 tests/haptic_binding_regression.py     (no dependencies)
 """
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,11 +54,18 @@ def test_both_platforms_share_one_parser():
 
 
 def test_every_firmware_effect_is_reachable():
+    """One list of effects, in JoyShockMapper.h, used by the binding names and by
+    GRIP_HAPTIC_EFFECT alike. The ordinal is what goes on the wire, so the order
+    is meaning and a second copy of the list is a way to get it wrong."""
+    header = (ROOT / 'JoyShockMapper/include/JoyShockMapper.h').read_text()
+    enum = re.search(r'enum class HapticEffect\s*\{(.*?)\};', header, re.S)
+    assert enum is not None, 'the HapticEffect enum is gone'
+    names = [n for n in re.findall(r'^\t([A-Z]+),', enum.group(1), re.M) if n != 'INVALID']
+    assert names == ['OFF', 'TICK', 'CLICK', 'TONE', 'RUMBLE', 'NOISE', 'SCRIPT', 'SWEEP'], names
     src = LINUX_PLATFORM.read_text()
-    effects = re.search(r'static constexpr std::string_view effects\[\] = \{(.*?)\}', src, re.S)
-    assert effects is not None, 'no effect table'
-    for name in ('OFF', 'TICK', 'CLICK', 'TONE', 'RUMBLE', 'NOISE', 'SCRIPT', 'SWEEP'):
-        assert f'"{name}"' in effects.group(1), name
+    assert 'magic_enum::enum_cast<HapticEffect>' in src, \
+        'the parser keeps its own copy of the effect names again'
+    assert 'static constexpr std::string_view effects[]' not in src
 
 
 def test_the_backend_reaches_the_device_and_only_the_right_device():
@@ -76,11 +85,30 @@ def test_the_grip_pulse_reuses_the_general_sender():
     assert 'buffer[0]' not in body, 'the grip pulse must not build its own report'
 
 
+def find_magic_enum():
+    env = os.environ.get('MAGIC_ENUM_INCLUDE')
+    if env and (Path(env) / 'magic_enum.hpp').is_file():
+        return Path(env)
+    cache = os.environ.get('CPM_SOURCE_CACHE')
+    roots = [Path(cache)] if cache else []
+    roots += list(ROOT.glob('build*'))
+    for base in roots:
+        for candidate in base.glob('**/magic_enum.hpp'):
+            return candidate.parent
+    return None
+
+
 def test_parser_round_trips():
-    """Compile the real parser and check the payloads Mapping.cpp will decode."""
+    """Compile the real parser, against the real enum, and check the payloads
+    Mapping.cpp will decode."""
+    include = find_magic_enum()
+    if not shutil.which('g++') or include is None:
+        print('SKIP test_parser_round_trips (needs g++ and magic_enum.hpp; set MAGIC_ENUM_INCLUDE)')
+        return
     impl = LINUX_PLATFORM.read_text()
     impl = impl[impl.index('std::string parseHapticName'):]
     harness = '''
+#include "JoyShockMapper.h"
 #include <string>
 #include <string_view>
 #include <iterator>
@@ -109,8 +137,11 @@ int main() {
         src = Path(tmp) / 'p.cpp'
         src.write_text(harness)
         exe = Path(tmp) / 'p'
-        build = subprocess.run(['g++', '-std=c++20', '-o', str(exe), str(src)],
-                               capture_output=True, text=True)
+        build = subprocess.run(
+            ['g++', '-std=c++20',
+             '-I', str(ROOT / 'JoyShockMapper/include'), '-I', str(include),
+             '-o', str(exe), str(src)],
+            capture_output=True, text=True)
         if build.returncode != 0:
             raise AssertionError(f'parser did not compile:\n{build.stderr[:800]}')
         run = subprocess.run([str(exe)], capture_output=True, text=True)
