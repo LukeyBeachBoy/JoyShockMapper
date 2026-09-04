@@ -349,6 +349,11 @@ public:
 	virtual int GetControllerColour(int deviceId) = 0;
 	virtual void SetLightColour(int deviceId, int colour) = 0;
 	virtual void SetRumble(int deviceId, int smallRumble, int bigRumble) = 0;
+	// Play one of the controller's own haptic effects. side is a bitmask
+	// (1 = left, 2 = right, 3 = both), effect indexes the firmware's effect list
+	// (0 off, 1 tick, 2 click, 3 tone, 4 rumble, 5 noise, 6 script, 7 sweep), and
+	// gainDb is a signed decibel gain the firmware limits rather than clips.
+	virtual void SetHaptic(int deviceId, int side, int effect, int gainDb) = 0;
 	virtual void SetPlayerNumber(int deviceId, int number) = 0;
 	virtual void SetTriggerEffect(int deviceId, const AdaptiveTriggerSetting &_leftTriggerEffect, const AdaptiveTriggerSetting &_rightTriggerEffect) { };
 	virtual void SetMicLight(int deviceId, unsigned char mode) { }

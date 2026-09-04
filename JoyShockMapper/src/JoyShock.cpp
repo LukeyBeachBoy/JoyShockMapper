@@ -56,6 +56,7 @@ JoyShock::JoyShock(int uniqueHandle, int controllerSplitType, shared_ptr<Digital
 	_context->_getMatchingSimBtn = bind(&JoyShock::getMatchingSimBtn, this, placeholders::_1);
 	_context->_getMatchingDiagBtn = bind(&JoyShock::getMatchingDiagBtn, this, placeholders::_1, placeholders::_2);
 	_context->_rumble = bind(&JoyShock::sendRumble, this, placeholders::_1, placeholders::_2);
+	_context->_haptic = bind(&JoyShock::sendHaptic, this, placeholders::_1, placeholders::_2, placeholders::_3);
 
 	_buttons.reserve(LAST_ANALOG_TRIGGER); // Don't include touch stick _buttons
 	for (int i = 0; i <= LAST_ANALOG_TRIGGER; ++i)
@@ -106,6 +107,15 @@ JoyShock ::~JoyShock()
 	{
 		_context->rightMainMotion = nullptr;
 	}
+}
+
+void JoyShock::sendHaptic(int side, int effect, int gainDb)
+{
+	// Deliberately not gated on the RUMBLE setting: that switch is about the
+	// vibration motors, and someone who has turned those off may still want the
+	// crisp haptic ticks. GRIP_HAPTIC_INTENSITY covers the automatic grip pulse;
+	// this path is only ever reached because a binding explicitly asked for it.
+	jsl->SetHaptic(_handle, side, effect, gainDb);
 }
 
 void JoyShock::sendRumble(int smallRumble, int bigRumble)

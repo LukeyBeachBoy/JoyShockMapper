@@ -21,6 +21,12 @@ constexpr uint16_t GYRO_OFF_ALL_BIND = 0x90;
 constexpr uint16_t GYRO_ON_ALL_BIND = 0x91;
 constexpr uint16_t COMMAND_ACTION = 0x97; // Run command
 constexpr uint16_t RUMBLE = 0xE6;
+// Any of the controller's own haptic effects, bindable to any input. The name
+// carries the parameters exactly as RUMBLE's does -- "HsEg" with side, effect and
+// a signed dB gain -- so no new plumbing is needed to route them through the
+// existing binding machinery, and anything that can bind a key (chords, taps,
+// holds, and mode shifts when they arrive) can fire one.
+constexpr uint16_t HAPTIC = 0xE7;
 
 constexpr const char *SMALL_RUMBLE = "R0080";
 constexpr const char *BIG_RUMBLE = "RFF00";
@@ -73,6 +79,13 @@ constexpr bool isControllerKey(uint16_t code)
 // Needs to be accessed publicly
 uint16_t nameToKey(std::string_view name);
 
+// HAPTIC_<SIDE>_<EFFECT>[_<GAIN>] -> a compact payload, or "" if the name is not
+// a haptic binding at all. SIDE is L, R or BOTH; EFFECT is one of the controller's
+// own effects (OFF, TICK, CLICK, TONE, RUMBLE, NOISE, SCRIPT, SWEEP); GAIN is an
+// optional signed decibel value, defaulting to 0 (unity). The controller limits
+// rather than clips, so positive gains are legitimate.
+std::string parseHapticName(std::string_view keyName);
+
 struct KeyCode
 {
 	uint16_t code = NO_HOLD_MAPPED;
@@ -95,6 +108,11 @@ struct KeyCode
 		{
 			name = BIG_RUMBLE;
 			code = RUMBLE;
+		}
+		else if (auto haptic = parseHapticName(keyName); !haptic.empty())
+		{
+			name = haptic;
+			code = HAPTIC;
 		}
 		else if (code != 0)
 			name = keyName;

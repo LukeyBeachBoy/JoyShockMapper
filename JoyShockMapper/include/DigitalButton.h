@@ -127,6 +127,7 @@ public:
 		function<DigitalButton *(ButtonID)> _getMatchingSimBtn; // A functor to JoyShock::getMatchingSimBtn
 		function<DigitalButton *(ButtonID, optional<MapIterator>&)> _getMatchingDiagBtn; // A functor to JoyShock::getMatchingDiagBtn
 		function<void(int small, int big)> _rumble;             // A functor to JoyShock::sendRumble
+		function<void(int side, int effect, int gainDb)> _haptic; // A functor to JoyShock::sendHaptic
 		mutex callback_lock;                                    // Needs to be in the common struct for both joycons to use the same
 		shared_ptr<MotionIf> rightMainMotion = nullptr;
 		shared_ptr<MotionIf> leftMotion = nullptr;

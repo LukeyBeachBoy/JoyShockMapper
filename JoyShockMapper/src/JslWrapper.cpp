@@ -244,6 +244,11 @@ public:
 		JslSetLightColour(deviceId, colour);
 	}
 
+	void SetHaptic(int deviceId, int side, int effect, int gainDb) override
+	{
+		// No controller this backend supports has addressable haptic effects.
+	}
+
 	void SetRumble(int deviceId, int smallRumble, int bigRumble) override
 	{
 		JslSetRumble(deviceId, smallRumble, bigRumble);

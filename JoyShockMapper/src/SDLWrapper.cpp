@@ -605,31 +605,37 @@ public:
 		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
 	}
 
-	// Fires the grip actuator on the side whose sensor just tripped.
-	//
-	// This asks for the controller's own "click" effect rather than describing a
-	// pulse by hand. The hand-rolled version was barely perceptible for two
-	// reasons: it encoded the side as 0/1 when the field is a bitmask (0x01 left,
-	// 0x02 right), so the left grip selected no actuator at all; and a 2-12ms
-	// square burst is nothing like the tuned waveform behind the tap Steam plays
-	// while calibrating the grips.
-	static void sendGripHaptic(SDL_Gamepad *gamepad, bool rightSide, float intensity)
+	// Plays one of the controller's own effects. side is a bitmask (1 = left,
+	// 2 = right, 3 = both), effect indexes the firmware's own list, and gainDb is a
+	// signed decibel gain the firmware limits rather than clips -- which is why
+	// positive values are legitimate and a hand-rolled waveform was never going to
+	// match the tap Steam plays while calibrating the grips.
+	static bool sendHapticEffect(SDL_Gamepad *gamepad, int side, int effect, int gainDb)
 	{
-		if (gamepad == nullptr || intensity <= 0.f)
-			return;
-
-		// Gain is in decibels and may go positive; the firmware limits rather than
-		// clips. 100 lands at +12dB, which is emphatic, and the scale is logarithmic
-		// so the low end still has to reach down a long way to be gentle.
-		const float scale = std::clamp(intensity, 0.f, 100.f) / 100.f;
-		const int8_t gainDb = int8_t(std::lround(-24.0f + scale * 36.0f));
+		if (gamepad == nullptr)
+			return false;
 
 		uint8_t buffer[TRITON_HAPTIC_COMMAND_BYTES] = { 0 };
 		buffer[0] = TRITON_ID_OUT_REPORT_HAPTIC_COMMAND;
-		buffer[1] = rightSide ? TRITON_HAPTIC_SIDE_RIGHT : TRITON_HAPTIC_SIDE_LEFT;
-		buffer[2] = TRITON_HAPTIC_CLICK;
-		buffer[3] = uint8_t(gainDb);
-		SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
+		buffer[1] = uint8_t(std::clamp(side, 1, 3));
+		buffer[2] = uint8_t(std::clamp(effect, 0, 7));
+		buffer[3] = uint8_t(int8_t(std::clamp(gainDb, -128, 127)));
+		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
+	}
+
+	// The automatic pulse when a grip sensor trips, as opposed to one a binding
+	// asked for. Intensity is a 0-100 dial rather than raw decibels because it is
+	// the only haptic a user meets without choosing an effect by name; the scale is
+	// logarithmic, so the low end still has to reach a long way down to be gentle.
+	static void sendGripHaptic(SDL_Gamepad *gamepad, bool rightSide, float intensity)
+	{
+		if (intensity <= 0.f)
+			return;
+
+		const float scale = std::clamp(intensity, 0.f, 100.f) / 100.f;
+		const int gainDb = int(std::lround(-24.0f + scale * 36.0f));
+		sendHapticEffect(gamepad, rightSide ? TRITON_HAPTIC_SIDE_RIGHT : TRITON_HAPTIC_SIDE_LEFT,
+		  TRITON_HAPTIC_CLICK, gainDb);
 	}
 
 	// Pulses whichever grip sensor just went from off to on. Edge-triggered on
@@ -1382,6 +1388,14 @@ public:
 			uColour.raw = colour;
 			SDL_SetGamepadLED(_controllerMap[deviceId]->_sdlController, uColour.argb[2], uColour.argb[1], uColour.argb[0]);
 		}
+	}
+
+	void SetHaptic(int deviceId, int side, int effect, int gainDb) override
+	{
+		auto *jc = _controllerMap[deviceId];
+		if (jc == nullptr || jc->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
+			return;
+		sendHapticEffect(jc->_sdlController, side, effect, gainDb);
 	}
 
 	void SetRumble(int deviceId, int smallRumble, int bigRumble) override

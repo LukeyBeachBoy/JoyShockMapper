@@ -525,3 +525,99 @@ WORD nameToKey(string_view name)
 	}
 	return 0x00;
 }
+
+// See the declaration in PlatformDefinitions.h. Kept out of the KeyCode
+// constructor so both platforms share one parser and one payload format.
+std::string parseHapticName(std::string_view keyName)
+{
+	constexpr std::string_view prefix = "HAPTIC_";
+	if (keyName.size() <= prefix.size() || keyName.substr(0, prefix.size()) != prefix)
+	{
+		return {};
+	}
+	std::string_view rest = keyName.substr(prefix.size());
+
+	// Side first: BOTH before B-anything else would be ambiguous, so match longest.
+	char side = 0;
+	if (rest.substr(0, 5) == "BOTH_")
+	{
+		side = 'B';
+		rest = rest.substr(5);
+	}
+	else if (rest.substr(0, 2) == "L_")
+	{
+		side = 'L';
+		rest = rest.substr(2);
+	}
+	else if (rest.substr(0, 2) == "R_")
+	{
+		side = 'R';
+		rest = rest.substr(2);
+	}
+	else
+	{
+		return {};
+	}
+
+	// The effect names are the controller's own, in its own order.
+	static constexpr std::string_view effects[] = {
+		"OFF", "TICK", "CLICK", "TONE", "RUMBLE", "NOISE", "SCRIPT", "SWEEP"
+	};
+	std::string_view effectName = rest;
+	std::string_view gainText;
+	if (auto underscore = rest.find('_'); underscore != std::string_view::npos)
+	{
+		effectName = rest.substr(0, underscore);
+		gainText = rest.substr(underscore + 1);
+	}
+
+	int effect = -1;
+	for (int i = 0; i < int(std::size(effects)); ++i)
+	{
+		if (effectName == effects[i])
+		{
+			effect = i;
+			break;
+		}
+	}
+	if (effect < 0)
+	{
+		return {};
+	}
+
+	int gain = 0;
+	if (!gainText.empty())
+	{
+		bool negative = gainText.front() == 'N' || gainText.front() == '-';
+		std::string_view digits = negative ? gainText.substr(1) : gainText;
+		if (digits.empty())
+		{
+			return {};
+		}
+		for (char c : digits)
+		{
+			if (c < '0' || c > '9')
+			{
+				return {};
+			}
+			gain = gain * 10 + (c - '0');
+		}
+		if (gain > 127)
+		{
+			gain = 127;
+		}
+		if (negative)
+		{
+			gain = -gain;
+		}
+	}
+
+	// "H" <side> <effect digit> "g" <signed gain>, e.g. HL2g12. Compact enough to
+	// live in KeyCode::name, and unambiguous to read back.
+	std::string payload = "H";
+	payload += side;
+	payload += char('0' + effect);
+	payload += 'g';
+	payload += std::to_string(gain);
+	return payload;
+}

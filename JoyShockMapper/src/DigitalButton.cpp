@@ -196,6 +196,12 @@ public:
 		_context->_rumble(smallRumble, bigRumble);
 	}
 
+	void FireHaptic(int side, int effect, int gainDb) override
+	{
+		DEBUG_LOG << "Haptic effect " << effect << " on side " << side << " at " << gainDb << "dB\n";
+		_context->_haptic(side, effect, gainDb);
+	}
+
 	void ApplyBtnPress(KeyCode key) override
 	{
 		if (key.code >= X_UP && key.code <= X_START || key.code == PS_HOME || 

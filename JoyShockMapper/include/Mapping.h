@@ -13,6 +13,8 @@ public:
 	virtual void ApplyGyroAction(KeyCode gyroAction) = 0;
 	virtual void RemoveGyroAction() = 0;
 	virtual void SetRumble(int smallRumble, int bigRumble) = 0;
+	// One-shot: a haptic effect has its own duration, so there is nothing to release.
+	virtual void FireHaptic(int side, int effect, int gainDb) = 0;
 	virtual void ApplyBtnPress(KeyCode key) = 0;
 	virtual void ApplyBtnRelease(KeyCode key) = 0;
 	virtual void ApplyButtonToggle(KeyCode key, Callback apply, Callback release) = 0;

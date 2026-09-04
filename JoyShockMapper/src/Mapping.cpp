@@ -191,6 +191,19 @@ bool Mapping::AddMapping(KeyCode key, EventModifier evtMod, ActionModifier actMo
 		release = bind(&EventActionIf::SetRumble, placeholders::_1, 0, 0);
 		_tapDurationMs = MAGIC_EXTENDED_TAP_DURATION; // Unused in regular press
 	}
+	else if (key.code == HAPTIC)
+	{
+		// Payload is "H" <side> <effect digit> "g" <signed gain>; see
+		// parseHapticName(). Nothing to undo on release: the controller plays the
+		// effect for its own duration and stops on its own.
+		const char sideChar = key.name.size() > 1 ? key.name[1] : 'B';
+		const int side = sideChar == 'L' ? 1 : sideChar == 'R' ? 2 : 3;
+		const int effect = key.name.size() > 2 ? key.name[2] - '0' : 0;
+		const int gainDb = key.name.size() > 4 ? stoi(key.name.substr(4)) : 0;
+		apply = bind(&EventActionIf::FireHaptic, placeholders::_1, side, effect, gainDb);
+		release = EventActionIf::Callback();
+		_tapDurationMs = MAGIC_EXTENDED_TAP_DURATION; // Unused in regular press
+	}
 	else //
 	{
 		_hasViGEmBtn |= isControllerKey(key.code); // Set flag if vigem button

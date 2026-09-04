@@ -290,6 +290,7 @@ private:
 	optional<E> getSettingAtChord(SettingID id, ButtonID chord);
 
 	void sendRumble(int smallRumble, int bigRumble);
+	void sendHaptic(int side, int effect, int gainDb);
 
 	DigitalButton *getMatchingSimBtn(ButtonID index);
 	DigitalButton *getMatchingDiagBtn(ButtonID index, optional<MapIterator> &iter);
