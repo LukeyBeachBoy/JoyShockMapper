@@ -7,6 +7,8 @@
 extern shared_ptr<JslWrapper> jsl;
 extern vector<JSMButton> mappings;
 extern vector<JSMButton> grid_mappings;
+extern vector<JSMButton> left_grid_mappings;
+extern vector<JSMButton> right_grid_mappings;
 extern float os_mouse_speed;
 extern float last_flick_and_rotation;
 
@@ -287,12 +289,9 @@ AxisSignPair JoyShock::getSetting<AxisSignPair>(SettingID index)
 
 DigitalButton *JoyShock::getMatchingSimBtn(ButtonID index)
 {
-	JSMButton *mapping = int(index) < mappings.size()        ? &mappings[int(index)] :
-	  int(index) - FIRST_TOUCH_BUTTON < grid_mappings.size() ? &grid_mappings[int(index) - FIRST_TOUCH_BUTTON] :
-	                                                           nullptr;
-	DigitalButton *button1 = int(index) < mappings.size()    ? &_buttons[int(index)] :
-	  int(index) - FIRST_TOUCH_BUTTON < grid_mappings.size() ? &_gridButtons[int(index) - FIRST_TOUCH_BUTTON] :
-	                                                           nullptr;
+	GridSlot slot = findGridSlot(index);
+	JSMButton *mapping = int(index) < mappings.size() ? &mappings[int(index)] : slot.mapping;
+	DigitalButton *button1 = int(index) < mappings.size() ? &_buttons[int(index)] : slot.button;
 	if (!mapping)
 	{
 		CERR << "Cannot find the button " << index << '\n';
@@ -309,9 +308,8 @@ DigitalButton *JoyShock::getMatchingSimBtn(ButtonID index)
 		// of the _buttons has a third SimMap with this one. I don't know if it's worth solving though...
 		for (auto iter = mapping->getSimMapIter() ; iter ; ++iter)
 		{
-			DigitalButton *button2 = int(iter->first) < mappings.size()      ? &_buttons[int(iter->first)] :
-			  int(iter->first) - FIRST_TOUCH_BUTTON < grid_mappings.size() ? &_gridButtons[int(iter->first) - FIRST_TOUCH_BUTTON] :
-																				nullptr;
+			DigitalButton *button2 = int(iter->first) < mappings.size() ? &_buttons[int(iter->first)] :
+			                                                             findGridSlot(iter->first).button;
 
 			if (!button2)
 			{
@@ -328,12 +326,9 @@ DigitalButton *JoyShock::getMatchingSimBtn(ButtonID index)
 
 DigitalButton *JoyShock::getMatchingDiagBtn(ButtonID index, optional<MapIterator> &iter)
 {
-	JSMButton *mapping = int(index) < mappings.size()        ? &mappings[int(index)] :
-	  int(index) - FIRST_TOUCH_BUTTON < grid_mappings.size() ? &grid_mappings[int(index) - FIRST_TOUCH_BUTTON] :
-	                                                           nullptr;
-	DigitalButton *button1 = int(index) < mappings.size()    ? &_buttons[int(index)] :
-	  int(index) - FIRST_TOUCH_BUTTON < grid_mappings.size() ? &_gridButtons[int(index) - FIRST_TOUCH_BUTTON] :
-	                                                           nullptr;
+	GridSlot slot = findGridSlot(index);
+	JSMButton *mapping = int(index) < mappings.size() ? &mappings[int(index)] : slot.mapping;
+	DigitalButton *button1 = int(index) < mappings.size() ? &_buttons[int(index)] : slot.button;
 	if (!mapping)
 	{
 		CERR << "Cannot find the button " << index << '\n';
@@ -350,9 +345,8 @@ DigitalButton *JoyShock::getMatchingDiagBtn(ButtonID index, optional<MapIterator
 		for (; *iter; ++*iter)
 		{
 			int i = int((*iter)->first);
-			DigitalButton *button2 = i < mappings.size()    ? &_buttons[i] :
-			  i - FIRST_TOUCH_BUTTON < grid_mappings.size() ? &_gridButtons[i - FIRST_TOUCH_BUTTON] :
-			                                                                 nullptr;
+			DigitalButton *button2 = i < mappings.size() ? &_buttons[i] :
+			                                              findGridSlot(ButtonID(i)).button;
 
 			if (!button2)
 			{
@@ -551,8 +545,7 @@ void JoyShock::handleButtonChange(ButtonID id, bool pressed, int touchpadID)
 {
 	DigitalButton *button = int(id) <= LAST_ANALOG_TRIGGER ? &_buttons[int(id)] :
 	  touchpadID >= 0 && touchpadID < _touchpads.size()    ? &_touchpads[touchpadID].buttons.find(id)->second :
-	  id >= ButtonID::T1                                   ? &_gridButtons[int(id) - int(ButtonID::T1)] :
-	                                                         nullptr;
+	                                                         findGridSlot(id).button;
 
 	if (!button)
 	{
@@ -905,16 +898,63 @@ bool JoyShock::processDeadZones(float &x, float &y, float innerDeadzone, float o
 	return false;
 }
 
+static void resizeGridButtons(vector<DigitalButton> &buttons, vector<JSMButton> &maps,
+  shared_ptr<DigitalButton::Context> context)
+{
+	while (buttons.size() > maps.size())
+		buttons.pop_back();
+
+	for (size_t i = buttons.size(); i < maps.size(); ++i)
+	{
+		JSMButton &map(maps[i]);
+		buttons.push_back(DigitalButton(context, map));
+	}
+}
+
 void JoyShock::updateGridSize()
 {
-	while (_gridButtons.size() > grid_mappings.size())
-		_gridButtons.pop_back();
+	resizeGridButtons(_gridButtons, grid_mappings, _context);
+	resizeGridButtons(_leftGridButtons, left_grid_mappings, _context);
+	resizeGridButtons(_rightGridButtons, right_grid_mappings, _context);
+}
 
-	for (size_t i = _gridButtons.size(); i < grid_mappings.size(); ++i)
+JoyShock::GridSlot JoyShock::findGridSlot(ButtonID id)
+{
+	const int index = int(id);
+	vector<JSMButton> *maps = nullptr;
+	vector<DigitalButton> *buttons = nullptr;
+	int offset = 0;
+
+	if (index >= FIRST_RIGHT_TOUCH_BUTTON)
 	{
-		JSMButton &map(grid_mappings[i]);
-		_gridButtons.push_back(DigitalButton(_context, map));
+		maps = &right_grid_mappings;
+		buttons = &_rightGridButtons;
+		offset = index - FIRST_RIGHT_TOUCH_BUTTON;
 	}
+	else if (index >= FIRST_LEFT_TOUCH_BUTTON)
+	{
+		maps = &left_grid_mappings;
+		buttons = &_leftGridButtons;
+		offset = index - FIRST_LEFT_TOUCH_BUTTON;
+	}
+	else if (index >= FIRST_TOUCH_BUTTON)
+	{
+		maps = &grid_mappings;
+		buttons = &_gridButtons;
+		offset = index - FIRST_TOUCH_BUTTON;
+	}
+	else
+	{
+		return {};
+	}
+
+	// A grid can be resized while its buttons are still being polled, so an
+	// index that was valid a moment ago may not be now.
+	if (offset < 0 || size_t(offset) >= maps->size() || size_t(offset) >= buttons->size())
+	{
+		return {};
+	}
+	return { &(*maps)[offset], &(*buttons)[offset] };
 }
 
 bool JoyShock::isSoftPullPressed(int triggerIndex, float triggerPosition)

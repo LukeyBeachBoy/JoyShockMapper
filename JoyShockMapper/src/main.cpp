@@ -373,7 +373,7 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			}
 			for (size_t i = 0; i < left_grid_mappings.size(); ++i)
 			{
-				auto optId = magic_enum::enum_cast<ButtonID>(int(FIRST_TOUCH_BUTTON + i));
+				auto optId = magic_enum::enum_cast<ButtonID>(int(FIRST_LEFT_TOUCH_BUTTON + i));
 				if (optId)
 					js->handleButtonChange(*optId, int(i) == index);
 			}
@@ -398,7 +398,7 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			}
 			for (size_t i = 0; i < right_grid_mappings.size(); ++i)
 			{
-				auto optId = magic_enum::enum_cast<ButtonID>(int(FIRST_TOUCH_BUTTON + i));
+				auto optId = magic_enum::enum_cast<ButtonID>(int(FIRST_RIGHT_TOUCH_BUTTON + i));
 				if (optId)
 					js->handleButtonChange(*optId, int(i) == index);
 			}
@@ -1904,14 +1904,37 @@ void connectDevices(bool mergeJoycons = true, const vector<int>& selectedDeviceI
 	// }
 }
 
+// The three grids are separate ID ranges, so the range picks the array and the
+// offset within it. Reading all three off FIRST_TOUCH_BUTTON, as this used to,
+// meant a per-pad cell either landed on the shared grid's binding or on nothing.
+static JSMButton *findGridMapping(ButtonID id)
+{
+	const int index = int(id);
+	vector<JSMButton> *maps = nullptr;
+	int offset = 0;
+	if (index >= FIRST_RIGHT_TOUCH_BUTTON)
+	{
+		maps = &right_grid_mappings;
+		offset = index - FIRST_RIGHT_TOUCH_BUTTON;
+	}
+	else if (index >= FIRST_LEFT_TOUCH_BUTTON)
+	{
+		maps = &left_grid_mappings;
+		offset = index - FIRST_LEFT_TOUCH_BUTTON;
+	}
+	else if (index >= FIRST_TOUCH_BUTTON)
+	{
+		maps = &grid_mappings;
+		offset = index - FIRST_TOUCH_BUTTON;
+	}
+	if (!maps || offset < 0 || size_t(offset) >= maps->size())
+		return nullptr;
+	return &(*maps)[offset];
+}
+
 void updateSimPressPartner(ButtonID sim, ButtonID origin, const Mapping &newVal)
 {
-	auto gridIdx = int(sim) - FIRST_TOUCH_BUTTON;
-	JSMButton *button = int(sim) < mappings.size() ? &mappings[int(sim)] :
-	  gridIdx >= 0 && size_t(gridIdx) < grid_mappings.size() ? &grid_mappings[gridIdx] :
-	  gridIdx >= 0 && size_t(gridIdx) < left_grid_mappings.size() ? &left_grid_mappings[gridIdx] :
-	  gridIdx >= 0 && size_t(gridIdx) < right_grid_mappings.size() ? &right_grid_mappings[gridIdx] :
-	                                                                nullptr;
+	JSMButton *button = int(sim) < mappings.size() ? &mappings[int(sim)] : findGridMapping(sim);
 	if (button)
 		button->atSimPress(origin)->set(newVal);
 	else
@@ -1920,12 +1943,7 @@ void updateSimPressPartner(ButtonID sim, ButtonID origin, const Mapping &newVal)
 
 void updateDiagPressPartner(ButtonID diag, ButtonID origin, const Mapping &newVal)
 {
-	auto gridIdx = int(diag) - FIRST_TOUCH_BUTTON;
-	JSMButton *button = int(diag) < mappings.size()         ? &mappings[int(diag)] :
-	  gridIdx >= 0 && size_t(gridIdx) < grid_mappings.size() ? &grid_mappings[gridIdx] :
-	  gridIdx >= 0 && size_t(gridIdx) < left_grid_mappings.size() ? &left_grid_mappings[gridIdx] :
-	  gridIdx >= 0 && size_t(gridIdx) < right_grid_mappings.size() ? &right_grid_mappings[gridIdx] :
-	                                                               nullptr;
+	JSMButton *button = int(diag) < mappings.size() ? &mappings[int(diag)] : findGridMapping(diag);
 	if (button)
 		button->atDiagPress(origin)->set(newVal);
 	else
@@ -2624,16 +2642,19 @@ void onNewGridDimensions(CmdRegistry *registry, const FloatXY &newGridDims)
 			successfulRemove = registry->Remove(name);
 		}
 
+		// Remove extra touch button variables. This has to happen before the
+		// DigitalButtons are resized: each one holds a reference to the JSMButton
+		// it was built from, so resizing first left buttons referring to entries
+		// that were about to be popped.
+		while (grid_mappings.size() > numberOfButtons)
+			grid_mappings.pop_back();
+
 		// For all joyshocks, remove extra touch DigitalButtons
 		for (auto &js : handle_to_joyshock)
 		{
 			lock_guard guard(js.second->_context->callback_lock);
 			js.second->updateGridSize();
 		}
-
-		// Remove extra touch button variables
-		while (grid_mappings.size() > numberOfButtons)
-			grid_mappings.pop_back();
 	}
 	else if (numberOfButtons > grid_mappings.size())
 	{
@@ -2664,22 +2685,34 @@ void onNewLeftGridDimensions(CmdRegistry *registry, const FloatXY &newGridDims)
 	if (numberOfButtons < left_grid_mappings.size())
 	{
 		bool successfulRemove = true;
-		for (auto id = FIRST_TOUCH_BUTTON + numberOfButtons; successfulRemove; ++id)
+		for (auto id = FIRST_LEFT_TOUCH_BUTTON + numberOfButtons; successfulRemove; ++id)
 		{
 			string name(magic_enum::enum_name(*magic_enum::enum_cast<ButtonID>(id)));
 			successfulRemove = registry->Remove(name);
 		}
 		while (left_grid_mappings.size() > numberOfButtons)
 			left_grid_mappings.pop_back();
+
+		for (auto &js : handle_to_joyshock)
+		{
+			lock_guard guard(js.second->_context->callback_lock);
+			js.second->updateGridSize();
+		}
 	}
 	else if (numberOfButtons > left_grid_mappings.size())
 	{
-		for (int id = FIRST_TOUCH_BUTTON + int(left_grid_mappings.size()); left_grid_mappings.size() < numberOfButtons; ++id)
+		for (int id = FIRST_LEFT_TOUCH_BUTTON + int(left_grid_mappings.size()); left_grid_mappings.size() < numberOfButtons; ++id)
 		{
 			JSMButton touchButton(*magic_enum::enum_cast<ButtonID>(id), Mapping::NO_MAPPING);
 			touchButton.setFilter(&filterMapping);
 			left_grid_mappings.push_back(touchButton);
 			registry->add(new JSMAssignment<Mapping>(left_grid_mappings.back()));
+		}
+
+		for (auto &js : handle_to_joyshock)
+		{
+			lock_guard guard(js.second->_context->callback_lock);
+			js.second->updateGridSize();
 		}
 	}
 }
@@ -2692,22 +2725,34 @@ void onNewRightGridDimensions(CmdRegistry *registry, const FloatXY &newGridDims)
 	if (numberOfButtons < right_grid_mappings.size())
 	{
 		bool successfulRemove = true;
-		for (auto id = FIRST_TOUCH_BUTTON + numberOfButtons; successfulRemove; ++id)
+		for (auto id = FIRST_RIGHT_TOUCH_BUTTON + numberOfButtons; successfulRemove; ++id)
 		{
 			string name(magic_enum::enum_name(*magic_enum::enum_cast<ButtonID>(id)));
 			successfulRemove = registry->Remove(name);
 		}
 		while (right_grid_mappings.size() > numberOfButtons)
 			right_grid_mappings.pop_back();
+
+		for (auto &js : handle_to_joyshock)
+		{
+			lock_guard guard(js.second->_context->callback_lock);
+			js.second->updateGridSize();
+		}
 	}
 	else if (numberOfButtons > right_grid_mappings.size())
 	{
-		for (int id = FIRST_TOUCH_BUTTON + int(right_grid_mappings.size()); right_grid_mappings.size() < numberOfButtons; ++id)
+		for (int id = FIRST_RIGHT_TOUCH_BUTTON + int(right_grid_mappings.size()); right_grid_mappings.size() < numberOfButtons; ++id)
 		{
 			JSMButton touchButton(*magic_enum::enum_cast<ButtonID>(id), Mapping::NO_MAPPING);
 			touchButton.setFilter(&filterMapping);
 			right_grid_mappings.push_back(touchButton);
 			registry->add(new JSMAssignment<Mapping>(right_grid_mappings.back()));
+		}
+
+		for (auto &js : handle_to_joyshock)
+		{
+			lock_guard guard(js.second->_context->callback_lock);
+			js.second->updateGridSize();
 		}
 	}
 }
@@ -3996,7 +4041,12 @@ int main(int argc, char *argv[])
 	jsl.reset(JslWrapper::getNew());
 	whitelister.reset(Whitelister::getNew(false));
 
-	grid_mappings.reserve(int(ButtonID::T25) - FIRST_TOUCH_BUTTON); // This makes sure the items will never get copied and cause crashes
+	// Reserved so the items are never copied: a JSMAssignment holds a reference
+	// to the JSMButton it was registered with, and a reallocation would leave it
+	// dangling. T25 - T1 is 24, one short of the 25 the grid can actually hold.
+	grid_mappings.reserve(MAX_GRID_BUTTONS);
+	left_grid_mappings.reserve(MAX_GRID_BUTTONS);
+	right_grid_mappings.reserve(MAX_GRID_BUTTONS);
 	mappings.reserve(MAPPING_SIZE);
 	for (int id = 0; id < MAPPING_SIZE; ++id)
 	{

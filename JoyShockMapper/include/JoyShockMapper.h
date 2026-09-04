@@ -117,6 +117,63 @@ enum class ButtonID
 	T24,
 	T25,
 	// Add as necessary...
+
+	// Per-pad grid buttons, for controllers that have two touchpads (Steam
+	// Controller 2026). T1..T25 above stay exactly as they were: they are what
+	// every single-pad controller uses, and both pads of a two-pad controller
+	// used to share them -- which meant a cell on one pad fired the other pad's
+	// binding, and a per-pad grid larger than the shared one indexed past the
+	// end of the button array.
+	LT1, // FIRST_LEFT_TOUCH_BUTTON
+	LT2,
+	LT3,
+	LT4,
+	LT5,
+	LT6,
+	LT7,
+	LT8,
+	LT9,
+	LT10,
+	LT11,
+	LT12,
+	LT13,
+	LT14,
+	LT15,
+	LT16,
+	LT17,
+	LT18,
+	LT19,
+	LT20,
+	LT21,
+	LT22,
+	LT23,
+	LT24,
+	LT25,
+	RT1, // FIRST_RIGHT_TOUCH_BUTTON
+	RT2,
+	RT3,
+	RT4,
+	RT5,
+	RT6,
+	RT7,
+	RT8,
+	RT9,
+	RT10,
+	RT11,
+	RT12,
+	RT13,
+	RT14,
+	RT15,
+	RT16,
+	RT17,
+	RT18,
+	RT19,
+	RT20,
+	RT21,
+	RT22,
+	RT23,
+	RT24,
+	RT25,
 };
 
 // help strings for each button
@@ -324,6 +381,10 @@ constexpr int MAPPING_SIZE = int(ButtonID::SIZE);
 constexpr int FIRST_ANALOG_TRIGGER = int(ButtonID::ZLF);
 constexpr int LAST_ANALOG_TRIGGER = int(ButtonID::ZRF);
 constexpr int FIRST_TOUCH_BUTTON = MAPPING_SIZE + 1;
+// The three grids are the same size limit apart, so one span serves all of them.
+constexpr int MAX_GRID_BUTTONS = int(ButtonID::T25) - int(ButtonID::T1) + 1;
+constexpr int FIRST_LEFT_TOUCH_BUTTON = int(ButtonID::LT1);
+constexpr int FIRST_RIGHT_TOUCH_BUTTON = int(ButtonID::RT1);
 constexpr int NUM_ANALOG_TRIGGERS = int(LAST_ANALOG_TRIGGER) - int(FIRST_ANALOG_TRIGGER) + 1;
 constexpr float MAGIC_TAP_DURATION = 40.0f;           // in milliseconds.
 constexpr float MAGIC_INSTANT_DURATION = 40.0f;       // in milliseconds

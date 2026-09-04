@@ -220,11 +220,23 @@ public:
 
 	void updateGridSize();
 
+	// A grid button lives in one of three parallel arrays: the shared grid, or
+	// one per pad on a two-pad controller. Every site that indexes them has to
+	// agree on which, and on whether the index is in range, so resolve it once.
+	struct GridSlot
+	{
+		JSMButton *mapping = nullptr;
+		DigitalButton *button = nullptr;
+	};
+	GridSlot findGridSlot(ButtonID id);
+
 	bool processGyroStick(float stickX, float stickY, float stickLength, StickMode stickMode, bool forceOutput);
 
 	shared_ptr<DigitalButton::Context> _context;
 	vector<DigitalButton> _buttons;
 	vector<DigitalButton> _gridButtons;
+	vector<DigitalButton> _leftGridButtons;
+	vector<DigitalButton> _rightGridButtons;
 	vector<TouchStick> _touchpads;
 	chrono::steady_clock::time_point _timeNow;
 	// Separate clock for the touch callback: it runs on the same poll iteration as
