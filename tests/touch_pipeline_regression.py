@@ -99,16 +99,16 @@ def test_pipelines_are_not_wiped_on_finger_up():
 
 def test_new_tuning_settings_are_registered():
     for name in ('TOUCHPAD_MIN_CUTOFF', 'TOUCHPAD_SPEED_COEFF',
-                 'TOUCHPAD_TOUCH_ON', 'TOUCHPAD_TOUCH_OFF'):
+                 'TOUCHPAD_TRACKBALL_DECAY', 'TOUCHPAD_TRACKBALL_MIN_VELOCITY'):
         assert f'SettingID::{name}' in MAIN, name
     # The superseded host-side knobs must be gone, not left as dead aliases the
-    # GUI could still write to.
+    # GUI could still write to. TOUCHPAD_TOUCH_ON/OFF went the same way once the
+    # registers behind them turned out to be the grip sensors' -- and pad contact
+    # was fixed in the driver rather than by any threshold.
     for name in ('TOUCHPAD_LIGHT_TOUCH_THRESHOLD', 'TOUCHPAD_LIFTOFF_RATIO',
-                 'TOUCHPAD_POSITION_FALLBACK'):
+                 'TOUCHPAD_POSITION_FALLBACK', 'TOUCHPAD_TOUCH_ON',
+                 'TOUCHPAD_TOUCH_OFF', 'TOUCHPAD_SMOOTHING'):
         assert name not in MAIN, name
-    # Old configs must still parse even though the setting no longer does anything.
-    assert 'TOUCHPAD_SMOOTHING' in MAIN
-    assert 'Deprecated' in MAIN.split('"TOUCHPAD_SMOOTHING"', 1)[1][:400]
 
 def test_touchpad_filter_defaults_favour_live_tracking_over_deferred_coast():
     """The literature 1-euro defaults (0.8Hz / 0.015) were tuned for a desk mouse,
