@@ -51,6 +51,13 @@ struct TouchMousePipeline
 	OneEuroFilter posFilterX, posFilterY;
 	float lastX = 0.f, lastY = 0.f;
 	bool initialized = false;
+	// The raw sample the filter last consumed, and the time waiting to be charged
+	// to the next genuinely new one. The controller does not report on our poll
+	// schedule, so some polls carry no new data; see step().
+	float lastRawX = 0.f, lastRawY = 0.f;
+	float pendingDt = 0.f;
+	// Whether the last step() consumed a new sample or was a duplicate poll.
+	bool sampleConsumed = false;
 	// Which touch point currently feeds this pipeline. Position-space filtering has
 	// to restart when the source finger changes, otherwise handing over between two
 	// contacts teleports the cursor.
@@ -71,6 +78,9 @@ struct TouchMousePipeline
 		posFilterY.reset();
 		lastX = lastY = 0.f;
 		initialized = false;
+		lastRawX = lastRawY = 0.f;
+		pendingDt = 0.f;
+		sampleConsumed = false;
 		sourceIndex = -1;
 		momentumX = momentumY = 0.f;
 		active = false;
@@ -80,10 +90,45 @@ struct TouchMousePipeline
 	// rawX / rawY: normalised pad position in [0, 1]. dt in SECONDS.
 	// Returns the normalised displacement since the previous call. The first call
 	// after a fresh contact returns zero, so touching down never jerks the cursor.
+	// Check sampleConsumed afterwards: a false there means this poll carried no new
+	// data and the zero it returned is "nothing happened", not "you didn't move".
 	FloatXY step(float rawX, float rawY, float dt, float minCutoff, float beta)
 	{
 		if (dt <= 0.f || dt > 0.1f)
 			dt = 0.003f; // fall back to the nominal tick if the clock misbehaved
+
+		// The controller reports on its own schedule, not ours, so a poll can land
+		// between two reports and read the previous sample again. Feeding that
+		// duplicate to the One Euro filter is actively harmful: the filter measures
+		// speed as (x - xPrev)/dt, so a repeat reads as "the finger stopped", the
+		// adaptive cutoff collapses to its floor, and the next genuine sample arrives
+		// over-smoothed and lagging. At a steady swipe speed that repeats at the beat
+		// frequency between the two rates -- a periodic hitch in an otherwise smooth
+		// glide, which is exactly what it looked like.
+		//
+		// So wait for real data and charge the elapsed time to it, which also hands
+		// the filter the device's true inter-report interval rather than our poll
+		// interval. Position is quantised, so an exact match really does mean "no new
+		// report" rather than "moved imperceptibly".
+		//
+		// Only up to a point, though: a finger resting on the pad also repeats its
+		// position forever, and there the filter genuinely does need to keep running
+		// or it never converges on where the finger stopped -- which loses the tail
+		// of every gesture. Nothing on this side can tell the two apart, so bound the
+		// wait instead. kMaxDeferredDt is comfortably longer than any plausible
+		// report interval and far too short to notice as settling lag.
+		constexpr float kMaxDeferredDt = 0.016f;
+		if (initialized && rawX == lastRawX && rawY == lastRawY && pendingDt < kMaxDeferredDt)
+		{
+			pendingDt += dt;
+			sampleConsumed = false;
+			return { 0.f, 0.f };
+		}
+		dt += pendingDt;
+		pendingDt = 0.f;
+		sampleConsumed = true;
+		lastRawX = rawX;
+		lastRawY = rawY;
 
 		float fx = rawX;
 		float fy = rawY;

@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <vector>
 
 struct FloatXY {
     float _x=0.f,_y=0.f;
@@ -54,6 +55,8 @@ static void resetMouse() { accX = 0.f; emitted = 0; }
 // Mirror of processTouchMouse for one axis. `contactFlagIsUsed` selects between
 // the fixed logic and the pre-fix logic that keyed off `active`, so the harness
 // can show the bug as well as its absence.
+static float MIN_LAUNCH_VELOCITY = 200.f;
+
 static void tick(TouchMousePipeline &pipe, bool down, float pos, float dt,
                  float decaySetting, bool contactFlagIsUsed)
 {
@@ -64,16 +67,19 @@ static void tick(TouchMousePipeline &pipe, bool down, float pos, float dt,
             pipe.reset();
         pipe.contact = true;
         FloatXY d = pipe.step(pos, 0.5f, dt, MIN_CUTOFF, SPEED_COEFF);
-        float moved = d.x() * TPX * SENS;
         pipe.active = true;
-        pipe.momentumX = moved / dt;
+        if (!pipe.sampleConsumed) return;
+        float moved = d.x() * TPX * SENS;
+        pipe.momentumX = moved / std::max(dt, 1e-4f);
         moveMouse(moved);
     }
     else
     {
+        const bool justLifted = pipe.contact;
         pipe.contact = false;
         if (!pipe.active) return;
         if (decaySetting <= 0.f) { pipe.reset(); return; }
+        if (justLifted && fabsf(pipe.momentumX) < MIN_LAUNCH_VELOCITY) { pipe.reset(); return; }
         float decay = exp2f(-dt * decaySetting);
         pipe.momentumX *= decay;
         if (fabsf(pipe.momentumX) < 40.f) pipe.reset();
@@ -164,6 +170,67 @@ int main()
         check(fast > 0 && slow > 0, "both tick rates produce a coast");
         check(fabs(double(fast - slow)) / double(std::max(fast, slow)) < 0.25,
               "coast distance is within 25% across a 2x change in tick rate");
+    }
+
+    printf("\n=== a steady swipe emits steadily, even when polls outrun reports ===\n");
+    {
+        // The controller reports on its own schedule. Poll faster than it reports and
+        // some polls carry the previous sample again; feeding those duplicates to the
+        // filter used to collapse its speed estimate and hitch the next real one.
+        auto swipe = [&](int pollsPerReport) {
+            TouchMousePipeline pipe; pipe.reset(); resetMouse();
+            std::vector<long> perReport;
+            float pos = 0.30f;
+            long lastTotal = 0;
+            for (int report = 0; report < 120; ++report)
+            {
+                pos += 0.0025f;                       // dead steady finger speed
+                for (int p = 0; p < pollsPerReport; ++p)
+                    tick(pipe, true, pos, TICK, 0.f, true);
+                if (report > 20)                      // let the filter settle first
+                    perReport.push_back(emitted - lastTotal);
+                lastTotal = emitted;
+            }
+            return perReport;
+        };
+
+        auto spread = [](const std::vector<long> &v) {
+            long lo = v[0], hi = v[0];
+            for (long n : v) { lo = std::min(lo, n); hi = std::max(hi, n); }
+            return hi - lo;
+        };
+
+        auto aligned = swipe(1);   // one poll per report: nothing to alias
+        auto aliased = swipe(3);   // three polls per report: two duplicates each time
+        printf("per-report pixel spread: aligned=%ld, 3 polls per report=%ld\n",
+               spread(aligned), spread(aliased));
+        check(spread(aliased) <= spread(aligned) + 1,
+              "duplicate polls do not make a steady swipe emit unevenly");
+    }
+
+    printf("\n=== a tap to stop the coast does not flick the cursor ===\n");
+    {
+        TouchMousePipeline pipe; pipe.reset(); resetMouse();
+        for (int i = 0; i < 30; ++i) tick(pipe, true, 0.30f + 0.01f * i, TICK, DECAY, true);
+        for (int i = 0; i < 20; ++i) tick(pipe, false, 0.f, TICK, DECAY, true);
+        // Put a finger down, hold it as still as a hand can, take it off again.
+        tick(pipe, true, 0.700f, TICK, DECAY, true);
+        tick(pipe, true, 0.7005f, TICK, DECAY, true);   // involuntary wobble
+        tick(pipe, true, 0.700f, TICK, DECAY, true);
+        long before = emitted;
+        for (int i = 0; i < 200; ++i) tick(pipe, false, 0.f, TICK, DECAY, true);
+        printf("pixels emitted after lifting off a tap: %ld\n", labs(emitted - before));
+        check(labs(emitted - before) == 0, "lifting off a tap starts no coast at all");
+    }
+
+    printf("\n=== a real flick still coasts ===\n");
+    {
+        TouchMousePipeline pipe; pipe.reset(); resetMouse();
+        for (int i = 0; i < 30; ++i) tick(pipe, true, 0.30f + 0.012f * i, TICK, DECAY, true);
+        long before = emitted;
+        for (int i = 0; i < 400; ++i) tick(pipe, false, 0.f, TICK, DECAY, true);
+        printf("pixels emitted after a flick: %ld\n", labs(emitted - before));
+        check(labs(emitted - before) > 100, "the minimum launch speed does not smother a real flick");
     }
 
     printf("\n%s (%d failures)\n", failures ? "FAILURES" : "ALL PASS", failures);

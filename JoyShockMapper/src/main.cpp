@@ -227,20 +227,31 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		  js->getSetting(SettingID::TOUCHPAD_MIN_CUTOFF),
 		  js->getSetting(SettingID::TOUCHPAD_SPEED_COEFF));
 
+		pipe.active = true;
+
+		// No new report reached us this poll. There is nothing to emit, and nothing
+		// to say about velocity either -- treating this as "the finger held still"
+		// would zero the momentum a real swipe had just built up.
+		if (!pipe.sampleConsumed)
+			return;
+
 		FloatXY moved = TouchMousePipeline::accelerate(
 		  { normalised.x() * tpSize.x() * sens.x(), normalised.y() * tpSize.y() * sens.y() },
 		  js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
 
-		pipe.active = true;
 		// Velocity, not this tick's displacement: the coast below re-integrates it
 		// against its own dt, so a jittering poll interval no longer shows up as a
-		// stuttering coast.
-		pipe.momentumX = moved.x() / dt;
-		pipe.momentumY = moved.y() / dt;
+		// stuttering coast. The interval that produced this displacement is the one
+		// the filter actually consumed, which is not necessarily this poll's.
+		const float sampleDt = std::max(dt, 1e-4f);
+		pipe.momentumX = moved.x() / sampleDt;
+		pipe.momentumY = moved.y() / sampleDt;
 		moveMouse(moved.x(), moved.y());
 	}
 	else
 	{
+		// True only on the tick the finger actually left the pad.
+		const bool justLifted = pipe.contact;
 		pipe.contact = false;
 		if (!pipe.active)
 			return;
@@ -256,6 +267,23 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 			pipe.reset();
 			return;
 		}
+
+		// Tapping the pad to stop a coast leaves a little involuntary movement
+		// behind, and arming the trackball on it flicked the cursor every time you
+		// tried to put it down gently. A gesture has to have been going somewhere to
+		// earn a coast, so a minimum launch speed decides it -- the same idea as the
+		// controller's own MINIMUM_MOMENTUM_VEL. Checked once, at liftoff: the coast
+		// keeps decaying below this afterwards, down to its own much lower stop.
+		if (justLifted)
+		{
+			const float minVelocity = js->getSetting(SettingID::TOUCHPAD_TRACKBALL_MIN_VELOCITY);
+			if (hypotf(pipe.momentumX, pipe.momentumY) < minVelocity)
+			{
+				pipe.reset();
+				return;
+			}
+		}
+
 		float decay = exp2f(-dt * decaySetting);
 		pipe.momentumX *= decay;
 		pipe.momentumY *= decay;
@@ -3507,6 +3535,13 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	// after release, and a long, slow decay previously made a fast flick's
 	// deferred remainder appear as an unexplained multi-second slide after the
 	// finger had already lifted -- easy to mistake for "the touchpad doesn't work".
+	// A gesture has to be going somewhere to earn a coast. Below this launch speed
+	// the finger is being lifted, not flicked, and the trackball stays put.
+	auto touch_trackball_min_vel = new JSMSetting<float>(SettingID::TOUCHPAD_TRACKBALL_MIN_VELOCITY, 200.f);
+	touch_trackball_min_vel->setFilter(&filterPositive);
+	SettingsManager::add(touch_trackball_min_vel);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_TRACKBALL_MIN_VELOCITY", *touch_trackball_min_vel))->setHelp("Minimum speed, in pixels per second, that a swipe must still have as your finger leaves the pad before the trackball coasts. Stops a tap meant to halt the coast from flicking the cursor instead. 0 coasts from any speed."));
+
 	auto touch_trackball_decay = new JSMSetting<float>(SettingID::TOUCHPAD_TRACKBALL_DECAY, 0.f);
 	touch_trackball_decay->setFilter(&filterPositive);
 	SettingsManager::add(touch_trackball_decay);

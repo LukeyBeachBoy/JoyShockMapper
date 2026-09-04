@@ -49,12 +49,20 @@ def test_abandoned_grip_designs_are_gone():
                  'GetLeftGrip', 'GetRightGrip',
                  'LEFT_GRIP_ON_MS', 'RIGHT_GRIP_ON_MS',
                  'LEFT_GRIP_OFF_MS', 'RIGHT_GRIP_OFF_MS',
-                 'LEFT_GRIP_RANGE', 'RIGHT_GRIP_RANGE',
-                 'GRIP_CLICK_PRESSURE'):
+                 'LEFT_GRIP_RANGE', 'RIGHT_GRIP_RANGE'):
         for name, text in (('SDLWrapper.cpp', SDL), ('main.cpp', MAIN),
                            ('JslWrapper.h', JSLW_H), ('JslWrapper.cpp', JSLW_CPP),
                            ('JoyShockMapper.h', JSM_H)):
             assert gone not in text, f'{gone} still in {name}'
+
+
+def test_the_back_buttons_force_thresholds_are_not_written_as_grip_settings():
+    """*_GRIP_CLICK_PRESSURE gates the physical back buttons. Writing it as a grip
+    sensor range is the mistake that made the setting appear to do nothing, so the
+    wire constants must be gone -- the surviving mentions are prose saying why."""
+    for text, name in ((SDL, 'SDLWrapper.cpp'), (MAIN, 'main.cpp')):
+        assert 'TRITON_SETTING_LEFT_GRIP_CLICK_PRESSURE' not in text, name
+        assert 'TRITON_SETTING_RIGHT_GRIP_CLICK_PRESSURE' not in text, name
 
 
 def test_firmware_setting_numbers_match_sdl_header():
@@ -64,7 +72,7 @@ def test_firmware_setting_numbers_match_sdl_header():
         'TRITON_ID_SET_SETTINGS_VALUES': 0x87,
         'TRITON_SETTING_TIMP_TOUCH_THRESHOLD_ON': 72,
         'TRITON_SETTING_TIMP_TOUCH_THRESHOLD_OFF': 73,
-        'TRITON_ID_OUT_REPORT_HAPTIC_PULSE': 0x81,
+        'TRITON_ID_OUT_REPORT_HAPTIC_COMMAND': 0x82,
     }
     for name, value in expected.items():
         match = re.search(rf'{name} = (0x[0-9A-Fa-f]+|\d+);', SDL)
@@ -136,11 +144,23 @@ def test_grip_haptics_are_edge_triggered_and_off_by_default():
     assert 'if (gamepad == nullptr || intensity <= 0.f)' in SDL
 
 
-def test_grip_haptic_uses_the_output_report_the_sdl_patch_allows():
+def test_grip_haptic_asks_for_the_controllers_own_click():
+    """A hand-rolled square burst was barely perceptible; the canned effect is the
+    tap Steam plays while calibrating the grips."""
     body = SDL.split('static void sendGripHaptic', 1)[1].split('\n\t}', 1)[0]
-    assert 'buffer[0] = TRITON_ID_OUT_REPORT_HAPTIC_PULSE;' in body
-    assert 'TRITON_HAPTIC_PULSE_BYTES = 10' in SDL
-    assert 'buffer[1] = rightSide ? 1 : 0;' in body
+    assert 'buffer[0] = TRITON_ID_OUT_REPORT_HAPTIC_COMMAND;' in body
+    assert 'TRITON_HAPTIC_COMMAND_BYTES = 4' in SDL
+    assert 'buffer[2] = TRITON_HAPTIC_CLICK;' in body
+
+
+def test_grip_haptic_side_is_the_bitmask_the_firmware_expects():
+    """side is a bitmask (0x01 left, 0x02 right), not an index. Sending 0 for the
+    left grip selected no actuator at all, which is half of why it was inaudible."""
+    assert 'TRITON_HAPTIC_SIDE_LEFT = 0x01' in SDL
+    assert 'TRITON_HAPTIC_SIDE_RIGHT = 0x02' in SDL
+    body = SDL.split('static void sendGripHaptic', 1)[1].split('\n\t}', 1)[0]
+    assert 'rightSide ? TRITON_HAPTIC_SIDE_RIGHT : TRITON_HAPTIC_SIDE_LEFT' in body
+    assert '? 1 : 0' not in body, 'side must not be encoded as an index again'
 
 
 def test_settings_are_pushed_from_the_poll_loop_only_on_change():

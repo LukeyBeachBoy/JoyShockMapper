@@ -298,6 +298,8 @@ enum class SettingID
 	// behaviour for it). 0 disables coasting entirely: the cursor stops the instant
 	// contact ends, matching Steam Input's Mouse touch style. This is the default.
 	TOUCHPAD_TRACKBALL_DECAY,
+	// Launch speed a swipe must still have at liftoff to start a coast at all.
+	TOUCHPAD_TRACKBALL_MIN_VELOCITY,
 	// Grip sensors (Steam Controller 2026): the capacitive strips inside the
 	// handles, which sense how near your hands are rather than how hard you
 	// squeeze. The controller decides the bit, so the two knobs live in its

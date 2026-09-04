@@ -543,9 +543,21 @@ public:
 
 	// Grip haptics ride an OUTPUT report rather than a feature report. SDL's
 	// SendJoystickEffect only forwarded feature reports until the build's SDL patch
-	// added the 10-byte pulse length; see cmake/PatchSdlTritonTouch.cmake.
-	static constexpr uint8_t TRITON_ID_OUT_REPORT_HAPTIC_PULSE = 0x81;
-	static constexpr int TRITON_HAPTIC_PULSE_BYTES = 10;
+	// let the 0x80..0x85 haptic reports through; see cmake/PatchSdlTritonTouch.cmake.
+	//
+	// The command report asks the controller for one of its own canned effects
+	// rather than describing a waveform by hand, which is what makes it a crisp
+	// audible tap instead of a faint tick:
+	//
+	//   [0] report id 0x82
+	//   [1] side, 0x01 = left, 0x02 = right, 0x03 = both
+	//   [2] effect, 0 = off, 1 = tick, 2 = click, 3 = tone, 4 = rumble ...
+	//   [3] gain in dB, signed, and allowed to be positive
+	static constexpr uint8_t TRITON_ID_OUT_REPORT_HAPTIC_COMMAND = 0x82;
+	static constexpr int TRITON_HAPTIC_COMMAND_BYTES = 4;
+	static constexpr uint8_t TRITON_HAPTIC_SIDE_LEFT = 0x01;
+	static constexpr uint8_t TRITON_HAPTIC_SIDE_RIGHT = 0x02;
+	static constexpr uint8_t TRITON_HAPTIC_CLICK = 2;
 	static constexpr int TRITON_FEATURE_REPORT_BYTES = 64;
 
 	// Builds the payload SDL's FeatureReportMsg describes and hands it to the
@@ -595,32 +607,28 @@ public:
 
 	// Fires the grip actuator on the side whose sensor just tripped.
 	//
-	// MsgHapticPulse is { side, on_us, off_us, repeat_count, gain_db }, little
-	// endian, behind a 1-byte output report id. A single short burst is what a
-	// grip detection wants -- one tick as your hand arrives, not a rumble -- so
-	// repeat_count stays at 1 and off_us at 0.
+	// This asks for the controller's own "click" effect rather than describing a
+	// pulse by hand. The hand-rolled version was barely perceptible for two
+	// reasons: it encoded the side as 0/1 when the field is a bitmask (0x01 left,
+	// 0x02 right), so the left grip selected no actuator at all; and a 2-12ms
+	// square burst is nothing like the tuned waveform behind the tap Steam plays
+	// while calibrating the grips.
 	static void sendGripHaptic(SDL_Gamepad *gamepad, bool rightSide, float intensity)
 	{
 		if (gamepad == nullptr || intensity <= 0.f)
 			return;
 
+		// Gain is in decibels and may go positive; the firmware limits rather than
+		// clips. 100 lands at +12dB, which is emphatic, and the scale is logarithmic
+		// so the low end still has to reach down a long way to be gentle.
 		const float scale = std::clamp(intensity, 0.f, 100.f) / 100.f;
-		// A 2-12ms burst: below ~2ms the actuator barely moves, and much above
-		// 12ms stops reading as a tick and starts reading as a buzz.
-		const uint16_t onUs = uint16_t(2000.f + scale * 10000.f);
-		const uint16_t gainDb = uint16_t(scale * 100.f);
+		const int8_t gainDb = int8_t(std::lround(-24.0f + scale * 36.0f));
 
-		uint8_t buffer[TRITON_HAPTIC_PULSE_BYTES] = { 0 };
-		buffer[0] = TRITON_ID_OUT_REPORT_HAPTIC_PULSE;
-		buffer[1] = rightSide ? 1 : 0;
-		buffer[2] = uint8_t(onUs & 0xFF);
-		buffer[3] = uint8_t((onUs >> 8) & 0xFF);
-		buffer[4] = 0; // off_us
-		buffer[5] = 0;
-		buffer[6] = 1; // repeat_count
-		buffer[7] = 0;
-		buffer[8] = uint8_t(gainDb & 0xFF);
-		buffer[9] = uint8_t((gainDb >> 8) & 0xFF);
+		uint8_t buffer[TRITON_HAPTIC_COMMAND_BYTES] = { 0 };
+		buffer[0] = TRITON_ID_OUT_REPORT_HAPTIC_COMMAND;
+		buffer[1] = rightSide ? TRITON_HAPTIC_SIDE_RIGHT : TRITON_HAPTIC_SIDE_LEFT;
+		buffer[2] = TRITON_HAPTIC_CLICK;
+		buffer[3] = uint8_t(gainDb);
 		SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
 	}
 

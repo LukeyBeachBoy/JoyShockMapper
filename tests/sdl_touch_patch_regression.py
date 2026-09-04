@@ -46,6 +46,18 @@ def test_the_module_is_actually_tracked_by_git():
         'cmake/ modules must be exempted from the blanket *.cmake ignore rule'
 
 
+def test_haptic_output_reports_are_let_through_by_report_id():
+    """The grip actuators are only reachable through an output report, which
+    SendJoystickEffect refused. Gating on the report id rather than one payload
+    length keeps every haptic effect reachable without widening it to anything
+    else the caller might pass."""
+    assert 'ID_OUT_REPORT_HAPTIC_RUMBLE' in PATCH and 'ID_OUT_REPORT_HAPTIC_SCRIPT' in PATCH, \
+        "the haptic passthrough must be bounded by the driver's own report-id block"
+    assert 'SDL_hid_write' in PATCH, 'haptic reports must be written as output reports'
+    assert 'size < HID_FEATURE_REPORT_BYTES' in PATCH, \
+        'the feature-report path must still be reached for settings'
+
+
 def test_capacitive_contact_is_added_never_substituted():
     """A pure replacement would leave the pads dead if a firmware revision ever
     stopped setting the touch bits. ORing can only add contacts."""
