@@ -358,6 +358,15 @@ public:
 	// feature report). Only meaningful for hardware that implements it; devices
 	// that don't stay a no-op, same as SetTriggerEffect/SetMicLight below.
 	virtual void TurnOffController(int deviceId) { }
+	// percent: 0-100, or -1 if the device/driver can't report one. state:
+	// mirrors SDL_PowerState (-1 error, 0 unknown, 1 on battery, 2 no battery,
+	// 3 charging, 4 charged). Defaults leave both at "unknown" for backends
+	// that don't implement battery reporting.
+	virtual void GetBatteryLevel(int deviceId, int &percent, int &state)
+	{
+		percent = -1;
+		state = 0;
+	}
 	virtual void SetPlayerNumber(int deviceId, int number) = 0;
 	virtual void SetTriggerEffect(int deviceId, const AdaptiveTriggerSetting &_leftTriggerEffect, const AdaptiveTriggerSetting &_rightTriggerEffect) { };
 	virtual void SetMicLight(int deviceId, unsigned char mode) { }

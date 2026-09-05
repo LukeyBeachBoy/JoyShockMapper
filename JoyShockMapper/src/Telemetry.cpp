@@ -114,7 +114,9 @@ public:
 				    << ",\"type\":" << dev.controllerType
 				    << ",\"split\":" << dev.splitType
 				    << ",\"vid\":" << dev.vendorId
-				    << ",\"pid\":" << dev.productId;
+				    << ",\"pid\":" << dev.productId
+				    << ",\"batteryPercent\":" << dev.batteryPercent
+				    << ",\"batteryState\":" << dev.batteryState;
 				if (dev.status.has_value())
 				{
 					const auto &status = dev.status.value();

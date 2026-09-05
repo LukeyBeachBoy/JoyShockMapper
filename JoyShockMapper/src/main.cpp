@@ -1398,6 +1398,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		dev.splitType = device->_splitType;
 		dev.vendorId = jsl->GetControllerVendor(device->_handle);
 		dev.productId = jsl->GetControllerProduct(device->_handle);
+		jsl->GetBatteryLevel(device->_handle, dev.batteryPercent, dev.batteryState);
 #ifdef SDL
 		TelemetryDeviceStatus status;
 		status.buttons = jsl->GetButtons(device->_handle);

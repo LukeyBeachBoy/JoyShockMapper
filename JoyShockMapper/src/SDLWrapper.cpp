@@ -1460,6 +1460,19 @@ public:
 		sendTurnOffController(jc->_sdlController);
 	}
 
+	void GetBatteryLevel(int deviceId, int &percent, int &state) override
+	{
+		percent = -1;
+		state = 0;
+		auto *jc = _controllerMap[deviceId];
+		if (jc == nullptr || jc->_sdlController == nullptr)
+			return;
+		int sdlPercent = -1;
+		SDL_PowerState sdlState = SDL_GetGamepadPowerInfo(jc->_sdlController, &sdlPercent);
+		percent = sdlPercent;
+		state = int(sdlState);
+	}
+
 	void SetRumble(int deviceId, int smallRumble, int bigRumble) override
 	{
 		// sendRumble command needs to be sent at every poll in SDL, so the next value is set here and the actual call

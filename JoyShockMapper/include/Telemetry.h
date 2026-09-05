@@ -63,6 +63,13 @@ struct TelemetryDevice
 	int splitType = 0;
 	int vendorId = 0;
 	int productId = 0;
+	// -1 = unknown/unsupported by this device, matching SDL_GetGamepadPowerInfo's
+	// own convention for percent when the underlying driver can't report one.
+	int batteryPercent = -1;
+	// Mirrors SDL_PowerState: -1 error, 0 unknown, 1 on battery, 2 no battery
+	// (wired/no cell), 3 charging, 4 charged. Kept as a raw int rather than an
+	// enum so the JSON wire format doesn't depend on this header's enum layout.
+	int batteryState = 0;
 	std::optional<TelemetryDeviceStatus> status;
 };
 
