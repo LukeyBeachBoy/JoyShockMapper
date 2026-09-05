@@ -189,6 +189,89 @@ struct TOUCH_POINT
 //	}
 // }
 
+// One acceleration-curve evaluator shared by the gyro (deg/s -> sensitivity)
+// and the trackpad mouse (px/s -> gain). A shape is a curve type, its parameters
+// and the speed thresholds it was tuned against, all in that input's own units.
+struct AccelCurveShape
+{
+	AccelCurve curve = AccelCurve::LINEAR;
+	float minThreshold = 0.f;
+	float maxThreshold = 0.f;
+	float naturalVHalf = 0.f;
+	float powerVRef = 0.f;
+	float powerExponent = 0.f;
+	float sigmoidMid = 0.f;
+	float sigmoidWidth = 0.f;
+	float jumpTau = 0.f;
+};
+
+static AccelCurveShape readGyroAccelShape(JoyShock &jc)
+{
+	AccelCurveShape shape;
+	shape.curve = jc.getSetting<AccelCurve>(SettingID::ACCEL_CURVE);
+	shape.minThreshold = jc.getSetting(SettingID::MIN_GYRO_THRESHOLD);
+	shape.maxThreshold = jc.getSetting(SettingID::MAX_GYRO_THRESHOLD);
+	shape.naturalVHalf = jc.getSetting(SettingID::ACCEL_NATURAL_VHALF);
+	shape.powerVRef = jc.getSetting(SettingID::ACCEL_POWER_VREF);
+	shape.powerExponent = jc.getSetting(SettingID::ACCEL_POWER_EXPONENT);
+	shape.sigmoidMid = jc.getSetting(SettingID::ACCEL_SIGMOID_MID);
+	shape.sigmoidWidth = jc.getSetting(SettingID::ACCEL_SIGMOID_WIDTH);
+	shape.jumpTau = jc.getSetting(SettingID::ACCEL_JUMP_TAU);
+	return shape;
+}
+
+static AccelCurveShape readTouchpadAccelShape(JoyShock &jc)
+{
+	AccelCurveShape shape;
+	shape.curve = jc.getSetting<AccelCurve>(SettingID::TOUCHPAD_ACCEL_CURVE);
+	shape.minThreshold = jc.getSetting(SettingID::TOUCHPAD_ACCEL_MIN_SPEED);
+	shape.maxThreshold = jc.getSetting(SettingID::TOUCHPAD_ACCEL_MAX_SPEED);
+	shape.naturalVHalf = jc.getSetting(SettingID::TOUCHPAD_ACCEL_NATURAL_VHALF);
+	shape.powerVRef = jc.getSetting(SettingID::TOUCHPAD_ACCEL_POWER_VREF);
+	shape.powerExponent = jc.getSetting(SettingID::TOUCHPAD_ACCEL_POWER_EXPONENT);
+	shape.sigmoidMid = jc.getSetting(SettingID::TOUCHPAD_ACCEL_SIGMOID_MID);
+	shape.sigmoidWidth = jc.getSetting(SettingID::TOUCHPAD_ACCEL_SIGMOID_WIDTH);
+	shape.jumpTau = jc.getSetting(SettingID::TOUCHPAD_ACCEL_JUMP_TAU);
+	return shape;
+}
+
+// `vAdjusted` is the speed above the shape's minimum threshold. Returns the
+// output between `low` and `high` the curve picks for that speed.
+static float evaluateAccelCurve(const AccelCurveShape &shape, float vAdjusted, float low, float high)
+{
+	switch (shape.curve)
+	{
+	case AccelCurve::NATURAL:
+		return NaturalSensitivity(vAdjusted, low, high, shape.naturalVHalf);
+	case AccelCurve::POWER:
+		return PowerSensitivity(vAdjusted, low, high, shape.powerVRef, shape.powerExponent);
+	case AccelCurve::QUADRATIC:
+		return QuadraticSensitivity(vAdjusted, low, high, shape.maxThreshold);
+	case AccelCurve::SIGMOID:
+		return SigmoidSensitivity(vAdjusted, low, high, shape.sigmoidMid, shape.sigmoidWidth);
+	case AccelCurve::JUMP:
+		return JumpSensitivity(vAdjusted, low, high, shape.maxThreshold, shape.jumpTau);
+	case AccelCurve::LINEAR:
+	case AccelCurve::INVALID:
+	default: {
+		const float denom = shape.maxThreshold - shape.minThreshold;
+		const float t = denom > 0.f ? std::clamp(vAdjusted / denom, 0.f, 1.f) : (vAdjusted > 0.f ? 1.f : 0.f);
+		return low * (1.f - t) + high * t;
+	}
+	}
+}
+
+// Re-expresses a speed measured against `from`'s thresholds as the equivalent
+// speed against `to`'s -- the same fraction of the way from "slow" to "fast" --
+// so one input can be driven by a curve tuned for the other.
+static float rescaleAdjustedSpeed(float vAdjusted, const AccelCurveShape &from, const AccelCurveShape &to)
+{
+	const float fromRange = from.maxThreshold - from.minThreshold;
+	const float toRange = std::max(0.f, to.maxThreshold - to.minThreshold);
+	const float t = fromRange > 0.f ? std::clamp(vAdjusted / fromRange, 0.f, 1.f) : (vAdjusted > 0.f ? 1.f : 0.f);
+	return t * toRange;
+}
+
 // Shared touchpad -> mouse path for a single physical pad.
 //
 // Order matters here: the One Euro filter runs on normalised pad POSITION, the
@@ -236,15 +319,40 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		if (!pipe.sampleConsumed)
 			return;
 
-		FloatXY moved = TouchMousePipeline::accelerate(
-		  { normalised.x() * tpSize.x() * sens.x(), normalised.y() * tpSize.y() * sens.y() },
-		  js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
+		// The interval that produced this displacement is the one the filter
+		// actually consumed, which is not necessarily this poll's.
+		const float sampleDt = std::max(dt, 1e-4f);
+
+		FloatXY scaled{ normalised.x() * tpSize.x() * sens.x(), normalised.y() * tpSize.y() * sens.y() };
+
+		// Curve-based acceleration: a gain between TOUCHPAD_ACCEL_MIN_GAIN and
+		// _MAX_GAIN chosen from finger speed in px/s, using either the pad's own
+		// curve or (ACCEL_CURVE_LINK) the gyro's. Off unless the gains differ.
+		{
+			const float minGain = js->getSetting(SettingID::TOUCHPAD_ACCEL_MIN_GAIN);
+			const float maxGain = js->getSetting(SettingID::TOUCHPAD_ACCEL_MAX_GAIN);
+			if (fabsf(maxGain - minGain) > 1e-6f || fabsf(minGain - 1.f) > 1e-6f)
+			{
+				const AccelCurveShape tpShape = readTouchpadAccelShape(*js);
+				const float speed = sqrtf(scaled.x() * scaled.x() + scaled.y() * scaled.y()) / sampleDt;
+				float vAdjusted = std::max(0.f, speed - tpShape.minThreshold);
+				AccelCurveShape active = tpShape;
+				if (js->getSetting<AccelCurveLink>(SettingID::ACCEL_CURVE_LINK) == AccelCurveLink::TOUCHPAD_USES_GYRO)
+				{
+					const AccelCurveShape gyroShape = readGyroAccelShape(*js);
+					vAdjusted = rescaleAdjustedSpeed(vAdjusted, tpShape, gyroShape);
+					active = gyroShape;
+				}
+				const float gain = std::max(0.f, evaluateAccelCurve(active, vAdjusted, minGain, maxGain));
+				scaled = { scaled.x() * gain, scaled.y() * gain };
+			}
+		}
+
+		FloatXY moved = TouchMousePipeline::accelerate(scaled, js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
 
 		// Velocity, not this tick's displacement: the coast below re-integrates it
 		// against its own dt, so a jittering poll interval no longer shows up as a
-		// stuttering coast. The interval that produced this displacement is the one
-		// the filter actually consumed, which is not necessarily this poll's.
-		const float sampleDt = std::max(dt, 1e-4f);
+		// stuttering coast.
 		pipe.momentumX = moved.x() / sampleDt;
 		pipe.momentumY = moved.y() / sampleDt;
 		moveMouse(moved.x(), moved.y());
@@ -1110,15 +1218,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 
 	pair<float, float> lowSensXY = jc->getSetting<FloatXY>(SettingID::MIN_GYRO_SENS);
 	pair<float, float> hiSensXY = jc->getSetting<FloatXY>(SettingID::MAX_GYRO_SENS);
-	const AccelCurve accelCurve = jc->getSetting<AccelCurve>(SettingID::ACCEL_CURVE);
-
-	// Curve-specific parameters
-	const float naturalVHalf = jc->getSetting(SettingID::ACCEL_NATURAL_VHALF);
-	const float powervRef = jc->getSetting(SettingID::ACCEL_POWER_VREF);
-	const float powerExponent = jc->getSetting(SettingID::ACCEL_POWER_EXPONENT);
-	const float sigmoidMid = jc->getSetting(SettingID::ACCEL_SIGMOID_MID);
-	const float sigmoidWidth = jc->getSetting(SettingID::ACCEL_SIGMOID_WIDTH);
-	const float jumpTau = jc->getSetting(SettingID::ACCEL_JUMP_TAU);
+	const AccelCurveShape gyroShape = readGyroAccelShape(*jc);
 
 	// apply calibration factor
 	// get input velocity (post snap; may include synthetic gyro later)
@@ -1254,37 +1354,20 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	float appliedSensY = 0.0f;
 	float normalizedPostCurve = normalizedPreCurve;
 
-	switch (accelCurve)
 	{
-	case AccelCurve::NATURAL:
-		appliedSensX = NaturalSensitivity(omegaAdjusted, lowSensXY.first, hiSensXY.first, naturalVHalf);
-		appliedSensY = NaturalSensitivity(omegaAdjusted, lowSensXY.second, hiSensXY.second, naturalVHalf);
-		break;
-	case AccelCurve::POWER:
-		appliedSensX = PowerSensitivity(omegaAdjusted, lowSensXY.first, hiSensXY.first, powervRef, powerExponent);
-		appliedSensY = PowerSensitivity(omegaAdjusted, lowSensXY.second, hiSensXY.second, powervRef, powerExponent);
-		break;
-	case AccelCurve::QUADRATIC:
-		appliedSensX = QuadraticSensitivity(omegaAdjusted, lowSensXY.first, hiSensXY.first, maxThreshold);
-		appliedSensY = QuadraticSensitivity(omegaAdjusted, lowSensXY.second, hiSensXY.second, maxThreshold);
-		break;
-	case AccelCurve::SIGMOID:
-		appliedSensX = SigmoidSensitivity(omegaAdjusted, lowSensXY.first, hiSensXY.first, sigmoidMid, sigmoidWidth);
-		appliedSensY = SigmoidSensitivity(omegaAdjusted, lowSensXY.second, hiSensXY.second, sigmoidMid, sigmoidWidth);
-		break;
-	case AccelCurve::JUMP:
-		appliedSensX = JumpSensitivity(omegaAdjusted, lowSensXY.first, hiSensXY.first, maxThreshold, jumpTau);
-		appliedSensY = JumpSensitivity(omegaAdjusted, lowSensXY.second, hiSensXY.second, maxThreshold, jumpTau);
-		break;
-	case AccelCurve::LINEAR:
-	case AccelCurve::INVALID:
-	default: {
-		const float t = normalizedPreCurve;
-		appliedSensX = lowSensXY.first * (1.0f - t) + hiSensXY.first * t;
-		appliedSensY = lowSensXY.second * (1.0f - t) + hiSensXY.second * t;
-		normalizedPostCurve = t;
-		break;
-	}
+		// The gyro's own shape by default; with ACCEL_CURVE_LINK = GYRO_USES_TOUCHPAD
+		// the trackpad's shape drives it instead, evaluated at the same fraction of
+		// the gyro's own min..max speed range.
+		AccelCurveShape activeShape = gyroShape;
+		float vForCurve = omegaAdjusted;
+		if (jc->getSetting<AccelCurveLink>(SettingID::ACCEL_CURVE_LINK) == AccelCurveLink::GYRO_USES_TOUCHPAD)
+		{
+			const AccelCurveShape touchpadShape = readTouchpadAccelShape(*jc);
+			vForCurve = rescaleAdjustedSpeed(omegaAdjusted, gyroShape, touchpadShape);
+			activeShape = touchpadShape;
+		}
+		appliedSensX = evaluateAccelCurve(activeShape, vForCurve, lowSensXY.first, hiSensXY.first);
+		appliedSensY = evaluateAccelCurve(activeShape, vForCurve, lowSensXY.second, hiSensXY.second);
 	}
 
 	// Map post-curve sensitivities back to 0..1 for telemetry
@@ -3621,6 +3704,81 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	touch_accel->setFilter(&filterPositive);
 	SettingsManager::add(touch_accel);
 	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCELERATION", *touch_accel))->setHelp("Velocity-based touchpad mouse acceleration."));
+
+	// Curve-based trackpad acceleration. Same family of shapes as the gyro's
+	// ACCEL_CURVE, but the input is finger speed in pixels per second and the
+	// output is a gain on the mouse delta rather than a sensitivity.
+	auto touch_accel_curve = new JSMSetting<AccelCurve>(SettingID::TOUCHPAD_ACCEL_CURVE, AccelCurve::LINEAR);
+	touch_accel_curve->setFilter(&filterInvalidValue<AccelCurve, AccelCurve::INVALID>);
+	SettingsManager::add(touch_accel_curve);
+	commandRegistry->add((new JSMAssignment<AccelCurve>("TOUCHPAD_ACCEL_CURVE", *touch_accel_curve))
+	                       ->setHelp("Trackpad mouse acceleration curve. Options: LINEAR (default), NATURAL, POWER, QUADRATIC, SIGMOID, JUMP. Only matters when TOUCHPAD_ACCEL_MIN_GAIN and TOUCHPAD_ACCEL_MAX_GAIN differ."));
+
+	auto touch_accel_min_speed = new JSMSetting<float>(SettingID::TOUCHPAD_ACCEL_MIN_SPEED, 0.f);
+	touch_accel_min_speed->setFilter(&filterPositive);
+	SettingsManager::add(touch_accel_min_speed);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCEL_MIN_SPEED", *touch_accel_min_speed))
+	                       ->setHelp("Finger speed in pixels per second at and below which TOUCHPAD_ACCEL_MIN_GAIN applies."));
+
+	auto touch_accel_max_speed = new JSMSetting<float>(SettingID::TOUCHPAD_ACCEL_MAX_SPEED, 2000.f);
+	touch_accel_max_speed->setFilter(&filterPositive);
+	SettingsManager::add(touch_accel_max_speed);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCEL_MAX_SPEED", *touch_accel_max_speed))
+	                       ->setHelp("Finger speed in pixels per second at and above which TOUCHPAD_ACCEL_MAX_GAIN applies."));
+
+	auto touch_accel_min_gain = new JSMSetting<float>(SettingID::TOUCHPAD_ACCEL_MIN_GAIN, 1.f);
+	touch_accel_min_gain->setFilter(&filterPositive);
+	SettingsManager::add(touch_accel_min_gain);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCEL_MIN_GAIN", *touch_accel_min_gain))
+	                       ->setHelp("Multiplier on trackpad mouse movement at slow finger speeds. 1 = unchanged."));
+
+	auto touch_accel_max_gain = new JSMSetting<float>(SettingID::TOUCHPAD_ACCEL_MAX_GAIN, 1.f);
+	touch_accel_max_gain->setFilter(&filterPositive);
+	SettingsManager::add(touch_accel_max_gain);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCEL_MAX_GAIN", *touch_accel_max_gain))
+	                       ->setHelp("Multiplier on trackpad mouse movement at fast finger speeds. 1 = unchanged; e.g. 2.5 for a strong flick boost."));
+
+	auto touch_accel_natural_vhalf = new JSMSetting<float>(SettingID::TOUCHPAD_ACCEL_NATURAL_VHALF, 800.f);
+	touch_accel_natural_vhalf->setFilter(&filterPositive);
+	SettingsManager::add(touch_accel_natural_vhalf);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCEL_NATURAL_VHALF", *touch_accel_natural_vhalf))
+	                       ->setHelp("Natural curve: finger speed (px/s above TOUCHPAD_ACCEL_MIN_SPEED) at which the gain reaches the midpoint."));
+
+	auto touch_accel_power_vref = new JSMSetting<float>(SettingID::TOUCHPAD_ACCEL_POWER_VREF, 0.002f);
+	touch_accel_power_vref->setFilter(&filterPositive);
+	SettingsManager::add(touch_accel_power_vref);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCEL_POWER_VREF", *touch_accel_power_vref))
+	                       ->setHelp("Power curve: scale applied to finger speed before the exponent."));
+
+	auto touch_accel_power_exponent = new JSMSetting<float>(SettingID::TOUCHPAD_ACCEL_POWER_EXPONENT, 0.5f);
+	touch_accel_power_exponent->setFilter(&filterPositive);
+	SettingsManager::add(touch_accel_power_exponent);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCEL_POWER_EXPONENT", *touch_accel_power_exponent))
+	                       ->setHelp("Power curve: exponent applied to the scaled finger speed."));
+
+	auto touch_accel_sigmoid_mid = new JSMSetting<float>(SettingID::TOUCHPAD_ACCEL_SIGMOID_MID, 900.f);
+	touch_accel_sigmoid_mid->setFilter(&filterPositive);
+	SettingsManager::add(touch_accel_sigmoid_mid);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCEL_SIGMOID_MID", *touch_accel_sigmoid_mid))
+	                       ->setHelp("Sigmoid curve: finger speed (px/s above TOUCHPAD_ACCEL_MIN_SPEED) at the gain midpoint."));
+
+	auto touch_accel_sigmoid_width = new JSMSetting<float>(SettingID::TOUCHPAD_ACCEL_SIGMOID_WIDTH, 300.f);
+	touch_accel_sigmoid_width->setFilter(&filterPositive);
+	SettingsManager::add(touch_accel_sigmoid_width);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCEL_SIGMOID_WIDTH", *touch_accel_sigmoid_width))
+	                       ->setHelp("Sigmoid curve: width/steepness in px/s; larger is gentler."));
+
+	auto touch_accel_jump_tau = new JSMSetting<float>(SettingID::TOUCHPAD_ACCEL_JUMP_TAU, 1.5f);
+	touch_accel_jump_tau->setFilter(&filterPositive);
+	SettingsManager::add(touch_accel_jump_tau);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_ACCEL_JUMP_TAU", *touch_accel_jump_tau))
+	                       ->setHelp("Jump curve: rise length (smaller = steeper) before reaching the peak gain."));
+
+	auto accel_curve_link = new JSMSetting<AccelCurveLink>(SettingID::ACCEL_CURVE_LINK, AccelCurveLink::NONE);
+	accel_curve_link->setFilter(&filterInvalidValue<AccelCurveLink, AccelCurveLink::INVALID>);
+	SettingsManager::add(accel_curve_link);
+	commandRegistry->add((new JSMAssignment<AccelCurveLink>("ACCEL_CURVE_LINK", *accel_curve_link))
+	                       ->setHelp("Share one acceleration curve shape between gyro and trackpad. NONE (default): each uses its own. TOUCHPAD_USES_GYRO: the trackpad borrows the gyro's ACCEL_CURVE and parameters, evaluated across its own TOUCHPAD_ACCEL_MIN/MAX_SPEED range. GYRO_USES_TOUCHPAD: the reverse."));
 
 	// Grip sensors: the capacitive strips inside the handles. They sense how near
 	// your hands are, not how hard you squeeze -- the grip *buttons* (L4/R4/L5/R5)

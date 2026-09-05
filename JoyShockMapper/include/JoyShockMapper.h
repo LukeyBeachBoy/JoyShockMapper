@@ -289,6 +289,21 @@ enum class SettingID
 	TOUCH_RING_MODE,
 	TOUCHPAD_SENS,
 	TOUCHPAD_ACCELERATION,
+	// Speed-based acceleration curve for the trackpad mouse, mirroring the gyro's
+	// ACCEL_* family but measured in pixels per second and producing a gain.
+	TOUCHPAD_ACCEL_CURVE,
+	TOUCHPAD_ACCEL_MIN_SPEED,
+	TOUCHPAD_ACCEL_MAX_SPEED,
+	TOUCHPAD_ACCEL_MIN_GAIN,
+	TOUCHPAD_ACCEL_MAX_GAIN,
+	TOUCHPAD_ACCEL_NATURAL_VHALF,
+	TOUCHPAD_ACCEL_POWER_VREF,
+	TOUCHPAD_ACCEL_POWER_EXPONENT,
+	TOUCHPAD_ACCEL_SIGMOID_MID,
+	TOUCHPAD_ACCEL_SIGMOID_WIDTH,
+	TOUCHPAD_ACCEL_JUMP_TAU,
+	// Lets one input borrow the other's curve shape (see AccelCurveLink).
+	ACCEL_CURVE_LINK,
 	LIGHT_BAR,
 	SCROLL_SENS,
 	VIRTUAL_CONTROLLER,
@@ -425,6 +440,18 @@ enum class AccelCurve
 	QUADRATIC,
 	SIGMOID,
 	JUMP,
+};
+
+// The gyro and the trackpad mouse each have an acceleration curve. One can
+// inherit the other's *shape* (curve type and its parameters): the borrowed
+// curve is evaluated at the same fraction of the way between the borrower's own
+// min and max speed thresholds, so the units (deg/s vs px/s) never mix.
+enum class AccelCurveLink
+{
+	NONE,
+	TOUCHPAD_USES_GYRO,
+	GYRO_USES_TOUCHPAD,
+	INVALID,
 };
 enum class ControllerOrientation
 {
