@@ -350,6 +350,13 @@ enum class SettingID
 	// almost none during a flick.
 	TOUCHPAD_MIN_CUTOFF,
 	TOUCHPAD_SPEED_COEFF,
+	// How fast the filter's own speed *estimate* reacts to a sudden change (Hz).
+	// TOUCHPAD_SPEED_COEFF only matters once the filter has noticed you sped up;
+	// at the gyro-inherited default of 1Hz that noticing takes ~100-150ms, which
+	// reads as the whole filter lagging even on a fast flick. Raising this lets
+	// a flick escape TOUCHPAD_MIN_CUTOFF's smoothing almost immediately without
+	// changing how still it holds a resting or slow-panning finger.
+	TOUCHPAD_D_CUTOFF,
 	// Post-liftoff mouse coast, separate from the legacy TRACKBALL_DECAY (which is
 	// shared with an unrelated stick-based trackball feature and must not change
 	// behaviour for it). 0 disables coasting entirely: the cursor stops the instant
@@ -375,6 +382,11 @@ enum class SettingID
 	GRIP_HAPTIC_INTENSITY,
 	// Which of the controller's effects that pulse plays.
 	GRIP_HAPTIC_EFFECT,
+	// Same pair, but for the pulse fired when a grip sensor releases (hand pulled
+	// away) rather than trips. Independent so contact and release can be tuned
+	// -- or disabled -- separately; 0 intensity = off.
+	GRIP_RELEASE_HAPTIC_INTENSITY,
+	GRIP_RELEASE_HAPTIC_EFFECT,
 };
 
 // constexpr are like #define but with respect to typeness

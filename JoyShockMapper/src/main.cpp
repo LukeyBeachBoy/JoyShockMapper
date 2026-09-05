@@ -225,7 +225,8 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 
 		FloatXY normalised = pipe.step(point.posX, point.posY, dt,
 		  js->getSetting(SettingID::TOUCHPAD_MIN_CUTOFF),
-		  js->getSetting(SettingID::TOUCHPAD_SPEED_COEFF));
+		  js->getSetting(SettingID::TOUCHPAD_SPEED_COEFF),
+		  js->getSetting(SettingID::TOUCHPAD_D_CUTOFF));
 
 		pipe.active = true;
 
@@ -2176,6 +2177,16 @@ bool do_RESTART_GYRO_CALIBRATION()
 	return true;
 }
 
+bool do_TURN_OFF_CONTROLLER()
+{
+	COUT << "Sending turn-off command to all connected controllers that support it\n";
+	for (auto iter = handle_to_joyshock.begin(); iter != handle_to_joyshock.end(); ++iter)
+	{
+		jsl->TurnOffController(iter->first);
+	}
+	return true;
+}
+
 bool do_SET_MOTION_STICK_NEUTRAL()
 {
 	COUT << "Setting neutral motion stick orientation...\n";
@@ -3573,6 +3584,19 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(touch_speed_coeff);
 	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_SPEED_COEFF", *touch_speed_coeff))->setHelp("Touchpad One Euro speed coefficient (beta). Higher tracks fast flicks more live, with less deferred to the post-lift coast."));
 
+	// TOUCHPAD_SPEED_COEFF only raises the cutoff once the filter has noticed
+	// the finger sped up; noticing is this setting's job, and at the
+	// gyro-inherited default of 1Hz it takes ~100-150ms, which reads as the
+	// whole filter lagging even on a fast flick regardless of how high beta
+	// is set. 15Hz reacts to a genuine flick almost immediately (measured
+	// settle time for a 90ms flick drops from ~120ms to ~5ms) while leaving a
+	// resting or slow-panning finger's smoothing untouched, since the
+	// estimate it reacts to is near zero either way.
+	auto touch_d_cutoff = new JSMSetting<float>(SettingID::TOUCHPAD_D_CUTOFF, 15.0f);
+	touch_d_cutoff->setFilter(&filterPositive);
+	SettingsManager::add(touch_d_cutoff);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_D_CUTOFF", *touch_d_cutoff))->setHelp("Touchpad One Euro derivative cutoff in Hz: how fast the filter notices a change in finger speed. Higher makes it react to the start of a flick faster, escaping TOUCHPAD_MIN_CUTOFF's smoothing sooner, without affecting how still it holds a stationary or slow-moving finger. 0 makes it never notice a speed change, so TOUCHPAD_MIN_CUTOFF's smoothing applies at every speed."));
+
 	// Separate from the legacy TRACKBALL_DECAY, which an unrelated stick-based
 	// trackball feature already depends on at its own tuned default. 0 (default)
 	// means no coast: with the responsive filter above already delivering most of
@@ -3634,6 +3658,20 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(grip_haptic_effect);
 	commandRegistry->add((new JSMAssignment<HapticEffect>("GRIP_HAPTIC_EFFECT", *grip_haptic_effect))
 	                       ->setHelp("Which effect the grip actuator plays when that grip sensor trips. Valid values are OFF, TICK, CLICK, TONE, RUMBLE, NOISE, SCRIPT and SWEEP. Defaults to CLICK, the tap Steam Input uses for grip calibration."));
+
+	// Independent from GRIP_HAPTIC_INTENSITY/EFFECT above: those fire on contact,
+	// these fire when the hand pulls away. Off by default for the same reason.
+	auto grip_release_haptic = new JSMSetting<float>(SettingID::GRIP_RELEASE_HAPTIC_INTENSITY, 0.f);
+	grip_release_haptic->setFilter([](auto, auto next) { return clamp(next, 0.f, 100.f); });
+	SettingsManager::add(grip_release_haptic);
+	commandRegistry->add((new JSMAssignment<float>("GRIP_RELEASE_HAPTIC_INTENSITY", *grip_release_haptic))
+	                       ->setHelp("Strength of the pulse the grip actuator fires when that grip sensor releases (hand pulled away), 0-100. 0 (default) disables the release pulse entirely, independent of GRIP_HAPTIC_INTENSITY."));
+
+	auto grip_release_haptic_effect = new JSMSetting<HapticEffect>(SettingID::GRIP_RELEASE_HAPTIC_EFFECT, HapticEffect::CLICK);
+	grip_release_haptic_effect->setFilter(&filterInvalidValue<HapticEffect, HapticEffect::INVALID>);
+	SettingsManager::add(grip_release_haptic_effect);
+	commandRegistry->add((new JSMAssignment<HapticEffect>("GRIP_RELEASE_HAPTIC_EFFECT", *grip_release_haptic_effect))
+	                       ->setHelp("Which effect the grip actuator plays when that grip sensor releases. Same valid values as GRIP_HAPTIC_EFFECT. Defaults to CLICK."));
 
 	auto hide_minimized = new JSMVariable<Switch>(Switch::OFF);
 	minimizeThread.reset(new PollingThread( "Minimize thread", [] (void *param)
@@ -4136,6 +4174,7 @@ int main(int argc, char *argv[])
 	commandRegistry.add((new JSMMacro("SLEEP"))->SetMacro(bind(&do_SLEEP, placeholders::_2))->setHelp("Sleep for the given number of seconds, or one second if no number is given. Can't sleep more than 10 seconds per command."));
 	commandRegistry.add((new JSMMacro("FINISH_GYRO_CALIBRATION"))->SetMacro(bind(&do_FINISH_GYRO_CALIBRATION))->setHelp("Finish calibrating the gyro in all controllers."));
 	commandRegistry.add((new JSMMacro("RESTART_GYRO_CALIBRATION"))->SetMacro(bind(&do_RESTART_GYRO_CALIBRATION))->setHelp("Start calibrating the gyro in all controllers."));
+	commandRegistry.add((new JSMMacro("TURN_OFF_CONTROLLER"))->SetMacro(bind(&do_TURN_OFF_CONTROLLER))->setHelp("Send the controller's own power-off command, matching Steam Input's Guide+Y / QAM+Y shortcut. Only takes effect on hardware that supports it (Steam Controller 2026); bind it to a chord like a face button held together with your Guide or Quick Access Menu button."));
 	commandRegistry.add((new JSMMacro("SET_MOTION_STICK_NEUTRAL"))->SetMacro(bind(&do_SET_MOTION_STICK_NEUTRAL))->setHelp("Set the neutral orientation for motion stick to whatever the orientation of the controller is."));
 	commandRegistry.add((new JSMMacro("README"))->SetMacro(bind(&do_README))->setHelp("Open the latest JoyShockMapper README in your browser."));
 	commandRegistry.add((new JSMMacro("WHITELIST_SHOW"))->SetMacro(bind(&do_WHITELIST_SHOW))->setHelp("Open the whitelister application"));

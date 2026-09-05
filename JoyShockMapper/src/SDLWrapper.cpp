@@ -604,6 +604,32 @@ public:
 		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
 	}
 
+	// Valve's real ID_TURN_OFF_CONTROLLER, from the same wire enum as
+	// TRITON_ID_SET_SETTINGS_VALUES above (SDL's vendored
+	// steam/controller_constants.h at the pinned commit). It is a
+	// FeatureReportHeader with no payload -- there is no MsgTurnOffController in
+	// SDL's payload union, matching every other zero-argument command in that
+	// enum (ID_FACTORY_RESET, ID_CALIBRATE_GYRO, ...) -- so this reuses
+	// sendTritonSettings' exact framing with length = 0 rather than inventing a
+	// new one. This is what Steam Input's own "hold Guide/QAM, press Y" shortcut
+	// almost certainly sends: unlike SETTING_STEAMBUTTON_POWEROFF_TIME (a
+	// hold-duration threshold tied to one physical button), a plain command runs
+	// the instant it's sent regardless of which button triggered it, which
+	// matches it working from either the Guide button or QAM.
+	static constexpr uint8_t TRITON_ID_TURN_OFF_CONTROLLER = 0x9F;
+
+	static bool sendTurnOffController(SDL_Gamepad *gamepad)
+	{
+		if (gamepad == nullptr)
+			return false;
+
+		uint8_t buffer[TRITON_FEATURE_REPORT_BYTES] = { 0 };
+		buffer[0] = TRITON_HID_REPORT_ID;
+		buffer[1] = TRITON_ID_TURN_OFF_CONTROLLER;
+		buffer[2] = 0; // no payload
+		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
+	}
+
 	// Plays one of the controller's own effects. side is a bitmask (1 = left,
 	// 2 = right, 3 = both), effect indexes the firmware's own list, and gainDb is a
 	// signed decibel gain the firmware limits rather than clips -- which is why
@@ -637,9 +663,10 @@ public:
 		  uint8_t(effect), gainDb);
 	}
 
-	// Pulses whichever grip sensor just went from off to on. Edge-triggered on
-	// purpose: a level-triggered pulse would buzz continuously for as long as you
-	// held the controller.
+	// Pulses whichever grip sensor just changed state. Edge-triggered on purpose:
+	// a level-triggered pulse would buzz continuously for as long as you held (or
+	// released) the controller. Contact and release use independent settings so
+	// either can be tuned or turned off without affecting the other.
 	void updateGripHaptics(ControllerDevice *device)
 	{
 		if (device == nullptr || device->_sdlController == nullptr ||
@@ -650,13 +677,20 @@ public:
 
 		const float intensity = SettingsManager::get<float>(SettingID::GRIP_HAPTIC_INTENSITY)->value();
 		const HapticEffect effect = SettingsManager::get<HapticEffect>(SettingID::GRIP_HAPTIC_EFFECT)->value();
+		const float releaseIntensity = SettingsManager::get<float>(SettingID::GRIP_RELEASE_HAPTIC_INTENSITY)->value();
+		const HapticEffect releaseEffect = SettingsManager::get<HapticEffect>(SettingID::GRIP_RELEASE_HAPTIC_EFFECT)->value();
 		const bool left = SDL_GetGamepadCapSense(device->_sdlController, SDL_GAMEPAD_CAPSENSE_LEFT_GRIP);
 		const bool right = SDL_GetGamepadCapSense(device->_sdlController, SDL_GAMEPAD_CAPSENSE_RIGHT_GRIP);
 
 		if (left && !device->_leftGripWasOn)
 			sendGripHaptic(device->_sdlController, false, intensity, effect);
+		else if (!left && device->_leftGripWasOn)
+			sendGripHaptic(device->_sdlController, false, releaseIntensity, releaseEffect);
+
 		if (right && !device->_rightGripWasOn)
 			sendGripHaptic(device->_sdlController, true, intensity, effect);
+		else if (!right && device->_rightGripWasOn)
+			sendGripHaptic(device->_sdlController, true, releaseIntensity, releaseEffect);
 
 		// Tracked even when haptics are off, so turning them on mid-session doesn't
 		// fire for a hand that was already resting there.
@@ -1416,6 +1450,14 @@ public:
 		if (jc == nullptr || jc->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
 			return;
 		sendHapticEffect(jc->_sdlController, side, effect, gainDb);
+	}
+
+	void TurnOffController(int deviceId) override
+	{
+		auto *jc = _controllerMap[deviceId];
+		if (jc == nullptr || jc->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
+			return;
+		sendTurnOffController(jc->_sdlController);
 	}
 
 	void SetRumble(int deviceId, int smallRumble, int bigRumble) override

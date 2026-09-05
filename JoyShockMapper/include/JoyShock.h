@@ -26,7 +26,10 @@ struct OneEuroFilter
 	LowPassFilter1E xFilt, dxFilt;
 	float xPrev = 0.f;
 	bool initialized = false;
-	static constexpr float dCutoff   = 1.0f;
+	// How fast the internal speed estimate reacts to a sudden change, in Hz.
+	// Was a shared compile-time constant; gyro and touchpads need very different
+	// values here (see TOUCHPAD_D_CUTOFF), so each instance now owns its own.
+	float dCutoff = 1.0f;
 
 	static float alpha(float cutoff, float dt)
 	{
@@ -105,10 +108,13 @@ struct TouchMousePipeline
 	// after a fresh contact returns zero, so touching down never jerks the cursor.
 	// Check sampleConsumed afterwards: a false there means this poll carried no new
 	// data and the zero it returned is "nothing happened", not "you didn't move".
-	FloatXY step(float rawX, float rawY, float dt, float minCutoff, float beta)
+	FloatXY step(float rawX, float rawY, float dt, float minCutoff, float beta, float dCutoff)
 	{
 		if (dt <= 0.f || dt > 0.1f)
 			dt = 0.003f; // fall back to the nominal tick if the clock misbehaved
+
+		posFilterX.dCutoff = dCutoff;
+		posFilterY.dCutoff = dCutoff;
 
 		// The controller reports on its own schedule, not ours, so a poll can land
 		// between two reports and read the previous sample again. Feeding that

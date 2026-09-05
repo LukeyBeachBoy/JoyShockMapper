@@ -354,6 +354,10 @@ public:
 	// (0 off, 1 tick, 2 click, 3 tone, 4 rumble, 5 noise, 6 script, 7 sweep), and
 	// gainDb is a signed decibel gain the firmware limits rather than clips.
 	virtual void SetHaptic(int deviceId, int side, int effect, int gainDb) = 0;
+	// Sends the controller's own turn-off command (Valve's ID_TURN_OFF_CONTROLLER
+	// feature report). Only meaningful for hardware that implements it; devices
+	// that don't stay a no-op, same as SetTriggerEffect/SetMicLight below.
+	virtual void TurnOffController(int deviceId) { }
 	virtual void SetPlayerNumber(int deviceId, int number) = 0;
 	virtual void SetTriggerEffect(int deviceId, const AdaptiveTriggerSetting &_leftTriggerEffect, const AdaptiveTriggerSetting &_rightTriggerEffect) { };
 	virtual void SetMicLight(int deviceId, unsigned char mode) { }
