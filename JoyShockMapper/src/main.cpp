@@ -2263,12 +2263,26 @@ bool do_RESTART_GYRO_CALIBRATION()
 
 bool do_TURN_OFF_CONTROLLER()
 {
-	COUT << "Sending turn-off command to all connected controllers that support it\n";
+	int delivered = 0;
 	for (auto iter = handle_to_joyshock.begin(); iter != handle_to_joyshock.end(); ++iter)
 	{
-		jsl->TurnOffController(iter->first);
+		if (jsl->TurnOffController(iter->first))
+			++delivered;
 	}
-	return true;
+
+	if (delivered > 0)
+	{
+		COUT << "Sent the power-off command to " << delivered << " controller(s).\n";
+	}
+	else if (handle_to_joyshock.empty())
+	{
+		CERR << "TURN_OFF_CONTROLLER: no controllers are connected.\n";
+	}
+	else
+	{
+		CERR << "TURN_OFF_CONTROLLER: no connected controller accepted the power-off command.\n";
+	}
+	return delivered > 0;
 }
 
 bool do_SET_MOTION_STICK_NEUTRAL()

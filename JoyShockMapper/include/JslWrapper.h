@@ -357,7 +357,11 @@ public:
 	// Sends the controller's own turn-off command (Valve's ID_TURN_OFF_CONTROLLER
 	// feature report). Only meaningful for hardware that implements it; devices
 	// that don't stay a no-op, same as SetTriggerEffect/SetMicLight below.
-	virtual void TurnOffController(int deviceId) { }
+	// Returns false when the command could not be delivered -- the device does not
+	// support it, or the write itself failed. The caller reports that, because a
+	// power-off that silently does nothing is indistinguishable from a broken
+	// binding.
+	virtual bool TurnOffController(int deviceId) { return false; }
 	// percent: 0-100, or -1 if the device/driver can't report one. state:
 	// mirrors SDL_PowerState (-1 error, 0 unknown, 1 on battery, 2 no battery,
 	// 3 charging, 4 charged). Defaults leave both at "unknown" for backends

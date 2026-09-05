@@ -1452,12 +1452,27 @@ public:
 		sendHapticEffect(jc->_sdlController, side, effect, gainDb);
 	}
 
-	void TurnOffController(int deviceId) override
+	bool TurnOffController(int deviceId) override
 	{
 		auto *jc = _controllerMap[deviceId];
-		if (jc == nullptr || jc->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
-			return;
-		sendTurnOffController(jc->_sdlController);
+		if (jc == nullptr)
+		{
+			CERR << "TURN_OFF_CONTROLLER: no controller with id " << deviceId << ".\n";
+			return false;
+		}
+		if (jc->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
+		{
+			CERR << "TURN_OFF_CONTROLLER: controller " << deviceId
+			     << " does not support a power-off command; only the Steam Controller does.\n";
+			return false;
+		}
+		if (!sendTurnOffController(jc->_sdlController))
+		{
+			CERR << "TURN_OFF_CONTROLLER: the controller rejected the power-off report: "
+			     << SDL_GetError() << '\n';
+			return false;
+		}
+		return true;
 	}
 
 	void GetBatteryLevel(int deviceId, int &percent, int &state) override
