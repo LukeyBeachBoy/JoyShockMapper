@@ -473,8 +473,13 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		if (leftMode == TouchpadMode::GRID_AND_STICK)
 		{
 			auto &grid_size = *SettingsManager::getV<FloatXY>(SettingID::LEFT_GRID_SIZE);
+			// LEFT_GRID_REQUIRES_CLICK gates activation on the left pad's own click
+			// (MISC3) rather than mere contact, so resting a finger over a region
+			// previews it (via the live diagram) without firing it.
+			bool leftGridActive = point0.isDown()
+			  && (js->getSetting<Switch>(SettingID::LEFT_GRID_REQUIRES_CLICK) != Switch::ON || js->isPressed(ButtonID::MISC3));
 			int index = -1;
-			if (point0.isDown())
+			if (leftGridActive)
 			{
 				float row = ceilf(point0.posY * grid_size.value().y()) - 1.f;
 				float col = ceilf(point0.posX * grid_size.value().x()) - 1.f;
@@ -498,8 +503,12 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		if (rightMode == TouchpadMode::GRID_AND_STICK)
 		{
 			auto &grid_size = *SettingsManager::getV<FloatXY>(SettingID::RIGHT_GRID_SIZE);
+			// RIGHT_GRID_REQUIRES_CLICK gates activation on the right pad's own
+			// click (MISC2), mirroring LEFT_GRID_REQUIRES_CLICK above.
+			bool rightGridActive = point1.isDown()
+			  && (js->getSetting<Switch>(SettingID::RIGHT_GRID_REQUIRES_CLICK) != Switch::ON || js->isPressed(ButtonID::MISC2));
 			int index = -1;
-			if (point1.isDown())
+			if (rightGridActive)
 			{
 				float row = ceilf(point1.posY * grid_size.value().y()) - 1.f;
 				float col = ceilf(point1.posX * grid_size.value().x()) - 1.f;
@@ -527,15 +536,20 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		if (mode == TouchpadMode::GRID_AND_STICK)
 		{
 			auto &grid_size = *SettingsManager::getV<FloatXY>(SettingID::GRID_SIZE);
+			// TOUCHPAD_GRID_REQUIRES_CLICK gates activation on the pad's physical
+			// click (CAPTURE) rather than mere capacitive contact, so a finger
+			// resting over a region previews it without firing it.
+			bool requireClick = js->getSetting<Switch>(SettingID::TOUCHPAD_GRID_REQUIRES_CLICK) == Switch::ON;
+			bool clickHeld = !requireClick || js->isPressed(ButtonID::CAPTURE);
 			int index0 = -1, index1 = -1;
-			if (point0.isDown())
+			if (point0.isDown() && clickHeld)
 			{
 				point0.posY += 1e-6f;
 				float row = ceilf(point0.posY * grid_size.value().y()) - 1.f;
 				float col = ceilf(point0.posX * grid_size.value().x()) - 1.f;
 				index0 = int(row * grid_size.value().x() + col);
 			}
-			if (point1.isDown())
+			if (point1.isDown() && clickHeld)
 			{
 				float row = ceilf(point1.posY * grid_size.value().y()) - 1.f;
 				float col = ceilf(point1.posX * grid_size.value().x()) - 1.f;
@@ -3875,6 +3889,12 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<TriggerMode>(*touch_ds_mode))
 	                       ->setHelp("Dual stage mode for the touchpad TOUCH and CAPTURE (i.e. click) bindings."));
 
+	auto grid_requires_click = new JSMSetting<Switch>(SettingID::TOUCHPAD_GRID_REQUIRES_CLICK, Switch::OFF);
+	grid_requires_click->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(grid_requires_click);
+	commandRegistry->add((new JSMAssignment<Switch>(*grid_requires_click))
+	                       ->setHelp("When ON, a GRID_AND_STICK region only activates once you click the pad while your finger is over it, instead of the instant your finger lands there. Default OFF."));
+
 	// --- Per-pad touchpad settings for two-pad controllers (Steam Controller 2026) ---
 	// Left pad settings
 	{
@@ -3934,6 +3954,12 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 		SettingsManager::add(left_touch_ds);
 		commandRegistry->add((new JSMAssignment<TriggerMode>("LEFT_TOUCHPAD_DUAL_STAGE_MODE", *left_touch_ds))
 		                       ->setHelp("Dual stage mode for left touchpad TOUCH and click bindings."));
+
+		auto left_grid_requires_click = new JSMSetting<Switch>(SettingID::LEFT_GRID_REQUIRES_CLICK, Switch::OFF);
+		left_grid_requires_click->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+		SettingsManager::add(left_grid_requires_click);
+		commandRegistry->add((new JSMAssignment<Switch>("LEFT_GRID_REQUIRES_CLICK", *left_grid_requires_click))
+		                       ->setHelp("When ON, a region on the left pad's grid only activates once you click the pad (MISC3) while your finger is over it. Default OFF."));
 	}
 
 	// Right pad settings
@@ -3994,6 +4020,12 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 		SettingsManager::add(right_touch_ds);
 		commandRegistry->add((new JSMAssignment<TriggerMode>("RIGHT_TOUCHPAD_DUAL_STAGE_MODE", *right_touch_ds))
 		                       ->setHelp("Dual stage mode for right touchpad TOUCH and click bindings."));
+
+		auto right_grid_requires_click = new JSMSetting<Switch>(SettingID::RIGHT_GRID_REQUIRES_CLICK, Switch::OFF);
+		right_grid_requires_click->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+		SettingsManager::add(right_grid_requires_click);
+		commandRegistry->add((new JSMAssignment<Switch>("RIGHT_GRID_REQUIRES_CLICK", *right_grid_requires_click))
+		                       ->setHelp("When ON, a region on the right pad's grid only activates once you click the pad (MISC2) while your finger is over it. Default OFF."));
 	}
 
 	auto rumble_enable = new JSMVariable<Switch>(Switch::ON);

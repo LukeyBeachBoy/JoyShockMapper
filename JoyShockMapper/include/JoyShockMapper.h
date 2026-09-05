@@ -309,6 +309,9 @@ enum class SettingID
 	VIRTUAL_CONTROLLER,
 	RUMBLE,
 	TOUCHPAD_DUAL_STAGE_MODE,
+	// When ON, a grid region only activates once the pad is actually clicked
+	// (not merely touched) while the finger sits over it. See touchCallback.
+	TOUCHPAD_GRID_REQUIRES_CLICK,
 	CLEAR,
 	ADAPTIVE_TRIGGER,
 	LEFT_TRIGGER_EFFECT,
@@ -350,6 +353,8 @@ enum class SettingID
 	RIGHT_TOUCHPAD_SENS,
 	LEFT_TOUCHPAD_DUAL_STAGE_MODE,
 	RIGHT_TOUCHPAD_DUAL_STAGE_MODE,
+	LEFT_GRID_REQUIRES_CLICK,
+	RIGHT_GRID_REQUIRES_CLICK,
 	LEFT_TOUCH_STICK_MODE,
 	RIGHT_TOUCH_STICK_MODE,
 	LEFT_TOUCH_STICK_RADIUS,
