@@ -142,7 +142,23 @@ public:
 		oss << "}";
 
 		const auto payload = oss.str();
-		sendto(_socket, payload.c_str(), static_cast<int>(payload.size()), 0, reinterpret_cast<sockaddr *>(&_target), sizeof(_target));
+		const auto sent = sendto(_socket, payload.c_str(), static_cast<int>(payload.size()), 0, reinterpret_cast<sockaddr *>(&_target), sizeof(_target));
+
+		// Whenever JSM Studio is closed or restarted while we keep running, the
+		// datagrams we send to its port bounce back as ICMP "port unreachable",
+		// which Windows reports as an error on a *later* sendto. Ignoring that
+		// left the socket stuck in an error state for the rest of the session:
+		// mapping carried on working while the app never saw a controller again,
+		// and nothing short of restarting JSM could recover it. Drop the socket
+		// so the next send builds a fresh one.
+#ifdef _WIN32
+		if (sent == SOCKET_ERROR)
+#else
+		if (sent < 0)
+#endif
+		{
+			resetSocket();
+		}
 	}
 
 private:
@@ -198,7 +214,10 @@ private:
 		return true;
 	}
 
-	void closeSocket()
+	// Drops just the socket handle, leaving Winsock initialised. ensureSocket()
+	// builds a new one on the next send, which is what recovers a socket the OS
+	// has put into an error state.
+	void resetSocket()
 	{
 		if (_socket != kInvalidSocket)
 		{
@@ -209,6 +228,11 @@ private:
 #endif
 			_socket = kInvalidSocket;
 		}
+	}
+
+	void closeSocket()
+	{
+		resetSocket();
 #ifdef _WIN32
 		if (_wsaStarted)
 		{
