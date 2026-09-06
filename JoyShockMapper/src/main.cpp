@@ -313,11 +313,17 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 
 		pipe.active = true;
 
-		// No new report reached us this poll. There is nothing to emit, and nothing
-		// to say about velocity either -- treating this as "the finger held still"
-		// would zero the momentum a real swipe had just built up.
+		// No new report reached us this poll. There is nothing new to compute, and
+		// nothing to say about velocity either -- treating this as "the finger held
+		// still" would zero the momentum a real swipe had just built up. What is
+		// still owed from the last sample does go out, which is the whole point of
+		// the pacing: these are the polls that used to emit nothing at all.
 		if (!pipe.sampleConsumed)
+		{
+			moveMouse(TouchMousePipeline::payOut(pipe.pendingOutX, pipe.outRateX, dt),
+			  TouchMousePipeline::payOut(pipe.pendingOutY, pipe.outRateY, dt));
 			return;
+		}
 
 		// The interval that produced this displacement is the one the filter
 		// actually consumed, which is not necessarily this poll's.
@@ -360,13 +366,43 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		// stuttering coast.
 		pipe.momentumX = moved.x() / sampleDt;
 		pipe.momentumY = moved.y() / sampleDt;
-		moveMouse(moved.x(), moved.y());
+
+		// Queue the displacement rather than emitting it whole, and pay it out at
+		// the finger's own speed over the polls up to the next sample.
+		//
+		// Paying at exactly that speed is what tracks a changing gesture best, but
+		// on its own it leaves a backlog: a poll can only ever hand over what is
+		// actually owed, so intervals that would over-deliver are capped at the
+		// remainder while intervals that under-deliver carry theirs forward. Every
+		// deceleration therefore left a little undelivered, and with the finger
+		// still down -- no liftoff to flush it -- that residue trickled out for a
+		// good fraction of a second after the hand had stopped, which reads as the
+		// camera lurching on once more at the end of a flick. So bleed the carried
+		// part off over the next several samples: fast enough that no perceptible
+		// tail survives, gentle enough that it never becomes a lurch of its own.
+		constexpr float kBacklogBleedSamples = 6.f;
+		pipe.pendingOutX += moved.x();
+		pipe.pendingOutY += moved.y();
+		pipe.outRateX = pipe.momentumX + (pipe.pendingOutX - moved.x()) / (kBacklogBleedSamples * sampleDt);
+		pipe.outRateY = pipe.momentumY + (pipe.pendingOutY - moved.y()) / (kBacklogBleedSamples * sampleDt);
+		moveMouse(TouchMousePipeline::payOut(pipe.pendingOutX, pipe.outRateX, dt),
+		  TouchMousePipeline::payOut(pipe.pendingOutY, pipe.outRateY, dt));
 	}
 	else
 	{
 		// True only on the tick the finger actually left the pad.
 		const bool justLifted = pipe.contact;
 		pipe.contact = false;
+
+		// Whatever the pacing still owed goes out now: the gesture is over, so
+		// there is nothing left to spread it across, and holding it back would
+		// silently drop the tail of every swipe.
+		if (pipe.pendingOutX != 0.f || pipe.pendingOutY != 0.f)
+		{
+			moveMouse(pipe.pendingOutX, pipe.pendingOutY);
+			pipe.pendingOutX = pipe.pendingOutY = 0.f;
+		}
+
 		if (!pipe.active)
 			return;
 

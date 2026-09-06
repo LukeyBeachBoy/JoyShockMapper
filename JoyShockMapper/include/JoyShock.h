@@ -83,6 +83,16 @@ struct TouchMousePipeline
 	// displacement made the coast speed track however long the last tick happened
 	// to be, so it visibly stuttered whenever the poll interval jittered.
 	float momentumX = 0.f, momentumY = 0.f;
+	// Mouse motion that has been computed but not yet handed to the OS, and the
+	// rate (units per SECOND) it should leave at. The pad reports on its own
+	// schedule and quantises position, so displacement arrives in lumps on the
+	// minority of polls that carry a new sample; emitting each lump whole makes
+	// per-frame camera movement uneven even though the average speed is right.
+	// Paying it out at the speed the finger was actually travelling spreads it
+	// over the polls until the next sample, which is what the gyro path gets for
+	// free by producing a fresh value every tick.
+	float pendingOutX = 0.f, pendingOutY = 0.f;
+	float outRateX = 0.f, outRateY = 0.f;
 	// active: a coast is in flight. contact: a finger is on the pad RIGHT NOW.
 	// These are not the same thing, and conflating them is what let a re-touch
 	// mid-coast differentiate the gap between liftoff and touchdown.
@@ -101,8 +111,26 @@ struct TouchMousePipeline
 		consumedDt = 0.f;
 		sourceIndex = -1;
 		momentumX = momentumY = 0.f;
+		pendingOutX = pendingOutY = 0.f;
+		outRateX = outRateY = 0.f;
 		active = false;
 		contact = false;
+	}
+
+	// One axis of the paced payout: hand over rate*dt, but never more than is
+	// actually owed, and flush the lot if the finger has since reversed. Returns
+	// what to emit this poll and takes it off the outstanding total, so the sum
+	// of the payouts is exactly the displacement that went in -- pacing changes
+	// when motion is delivered, never how much.
+	static float payOut(float &pending, float rate, float dt)
+	{
+		if (pending == 0.f)
+			return 0.f;
+		float step = rate * dt;
+		if (!std::isfinite(step) || step == 0.f || (step > 0.f) != (pending > 0.f) || fabsf(step) > fabsf(pending))
+			step = pending;
+		pending -= step;
+		return step;
 	}
 
 	// rawX / rawY: normalised pad position in [0, 1]. dt in SECONDS.
