@@ -314,6 +314,7 @@ public:
 	virtual bool GetStickTouch(int deviceId, bool rightStick) = 0;
 	virtual bool GetTouchpadDimension(int deviceId, int& sizeX, int& sizeY) = 0;
 	virtual uint64_t GetButtons(int deviceId) = 0;
+	virtual uint64_t GetSupportedButtons(int deviceId) { return (1ULL << 33) - 1; }
 	virtual float GetLeftX(int deviceId) = 0;
 	virtual float GetLeftY(int deviceId) = 0;
 	virtual float GetRightX(int deviceId) = 0;

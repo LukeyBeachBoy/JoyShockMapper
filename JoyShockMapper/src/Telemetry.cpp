@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <iomanip>
 #include <sstream>
 #include <string>
 
@@ -85,6 +86,7 @@ public:
 		oss << "{"
 		    << "\"protoVer\":" << Telemetry::kProtoVersion
 		    << ",\"ts\":" << sample.timestampMs
+		    << ",\"activeProfile\":" << std::quoted(sample.activeProfile)
 		    << ",\"omega\":" << sample.omega
 		    << ",\"t\":" << sample.normalized
 		    << ",\"sensX\":" << sample.sensX
@@ -112,6 +114,7 @@ public:
 				oss << "{"
 				    << "\"handle\":" << dev.handle
 				    << ",\"type\":" << dev.controllerType
+				    << ",\"supportedButtons\":" << dev.supportedButtons
 				    << ",\"split\":" << dev.splitType
 				    << ",\"vid\":" << dev.vendorId
 				    << ",\"pid\":" << dev.productId

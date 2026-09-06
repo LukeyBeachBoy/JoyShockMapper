@@ -7,6 +7,10 @@
 #include <regex>
 #include <string>
 #include <fstream>
+#include <mutex>
+
+namespace { std::mutex profileMutex; string liveProfile; }
+string CmdRegistry::activeProfile() { std::lock_guard<std::mutex> lock(profileMutex); return liveProfile; }
 
 JSMCommand::JSMCommand(string_view name)
   : _parse()
@@ -62,6 +66,7 @@ CmdRegistry::CmdRegistry()
 
 bool CmdRegistry::loadConfigFile(string fileName)
 {
+    if (fileName.empty()) return false;
 	// https://stackoverflow.com/questions/2602013/read-whole-ascii-file-into-c-stdstring
 	auto comment = fileName.find_first_of('#');
 	if (comment != string::npos)
@@ -79,6 +84,10 @@ bool CmdRegistry::loadConfigFile(string fileName)
 	}
 	if (file)
 	{
+        // Autoload may enqueue a file while a chord is held. Leave the held
+        // configuration intact; only the internal restore may replace it.
+        if (!_chordRestore.empty() && !_chordLoading && _loadingFiles.empty()) return true;
+        _loadingFiles.push_back(fileName);
 		COUT << "Loading commands from file ";
 		COUT_INFO << fileName << '\n';
 		// https://stackoverflow.com/questions/6892754/creating-a-simple-configuration-file-and-parser-in-c
@@ -88,6 +97,7 @@ bool CmdRegistry::loadConfigFile(string fileName)
 			processLine(line);
 		}
 		file.close();
+        _loadingFiles.pop_back();
 		return true;
 	}
 	return false;
@@ -185,9 +195,58 @@ bool CmdRegistry::isCommandValid(string_view line) const
 void CmdRegistry::processLine(const string& line)
 {
 	auto trimmedLine = string{ strtrim(line) };
+    const string begin = "STUDIO_CHORD_BEGIN ";
+    if (trimmedLine.compare(0, begin.size(), begin) == 0) {
+        if (!_chordRestore.empty()) return;
+        const auto target = trimmedLine.substr(begin.size());
+        ifstream check(target);
+        if (!check) check.open(string{ BASE_JSM_CONFIG_FOLDER() } + target);
+        if (!check) { CERR << "Chord configuration does not exist.\n"; return; }
+        _chordRestore = activeProfile();
+        if (_chordRestore.empty()) { CERR << "No configuration to restore.\n"; return; }
+        _restoreLines = _profileLines;
+        _chordLoading = true;
+        processLine("RESET_MAPPINGS");
+        loadConfigFile(target);
+        { std::lock_guard<std::mutex> lock(profileMutex); liveProfile = target; }
+        // Chord files must not turn off the release detector.
+        processLine("TELEMETRY_ENABLED = ON");
+        processLine("TELEMETRY_PORT = 8974");
+        _chordLoading = false;
+        return;
+    }
+    if (trimmedLine == "STUDIO_CHORD_END") {
+        if (_chordRestore.empty()) return;
+        const auto restore = _chordRestore;
+        _chordRestore.clear();
+        _chordLoading = true;
+        processLine("RESET_MAPPINGS");
+        // Replay the applied settings, not a file that may have been edited
+        // and saved (without applying) while the temporary config was held.
+        const auto lines = _restoreLines;
+        for (const auto &savedLine : lines) processLine(savedLine);
+        { std::lock_guard<std::mutex> lock(profileMutex); liveProfile = restore; }
+        _restoreLines.clear();
+        processLine("TELEMETRY_ENABLED = ON");
+        processLine("TELEMETRY_PORT = 8974");
+        _chordLoading = false;
+        return;
+    }
+    if (trimmedLine == "RESET_MAPPINGS") {
+        _profileLines.clear();
+        if (_loadingFiles.empty() && !_chordLoading) _chordRestore.clear();
+        if (!_loadingFiles.empty()) {
+            std::lock_guard<std::mutex> lock(profileMutex);
+            liveProfile = _loadingFiles.back();
+        }
+    }
+
 
 	if (!trimmedLine.empty() && trimmedLine.front() != '#' && !loadConfigFile(trimmedLine))
 	{
+        // Assignments include bindings, mode shifts, and settings. Do not replay
+        // one-shot console macros (power off, calibration, reconnect, etc.).
+        if (trimmedLine.find('=') != string::npos) _profileLines.push_back(trimmedLine);
 		smatch results;
 		string combo, name, arguments, label;
 		char op = '\0';

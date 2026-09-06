@@ -24,6 +24,15 @@ void test_device_ids()
     assert(connectionKindName(ConnectionKind::ProteusPuck) == "Proteus Puck");
 }
 
+void test_power_off_report()
+{
+    const auto report = powerOffReport();
+    assert(report.size() == 64);
+    assert(report[0] == 1 && report[1] == 0x9f && report[2] == 4);
+    assert(report[3] == 'o' && report[4] == 'f' && report[5] == 'f' && report[6] == '!');
+    for (size_t i = 7; i < report.size(); ++i) assert(report[i] == 0);
+}
+
 void test_two_touchpads()
 {
     assert(kTouchpadCount == 2);
@@ -52,6 +61,7 @@ void test_raw_button_contract()
 int main()
 {
     test_device_ids();
+    test_power_off_report();
     test_two_touchpads();
     test_raw_button_contract();
     std::cout << "steam_controller_2026_tests: passed\n";

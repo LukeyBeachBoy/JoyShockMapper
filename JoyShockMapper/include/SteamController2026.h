@@ -14,6 +14,14 @@ constexpr uint16_t kControllerBleProductId = 0x1303;
 constexpr uint16_t kProteusPuckProductId = 0x1304;
 constexpr uint16_t kNereidReceiverProductId = 0x1305;
 
+// Valve command 0x9f requires the four-byte confirmation token "off!".
+// Protocol evidence: kozec/sc-controller, scc/drivers/sc_dongle.py, turnoff().
+// Triton's SDL transport includes report ID 1 and requires a 64-byte buffer.
+constexpr std::array<uint8_t, 64> powerOffReport()
+{
+    return { 1, 0x9f, 4, 'o', 'f', 'f', '!' };
+}
+
 constexpr int kTouchpadCount = 2;
 constexpr int kTouchpadFingerCount = 1;
 // SDL reports normalized coordinates. JSM uses this logical resolution to

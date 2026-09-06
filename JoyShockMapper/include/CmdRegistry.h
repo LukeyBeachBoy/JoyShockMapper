@@ -82,6 +82,11 @@ private:
 
 	// multimap allows multiple entries with the same keys
 	CmdMap _registry;
+    string _chordRestore;
+    vector<string> _profileLines;
+    vector<string> _restoreLines;
+    bool _chordLoading = false;
+    vector<string> _loadingFiles;
 
 	static string_view strtrim(string_view str);
 
@@ -89,6 +94,7 @@ private:
 
 public:
 	CmdRegistry();
+    static string activeProfile();
 
 	// Not string_view because the string is modified inside
 	bool loadConfigFile(string fileName);

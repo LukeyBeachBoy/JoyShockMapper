@@ -2,13 +2,17 @@ set (BINARY_NAME "JoyShockMapper")
 # Optional tests (off by default)
 option(BUILD_JSM_TESTS "Build JoyShockMapper unit tests" OFF)
 
-git_describe(GIT_TAG --tags --dirty=_d)
+git_describe(GIT_TAG --tags --always --dirty=_d)
 
-#parse the version information into pieces.
-string(REGEX REPLACE "^v([0-9]+)\\..*" "\\1" JSM_VERSION_MAJOR "${GIT_TAG}")
-string(REGEX REPLACE "^v[0-9]+\\.([0-9]+).*" "\\1" JSM_VERSION_MINOR "${GIT_TAG}")
-string(REGEX REPLACE "^v[0-9]+\\.[0-9]+\\.([0-9]+).*" "\\1" JSM_VERSION_PATCH "${GIT_TAG}")
-set(JSM_VERSION "v${JSM_VERSION_MAJOR}.${JSM_VERSION_MINOR}.${JSM_VERSION_PATCH}")
+# Forks may have no release tags. Do not turn a failed describe into a bogus
+# v-128-NOTFOUND version; identify those builds by their actual revision.
+if(GIT_TAG MATCHES "^v([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    set(JSM_VERSION "v${CMAKE_MATCH_1}.${CMAKE_MATCH_2}.${CMAKE_MATCH_3}")
+elseif(GIT_TAG MATCHES "^[0-9a-f]+(_d)?$")
+    set(JSM_VERSION "git-${GIT_TAG}")
+else()
+    set(JSM_VERSION "unversioned")
+endif()
 
 message(STATUS "JSM version is " ${JSM_VERSION})
 

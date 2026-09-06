@@ -60,6 +60,7 @@ struct TelemetryDevice
 {
 	int handle = 0;
 	int controllerType = 0;
+	uint64_t supportedButtons = (1ULL << 33) - 1;
 	int splitType = 0;
 	int vendorId = 0;
 	int productId = 0;
@@ -86,6 +87,7 @@ struct TelemetrySample
 	float sMaxX = 0.0f;
 	float sMinY = 0.0f;
 	float sMaxY = 0.0f;
+	std::string activeProfile;
 	std::string curve = "LINEAR";
 	std::string paramsJson = "{}";
 	std::vector<TelemetryDevice> devices;

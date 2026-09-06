@@ -1404,6 +1404,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	}
 
 	TelemetrySample telemetrySample;
+	telemetrySample.activeProfile = CmdRegistry::activeProfile();
 	telemetrySample.omega = omega;
 	// Report post-curve normalized value so the live dot follows the selected curve
 	telemetrySample.normalized = normalizedPostCurve;
@@ -1492,6 +1493,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		TelemetryDevice dev;
 		dev.handle = device->_handle;
 		dev.controllerType = device->_controllerType;
+		dev.supportedButtons = jsl->GetSupportedButtons(device->_handle);
 		dev.splitType = device->_splitType;
 		dev.vendorId = jsl->GetControllerVendor(device->_handle);
 		dev.productId = jsl->GetControllerProduct(device->_handle);
@@ -4379,7 +4381,7 @@ int main(int argc, char *argv[])
 	commandRegistry.add((new JSMMacro("SLEEP"))->SetMacro(bind(&do_SLEEP, placeholders::_2))->setHelp("Sleep for the given number of seconds, or one second if no number is given. Can't sleep more than 10 seconds per command."));
 	commandRegistry.add((new JSMMacro("FINISH_GYRO_CALIBRATION"))->SetMacro(bind(&do_FINISH_GYRO_CALIBRATION))->setHelp("Finish calibrating the gyro in all controllers."));
 	commandRegistry.add((new JSMMacro("RESTART_GYRO_CALIBRATION"))->SetMacro(bind(&do_RESTART_GYRO_CALIBRATION))->setHelp("Start calibrating the gyro in all controllers."));
-	commandRegistry.add((new JSMMacro("TURN_OFF_CONTROLLER"))->SetMacro(bind(&do_TURN_OFF_CONTROLLER))->setHelp("Send the controller's own power-off command, matching Steam Input's Guide+Y / QAM+Y shortcut. Only takes effect on hardware that supports it (Steam Controller 2026); bind it to a chord like a face button held together with your Guide or Quick Access Menu button."));
+	commandRegistry.add((new JSMMacro("TURN_OFF_CONTROLLER"))->SetMacro(bind(&do_TURN_OFF_CONTROLLER))->setHelp("Send the Steam Controller power-off report. Bind this to your preferred shutdown shortcut. Only takes effect on hardware that supports it (Steam Controller 2026); bind it to a chord like a face button held together with your Guide or Quick Access Menu button."));
 	commandRegistry.add((new JSMMacro("SET_MOTION_STICK_NEUTRAL"))->SetMacro(bind(&do_SET_MOTION_STICK_NEUTRAL))->setHelp("Set the neutral orientation for motion stick to whatever the orientation of the controller is."));
 	commandRegistry.add((new JSMMacro("README"))->SetMacro(bind(&do_README))->setHelp("Open the latest JoyShockMapper README in your browser."));
 	commandRegistry.add((new JSMMacro("WHITELIST_SHOW"))->SetMacro(bind(&do_WHITELIST_SHOW))->setHelp("Open the whitelister application"));
