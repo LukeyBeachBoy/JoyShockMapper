@@ -92,12 +92,12 @@ int main(){
         for(int i=0;i<N;i++){
             pos=0.2f+SPEED*(i+1)*TICK;
             float p=pos+noise()*NOISE;
-            FloatXY d=pipe.step(p,0.5f,TICK,minCutoff,beta);
+            FloatXY d=pipe.step(p,0.5f,TICK,minCutoff,beta, 15.0f);
             moveMouse(d.x()*TPX*SENS, d.y()*TPY*SENS);
         }
         int panZeros=zeroPolls, panPolls=polls, panMaxStep=maxStep;
         for(int i=0;i<400;i++){                 // finger holds still; filter catches up
-            FloatXY d=pipe.step(pos,0.5f,TICK,minCutoff,beta);
+            FloatXY d=pipe.step(pos,0.5f,TICK,minCutoff,beta, 15.0f);
             moveMouse(d.x()*TPX*SENS, d.y()*TPY*SENS);
         }
         zeroPolls=panZeros; polls=panPolls; maxStep=panMaxStep;
@@ -127,7 +127,7 @@ int main(){
         rampTicks=0;
         for(int i=0;i<N;i++){
             pos=0.1f+std::min(0.7f,SPEED*12.f*(i+1)*TICK);
-            FloatXY d=pipe.step(pos,0.5f,TICK,minCutoff,beta);
+            FloatXY d=pipe.step(pos,0.5f,TICK,minCutoff,beta, 15.0f);
             moveMouse(d.x()*TPX*SENS,d.y()*TPY*SENS);
             if(pos<0.8f){ rampTotal=totalX; rampTicks=i+1; }
         }
@@ -162,20 +162,20 @@ int main(){
 
     // first sample after contact must emit nothing
     { TouchMousePipeline p; p.reset();
-      FloatXY d=p.step(0.5f,0.5f,TICK,SHIPPED_MIN_CUTOFF,SHIPPED_SPEED_COEFF);
+      FloatXY d=p.step(0.5f,0.5f,TICK,SHIPPED_MIN_CUTOFF,SHIPPED_SPEED_COEFF, 15.0f);
       check(d.x()==0.f&&d.y()==0.f,"first poll after touchdown emits zero"); }
 
     // a bad dt must not blow up
     { TouchMousePipeline p; p.reset();
-      p.step(0.5f,0.5f,0.f,SHIPPED_MIN_CUTOFF,SHIPPED_SPEED_COEFF);
-      FloatXY d=p.step(0.51f,0.5f,-1.f,SHIPPED_MIN_CUTOFF,SHIPPED_SPEED_COEFF);
+      p.step(0.5f,0.5f,0.f,SHIPPED_MIN_CUTOFF,SHIPPED_SPEED_COEFF, 15.0f);
+      FloatXY d=p.step(0.51f,0.5f,-1.f,SHIPPED_MIN_CUTOFF,SHIPPED_SPEED_COEFF, 15.0f);
       check(std::isfinite(d.x())&&std::isfinite(d.y()),"non-positive dt is clamped, output finite"); }
 
     // source handover must not teleport
     { TouchMousePipeline p; p.reset();
-      for(int i=0;i<50;i++) p.step(0.30f+i*0.001f,0.5f,TICK,SHIPPED_MIN_CUTOFF,SHIPPED_SPEED_COEFF);
+      for(int i=0;i<50;i++) p.step(0.30f+i*0.001f,0.5f,TICK,SHIPPED_MIN_CUTOFF,SHIPPED_SPEED_COEFF, 15.0f);
       p.reset();                       // what processTouchMouse does on handover
-      FloatXY d=p.step(0.80f,0.5f,TICK,SHIPPED_MIN_CUTOFF,SHIPPED_SPEED_COEFF);
+      FloatXY d=p.step(0.80f,0.5f,TICK,SHIPPED_MIN_CUTOFF,SHIPPED_SPEED_COEFF, 15.0f);
       check(d.x()==0.f,"finger handover after reset emits zero, no teleport"); }
 
     printf("\n%s (%d failure%s)\n",fails?"FAILURES":"ALL PASS",fails,fails==1?"":"s");

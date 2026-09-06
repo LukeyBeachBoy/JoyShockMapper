@@ -71,13 +71,13 @@ int main(){
         for (int i = 0; i < 30; ++i)
         {
             pos += 0.00006f; // ~0.02 pad-widths/second: slow, but genuinely moving
-            pipe.step(pos, 0.5f, TICK, MIN_CUTOFF, BETA);
+            pipe.step(pos, 0.5f, TICK, MIN_CUTOFF, BETA, 15.0f);
         }
         // Hold perfectly still for far longer than kMaxDeferredDt (~5-6 ticks).
         int nonzeroConsumedTicks = 0;
         for (int i = 0; i < 400; ++i) // 1.2 real seconds
         {
-            FloatXY d = pipe.step(pos, 0.5f, TICK, MIN_CUTOFF, BETA);
+            FloatXY d = pipe.step(pos, 0.5f, TICK, MIN_CUTOFF, BETA, 15.0f);
             if (pipe.sampleConsumed && (d.x() != 0.f || d.y() != 0.f))
                 ++nonzeroConsumedTicks;
         }
@@ -109,7 +109,7 @@ int main(){
             {
                 truePos += speed * TICK;
                 float q = std::round(truePos / quantStep) * quantStep;
-                FloatXY d = pipe.step(q, 0.5f, TICK, MIN_CUTOFF, BETA);
+                FloatXY d = pipe.step(q, 0.5f, TICK, MIN_CUTOFF, BETA, 15.0f);
                 if (!pipe.sampleConsumed)
                     continue;
                 float px = std::fabs(d.x()) * TPX;

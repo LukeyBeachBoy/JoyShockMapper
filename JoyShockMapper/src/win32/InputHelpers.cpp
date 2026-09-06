@@ -1,10 +1,10 @@
+#include "MouseMotionAccumulator.h"
 #include "InputHelpers.h"
 #include <thread>
 
 #include <unordered_map>
 
-static float accumulatedX = 0;
-static float accumulatedY = 0;
+static MouseMotionAccumulator mouseMotion;
 
 // Windows' mouse speed settings translate non-linearly to speed.
 // Thankfully, the mappings are available here: https://liquipedia.net/counterstrike/Mouse_settings#Windows_Sensitivity
@@ -61,7 +61,7 @@ int pressMouse(KeyCode vkKey, bool isPressed)
 	// https://docs.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput
 	auto val = mouseMaps[vkKey.code];
 
-	INPUT input;
+	INPUT input{};
 	input.type = INPUT_MOUSE;
 	input.mi.time = 0;
 	input.mi.dx = 0;
@@ -145,26 +145,23 @@ int pressKey(KeyCode vkKey, bool pressed)
 
 void moveMouse(float x, float y)
 {
-	accumulatedX += x;
-	accumulatedY += y;
+	mouseMotion.add(x, y);
 }
 
 void flushMouseMotion()
 {
 	// Whole pixels go out; the sub-pixel remainder stays for the next tick, which
 	// is what lets a slow swipe move at all instead of rounding to nothing.
-	int applicableX = (int)accumulatedX;
-	int applicableY = (int)accumulatedY;
+	int applicableX = MouseMotionAccumulator::consume(mouseMotion.x);
+	int applicableY = MouseMotionAccumulator::consume(mouseMotion.y);
 
 	if (applicableX == 0 && applicableY == 0)
 	{
 		return;
 	}
 
-	accumulatedX -= applicableX;
-	accumulatedY -= applicableY;
 
-	INPUT input;
+	INPUT input{};
 	input.type = INPUT_MOUSE;
 	input.mi.mouseData = 0;
 	input.mi.time = 0;
@@ -176,7 +173,7 @@ void flushMouseMotion()
 
 void setMouseNorm(float x, float y)
 {
-	INPUT input;
+	INPUT input{};
 	input.type = INPUT_MOUSE;
 	input.mi.mouseData = 0;
 	input.mi.time = 0;

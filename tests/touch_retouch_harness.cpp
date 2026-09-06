@@ -66,7 +66,7 @@ static void tick(TouchMousePipeline &pipe, bool down, float pos, float dt,
         if (needsReset)
             pipe.reset();
         pipe.contact = true;
-        FloatXY d = pipe.step(pos, 0.5f, dt, MIN_CUTOFF, SPEED_COEFF);
+        FloatXY d = pipe.step(pos, 0.5f, dt, MIN_CUTOFF, SPEED_COEFF, 15.0f);
         pipe.active = true;
         if (!pipe.sampleConsumed) return;
         float moved = d.x() * TPX * SENS;

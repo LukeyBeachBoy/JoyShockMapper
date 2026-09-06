@@ -13,9 +13,11 @@
 # pressure reading hovers in the noise right at the boundary, so contact flickers.
 # That friction is exactly what makes a slow, deliberate swipe difficult.
 #
-# The patch ORs the capacitive bit in rather than replacing the pressure test, so
-# it can only ever add contacts, never remove one. If a firmware revision stops
-# setting those bits, the pads still work exactly as they do today.
+# Contact must end when the firmware touch bit clears, even if pressure still
+# contains residual force/noise. OR-ing pressure into contact caused phantom
+# touches and cursor movement after release. This follows upstream SDL's
+# capacitive-only contact decision. Release positions are supplied as zero so
+# SDL_SendJoystickTouchpad preserves the last valid coordinates.
 #
 # Done as a source rewrite because SDL is fetched by CPM 0.27.1, which predates
 # its PATCHES argument, and a .patch file would need a patch binary on the build
@@ -36,8 +38,32 @@ function(patch_sdl_triton_touch SDL_SOURCE_DIR)
     foreach(_side Left Right)
         string(TOUPPER "${_side}" _SIDE)
         set(_original "pTritonReport->sPressure${_side} > 0,")
+        set(_legacy "((pTritonReport->buttons & TRITON_${_SIDE}_TOUCHPAD_TOUCH) != 0 || pTritonReport->sPressure${_side} > 0),")
         set(_replacement
-            "((pTritonReport->buttons & TRITON_${_SIDE}_TOUCHPAD_TOUCH) != 0 || pTritonReport->sPressure${_side} > 0),")
+            "((pTritonReport->buttons & TRITON_${_SIDE}_TOUCHPAD_TOUCH) != 0),")
+        string(FIND "${_source}" "${_legacy}" _legacy_found)
+        if(_legacy_found GREATER_EQUAL 0)
+            string(REPLACE "${_legacy}" "${_replacement}" _source "${_source}")
+            set(_patched FALSE)
+        endif()
+
+        # SDL preserves its previous coordinates when a release sends (0, 0).
+        # Never publish the no-contact coordinate fields as a new position.
+        set(_x "pTritonReport->s${_side}PadX / 65536.0f + 0.5f,")
+        set(_y "-(float)pTritonReport->s${_side}PadY / 65536.0f + 0.5f,")
+        set(_x_release "((pTritonReport->buttons & TRITON_${_SIDE}_TOUCHPAD_TOUCH) ? pTritonReport->s${_side}PadX / 65536.0f + 0.5f : 0.0f),")
+        set(_y_release "((pTritonReport->buttons & TRITON_${_SIDE}_TOUCHPAD_TOUCH) ? -(float)pTritonReport->s${_side}PadY / 65536.0f + 0.5f : 0.0f),")
+        string(FIND "${_source}" "${_x_release}" _coords_already)
+        if(_coords_already LESS 0)
+            string(FIND "${_source}" "${_x}" _x_found)
+            string(FIND "${_source}" "${_y}" _y_found)
+            if(_x_found LESS 0 OR _y_found LESS 0)
+                message(FATAL_ERROR "Steam Controller touch patch: could not find ${_side} coordinates")
+            endif()
+            string(REPLACE "${_x}" "${_x_release}" _source "${_source}")
+            string(REPLACE "${_y}" "${_y_release}" _source "${_source}")
+            set(_patched FALSE)
+        endif()
 
         string(FIND "${_source}" "${_replacement}" _already)
         if(_already GREATER_EQUAL 0)

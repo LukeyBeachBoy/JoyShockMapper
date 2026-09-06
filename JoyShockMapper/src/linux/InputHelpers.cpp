@@ -1,3 +1,4 @@
+#include "MouseMotionAccumulator.h"
 #include "InputHelpers.h"
 
 #include <array>
@@ -556,27 +557,23 @@ int pressKey(KeyCode vkKey, bool pressed)
 	return 0;
 }
 
-float accumulatedX = 0;
-float accumulatedY = 0;
+static MouseMotionAccumulator mouseMotion;
 
 void moveMouse(float x, float y)
 {
-	accumulatedX += x;
-	accumulatedY += y;
+	mouseMotion.add(x, y);
 }
 
 void flushMouseMotion()
 {
-	int applicableX = (int)accumulatedX;
-	int applicableY = (int)accumulatedY;
+	int applicableX = MouseMotionAccumulator::consume(mouseMotion.x);
+	int applicableY = MouseMotionAccumulator::consume(mouseMotion.y);
 
 	if (applicableX == 0 && applicableY == 0)
 	{
 		return;
 	}
 
-	accumulatedX -= applicableX;
-	accumulatedY -= applicableY;
 
 	mouse.mouse_move_relative(applicableX, applicableY);
 	// printf("%0.4f %0.4f\n", accumulatedX, accumulatedY);

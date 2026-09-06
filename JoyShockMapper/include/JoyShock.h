@@ -74,6 +74,7 @@ struct TouchMousePipeline
 	float pendingDt = 0.f;
 	// Whether the last step() consumed a new sample or was a duplicate poll.
 	bool sampleConsumed = false;
+	float consumedDt = 0.f;
 	// Which touch point currently feeds this pipeline. Position-space filtering has
 	// to restart when the source finger changes, otherwise handing over between two
 	// contacts teleports the cursor.
@@ -97,6 +98,7 @@ struct TouchMousePipeline
 		lastRawX = lastRawY = 0.f;
 		pendingDt = 0.f;
 		sampleConsumed = false;
+		consumedDt = 0.f;
 		sourceIndex = -1;
 		momentumX = momentumY = 0.f;
 		active = false;
@@ -110,7 +112,13 @@ struct TouchMousePipeline
 	// data and the zero it returned is "nothing happened", not "you didn't move".
 	FloatXY step(float rawX, float rawY, float dt, float minCutoff, float beta, float dCutoff)
 	{
-		if (dt <= 0.f || dt > 0.1f)
+		if (!std::isfinite(rawX) || !std::isfinite(rawY) ||
+		    rawX < 0.f || rawX > 1.f || rawY < 0.f || rawY > 1.f)
+		{
+			reset();
+			return { 0.f, 0.f };
+		}
+		if (!std::isfinite(dt) || dt <= 0.f || dt > 0.1f)
 			dt = 0.003f; // fall back to the nominal tick if the clock misbehaved
 
 		posFilterX.dCutoff = dCutoff;
@@ -176,6 +184,7 @@ struct TouchMousePipeline
 		dt += pendingDt;
 		pendingDt = 0.f;
 		sampleConsumed = true;
+		consumedDt = dt;
 		lastRawX = rawX;
 		lastRawY = rawY;
 
@@ -187,6 +196,11 @@ struct TouchMousePipeline
 			fy = posFilterY.filter(rawY, dt, minCutoff, beta);
 		}
 
+		if (!std::isfinite(fx) || !std::isfinite(fy))
+		{
+			reset();
+			return { 0.f, 0.f };
+		}
 		if (!initialized)
 		{
 			lastX = fx;

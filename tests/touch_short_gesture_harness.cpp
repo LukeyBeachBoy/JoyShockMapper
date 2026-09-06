@@ -57,7 +57,7 @@ static GestureResult runGesture(float minCutoff, float beta, float trackballDeca
     for (int i = 0; i < contactPolls; ++i)
     {
         pos = 0.4f + swipeFraction * (float(i + 1) / contactPolls);
-        FloatXY d = pipe.step(pos, 0.5f, TICK, minCutoff, beta);
+        FloatXY d = pipe.step(pos, 0.5f, TICK, minCutoff, beta, 15.0f);
         moved = { d.x() * tpSize * sens, d.y() * tpSize * sens };
         moveMouse(moved.x());
     }
@@ -137,14 +137,14 @@ int main()
         {
             pos = 0.2f + 0.06f * (i + 1) * TICK;
             float p = pos + noise() * 0.0004f;
-            FloatXY d = pipe.step(p, 0.5f, TICK, SHIPPED_MIN_CUTOFF, SHIPPED_SPEED_COEFF);
+            FloatXY d = pipe.step(p, 0.5f, TICK, SHIPPED_MIN_CUTOFF, SHIPPED_SPEED_COEFF, 15.0f);
             long before = totalPx;
             moveMouse(d.x() * TPX);
             maxStep = std::max(maxStep, (int)std::labs(totalPx - before));
         }
         for (int i = 0; i < 400; ++i)
         {
-            FloatXY d = pipe.step(pos, 0.5f, TICK, SHIPPED_MIN_CUTOFF, SHIPPED_SPEED_COEFF);
+            FloatXY d = pipe.step(pos, 0.5f, TICK, SHIPPED_MIN_CUTOFF, SHIPPED_SPEED_COEFF, 15.0f);
             moveMouse(d.x() * TPX);
         }
         check(maxStep <= 1, "slow pan still steps in single pixels with the new cutoff (no stepping regression)");
@@ -161,7 +161,7 @@ int main()
         for (int i = 0; i < 500; ++i)
         {
             float p = 0.5f + noise();
-            FloatXY d = pipe.step(p, 0.5f, TICK, SHIPPED_MIN_CUTOFF, SHIPPED_SPEED_COEFF);
+            FloatXY d = pipe.step(p, 0.5f, TICK, SHIPPED_MIN_CUTOFF, SHIPPED_SPEED_COEFF, 15.0f);
             moveMouse(d.x() * TPX);
         }
         check(totalPx == 0, "stationary hold with sensor noise produces zero drift at the new cutoff");

@@ -10,6 +10,7 @@ against main.cpp's actual JSMSetting registration lines for TOUCHPAD_MIN_CUTOFF 
 TOUCHPAD_SPEED_COEFF / TOUCHPAD_TRACKBALL_DECAY, so the harness can't silently
 drift out of sync with what's really shipped.
 """
+import os
 import re
 import shutil
 import subprocess
@@ -25,6 +26,7 @@ HARNESSES = [
     Path(__file__).parent / 'touch_short_gesture_harness.cpp',
     Path(__file__).parent / 'touch_retouch_harness.cpp',
     Path(__file__).parent / 'touch_stall_catchup_harness.cpp',
+    Path(__file__).parent / 'touch_release_harness.cpp',
 ]
 
 BEGIN = 'struct LowPassFilter1E'
@@ -70,9 +72,10 @@ def check_defaults_in_sync() -> bool:
 
 def main() -> int:
     compiler = shutil.which('g++') or shutil.which('clang++')
-    if compiler is None:
-        print('SKIP: no C++ compiler on PATH')
-        return 0
+    vcvars = Path(os.environ.get('ProgramFiles(x86)', 'C:/Program Files (x86)')) / 'Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvars64.bat'
+    if compiler is None and not vcvars.exists():
+        print('FAIL: no C++ compiler available; numeric touch tests were not run')
+        return 1
 
     if not check_defaults_in_sync():
         return 1
@@ -88,14 +91,23 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         (tmp / 'lifted.inc').write_text(lifted, encoding='utf-8')
+        main = MAIN.read_text(encoding='utf-8')
+        process = main[main.index('static void processTouchMouse('):main.index('void touchCallback(')]
+        (tmp / 'lifted_process.inc').write_text(process, encoding='utf-8')
+        (tmp / 'MouseMotionAccumulator.h').write_text((ROOT / 'JoyShockMapper/include/MouseMotionAccumulator.h').read_text(encoding='utf-8'), encoding='utf-8')
         for harness in HARNESSES:
-            binary = tmp / harness.stem
-            build = subprocess.run(
-                [compiler, '-O2', '-std=c++17', '-I', str(tmp), '-o', str(binary), str(harness)],
-                capture_output=True, text=True)
+            binary = tmp / (harness.stem + ('.exe' if os.name == 'nt' else ''))
+            if compiler:
+                build = subprocess.run(
+                    [compiler, '-O2', '-std=c++17', '-I', str(tmp), '-o', str(binary), str(harness)],
+                    capture_output=True, text=True)
+            else:
+                batch = tmp / 'build.bat'
+                batch.write_text(f'@echo off\ncall "{vcvars}" >nul\ncl /nologo /EHsc /std:c++17 /I"{tmp}" "{harness.resolve()}" /Fe:"{binary}"\n', encoding='utf-8')
+                build = subprocess.run(['cmd.exe', '/d', '/c', str(batch)], cwd=tmp, capture_output=True, text=True)
             if build.returncode != 0:
                 print(f'FAIL: {harness.name} did not compile')
-                print(build.stderr)
+                print(build.stdout, build.stderr)
                 return 1
             print(f'--- {harness.name} ---')
             result = subprocess.run([str(binary)])

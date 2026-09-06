@@ -14,8 +14,9 @@ that: the contact never reaches the host in the first place.
 
 cmake/PatchSdlTritonTouch.cmake rewrites those two expressions at configure
 time. These tests pin the parts that make it safe rather than the rewrite
-itself: it must OR (never replace) the pressure test, it must fail loudly if the
-driver changes under it, and it must stay wired into the build.
+itself: contact must follow the touch bit, pressure noise must not hold a
+released finger down, and both pristine and previously patched builds upgrade.
+
 
 Run: python3 tests/sdl_touch_patch_regression.py     (no dependencies)
 """
@@ -58,15 +59,54 @@ def test_haptic_output_reports_are_let_through_by_report_id():
         'the feature-report path must still be reached for settings'
 
 
-def test_capacitive_contact_is_added_never_substituted():
-    """A pure replacement would leave the pads dead if a firmware revision ever
-    stopped setting the touch bits. ORing can only add contacts."""
-    assert '_replacement' in PATCH
+def test_capacitive_contact_replaces_pressure_fallback():
     replacement = re.search(r'set\(_replacement\s*\n?\s*"([^"]+)"\)', PATCH).group(1)
     assert 'TRITON_${_SIDE}_TOUCHPAD_TOUCH' in replacement
-    assert '||' in replacement
-    assert 'pTritonReport->sPressure${_side} > 0' in replacement, \
-        'the original pressure test must survive as the fallback'
+    assert '||' not in replacement and 'Pressure' not in replacement
+    assert '_legacy' in PATCH, 'already-populated SDL builds must upgrade too'
+    assert ': 0.0f' in PATCH, 'release must preserve the last valid coordinates'
+
+
+def test_real_cmake_patch_handles_clean_upgrade_and_repeat_runs():
+    import shutil, subprocess, tempfile
+    cmake = shutil.which('cmake')
+    assert cmake, 'CMake is required to exercise the SDL source patch'
+    original = """void touch() {
+    SDL_SendJoystickTouchpad(timestamp, joystick, 0, 0,
+                             pTritonReport->sPressureLeft > 0,
+                             pTritonReport->sLeftPadX / 65536.0f + 0.5f,
+                             -(float)pTritonReport->sLeftPadY / 65536.0f + 0.5f,
+                             pTritonReport->sPressureLeft / 32768.0f);
+    SDL_SendJoystickTouchpad(timestamp, joystick, 1, 0,
+                             pTritonReport->sPressureRight > 0,
+                             pTritonReport->sRightPadX / 65536.0f + 0.5f,
+                             -(float)pTritonReport->sRightPadY / 65536.0f + 0.5f,
+                             pTritonReport->sPressureRight / 32768.0f);
+    if (size == HID_FEATURE_REPORT_BYTES) {
+    }
+}
+"""
+    with tempfile.TemporaryDirectory(prefix='jsm-sdl-touch-') as directory:
+        root = Path(directory)
+        driver = root / 'src/joystick/hidapi/SDL_hidapi_steam_triton.c'
+        driver.parent.mkdir(parents=True)
+        script = root / 'patch.cmake'
+        script.write_text(f'include("{(ROOT / "cmake/PatchSdlTritonTouch.cmake").as_posix()}")\npatch_sdl_triton_touch("{root.as_posix()}")\n')
+        outputs = []
+        for legacy in (False, True):
+            source = original
+            if legacy:
+                for side in ('Left', 'Right'):
+                    source = source.replace(f'pTritonReport->sPressure{side} > 0,', f'((pTritonReport->buttons & TRITON_{side.upper()}_TOUCHPAD_TOUCH) != 0 || pTritonReport->sPressure{side} > 0),')
+            driver.write_text(source)
+            subprocess.run([cmake, '-P', str(script)], check=True, capture_output=True)
+            once = driver.read_text()
+            subprocess.run([cmake, '-P', str(script)], check=True, capture_output=True)
+            assert driver.read_text() == once
+            assert 'sPressureLeft > 0' not in once and 'sPressureRight > 0' not in once
+            assert once.count(': 0.0f') == 4
+            outputs.append(once)
+        assert outputs[0] == outputs[1], 'clean and previously patched SDL must produce the same driver'
 
 
 def test_a_driver_change_fails_the_build_instead_of_being_ignored():

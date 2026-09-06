@@ -321,7 +321,7 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 
 		// The interval that produced this displacement is the one the filter
 		// actually consumed, which is not necessarily this poll's.
-		const float sampleDt = std::max(dt, 1e-4f);
+		const float sampleDt = std::max(pipe.consumedDt, 1e-4f);
 
 		FloatXY scaled{ normalised.x() * tpSize.x() * sens.x(), normalised.y() * tpSize.y() * sens.y() };
 
@@ -349,6 +349,11 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		}
 
 		FloatXY moved = TouchMousePipeline::accelerate(scaled, js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
+		if (!std::isfinite(moved.x()) || !std::isfinite(moved.y()))
+		{
+			pipe.reset();
+			return;
+		}
 
 		// Velocity, not this tick's displacement: the coast below re-integrates it
 		// against its own dt, so a jittering poll interval no longer shows up as a
@@ -465,6 +470,9 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		auto leftMode = js->getSetting<TouchpadMode>(SettingID::LEFT_TOUCHPAD_MODE);
 		auto rightMode = js->getSetting<TouchpadMode>(SettingID::RIGHT_TOUCHPAD_MODE);
 
+		if (leftMode != TouchpadMode::MOUSE) js->touchPipelines[0].reset();
+		if (rightMode != TouchpadMode::MOUSE) js->touchPipelines[1].reset();
+
 		// NOTE: the pipelines are deliberately NOT reset here on finger-up. Resetting
 		// unconditionally wiped trackball momentum before it could ever be applied.
 		// processTouchMouse owns the lifecycle instead.
@@ -533,6 +541,7 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 	else
 	{
 		// --- Legacy single-pad behavior (DS4, DualSense, etc.) ---
+		if (mode != TouchpadMode::MOUSE) js->touchPipelines[0].reset();
 		if (mode == TouchpadMode::GRID_AND_STICK)
 		{
 			auto &grid_size = *SettingsManager::getV<FloatXY>(SettingID::GRID_SIZE);

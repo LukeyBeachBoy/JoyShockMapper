@@ -993,23 +993,15 @@ public:
 		if (isSteam && SDL_GetNumGamepadTouchpads(_controllerMap[deviceId]->_sdlController) >= 2)
 		{
 			// Left pad = touchpad index 0, Right pad = touchpad index 1
-			// Query pressure to detect light touches where SDL may not set down=true
+			// Pressure is exposed only for the telemetry readout.
 			float pressure0 = 0.f, pressure1 = 0.f;
 			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 0, 0, &state.t0Down, &state.t0X, &state.t0Y, &pressure0);
 			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 1, 0, &state.t1Down, &state.t1X, &state.t1Y, &pressure1);
 			state.t0Pressure = pressure0;
 			state.t1Pressure = pressure1;
-			// Contact is decided by the controller's firmware, not here. The
-			// trackpad touch gate is a hardware Schmitt trigger -- separate press
-			// and release thresholds (TOUCHPAD_TOUCH_ON / TOUCHPAD_TOUCH_OFF,
-			// pushed to the device by applyTritonSettings) -- so the down bit
-			// arrives already debounced, with the press point as light as the user
-			// wants it and no chatter on the way back out. Gating it a second time
-			// host-side is what used to force people to press hard; there is
-			// nothing left to add on this side.
-			//
-			// Pressure is still reported for display and for the GUI's tuning
-			// readout, but it no longer decides anything.
+			// SDL uses the firmware's capacitive contact bit. Pressure is a readout,
+			// not a second way to keep contact alive after the finger lifts.
+
 		}
 		else
 		{
