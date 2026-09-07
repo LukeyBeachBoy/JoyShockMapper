@@ -1,6 +1,7 @@
 #pragma once
 
 #include "JoyShockMapper.h"
+#include "TouchMouseResampler.h"
 #include "MotionIf.h"
 #include "DigitalButton.h"
 #include "Stick.h"
@@ -60,19 +61,16 @@ struct OneEuroFilter
 
 struct TouchMousePipeline
 {
-	// The One Euro filter runs on absolute pad POSITION, never on per-poll deltas.
-	// Filtering deltas compounds sensor quantisation and cannot recover displacement
-	// that was already lost; filtering position and differentiating afterwards is
-	// both smoother and displacement-preserving.
+	// Filter absolute pad position, then differentiate in floating point. Retain
+	// sub-pixel motion through sensitivity and acceleration until OS injection.
 	OneEuroFilter posFilterX, posFilterY;
 	float lastX = 0.f, lastY = 0.f;
 	bool initialized = false;
-	// The raw sample the filter last consumed, and the time waiting to be charged
-	// to the next genuinely new one. The controller does not report on our poll
-	// schedule, so some polls carry no new data; see step().
+	// Last observed coordinates and time since they changed. Coordinate equality
+	// cannot distinguish an unchanged report from a poll without a new report.
 	float lastRawX = 0.f, lastRawY = 0.f;
 	float pendingDt = 0.f;
-	// Whether the last step() consumed a new sample or was a duplicate poll.
+	// Whether step() evaluated a displacement on this poll.
 	bool sampleConsumed = false;
 	float consumedDt = 0.f;
 	// Which touch point currently feeds this pipeline. Position-space filtering has
@@ -83,16 +81,7 @@ struct TouchMousePipeline
 	// displacement made the coast speed track however long the last tick happened
 	// to be, so it visibly stuttered whenever the poll interval jittered.
 	float momentumX = 0.f, momentumY = 0.f;
-	// Mouse motion that has been computed but not yet handed to the OS, and the
-	// rate (units per SECOND) it should leave at. The pad reports on its own
-	// schedule and quantises position, so displacement arrives in lumps on the
-	// minority of polls that carry a new sample; emitting each lump whole makes
-	// per-frame camera movement uneven even though the average speed is right.
-	// Paying it out at the speed the finger was actually travelling spreads it
-	// over the polls until the next sample, which is what the gyro path gets for
-	// free by producing a fresh value every tick.
-	float pendingOutX = 0.f, pendingOutY = 0.f;
-	float outRateX = 0.f, outRateY = 0.f;
+	TouchMouseResampler output;
 	// active: a coast is in flight. contact: a finger is on the pad RIGHT NOW.
 	// These are not the same thing, and conflating them is what let a re-touch
 	// mid-coast differentiate the gap between liftoff and touchdown.
@@ -111,33 +100,16 @@ struct TouchMousePipeline
 		consumedDt = 0.f;
 		sourceIndex = -1;
 		momentumX = momentumY = 0.f;
-		pendingOutX = pendingOutY = 0.f;
-		outRateX = outRateY = 0.f;
+		output.reset();
 		active = false;
 		contact = false;
-	}
-
-	// One axis of the paced payout: hand over rate*dt, but never more than is
-	// actually owed, and flush the lot if the finger has since reversed. Returns
-	// what to emit this poll and takes it off the outstanding total, so the sum
-	// of the payouts is exactly the displacement that went in -- pacing changes
-	// when motion is delivered, never how much.
-	static float payOut(float &pending, float rate, float dt)
-	{
-		if (pending == 0.f)
-			return 0.f;
-		float step = rate * dt;
-		if (!std::isfinite(step) || step == 0.f || (step > 0.f) != (pending > 0.f) || fabsf(step) > fabsf(pending))
-			step = pending;
-		pending -= step;
-		return step;
 	}
 
 	// rawX / rawY: normalised pad position in [0, 1]. dt in SECONDS.
 	// Returns the normalised displacement since the previous call. The first call
 	// after a fresh contact returns zero, so touching down never jerks the cursor.
-	// Check sampleConsumed afterwards: a false there means this poll carried no new
-	// data and the zero it returned is "nothing happened", not "you didn't move".
+	// sampleConsumed is false for unfiltered duplicates or a confirmed hold.
+	// With smoothing enabled, held samples advance the filter until that hold.
 	FloatXY step(float rawX, float rawY, float dt, float minCutoff, float beta, float dCutoff)
 	{
 		if (!std::isfinite(rawX) || !std::isfinite(rawY) ||
@@ -152,67 +124,35 @@ struct TouchMousePipeline
 		posFilterX.dCutoff = dCutoff;
 		posFilterY.dCutoff = dCutoff;
 
-		// The controller reports on its own schedule, not ours, so a poll can land
-		// between two reports and read the previous sample again. Feeding that
-		// duplicate to the One Euro filter is actively harmful: the filter measures
-		// speed as (x - xPrev)/dt, so a repeat reads as "the finger stopped", the
-		// adaptive cutoff collapses to its floor, and the next genuine sample arrives
-		// over-smoothed and lagging. At a steady swipe speed that repeats at the beat
-		// frequency between the two rates -- a periodic hitch in an otherwise smooth
-		// glide, which is exactly what it looked like.
-		//
-		// So wait for real data and charge the elapsed time to it, which also hands
-		// the filter the device's true inter-report interval rather than our poll
-		// interval. Position is quantised, so an exact match really does mean "no new
-		// report" rather than "moved imperceptibly".
-		//
-		// Only up to a point, though: a finger resting on the pad also repeats its
-		// position forever, and there the filter genuinely does need to keep running
-		// or it never converges on where the finger stopped -- which loses the tail
-		// of every gesture. Nothing on this side can tell the two apart, so bound the
-		// wait instead. kMaxDeferredDt is comfortably longer than any plausible
-		// report interval and far too short to notice as settling lag.
-		constexpr float kMaxDeferredDt = 0.016f;
-		bool sameAsLast = initialized && rawX == lastRawX && rawY == lastRawY;
-		if (sameAsLast)
+		// Evaluate the position filter on the output clock. A held coordinate is
+		// still its current target. Deferring these updates and charging the whole
+		// wait to the next sample turns wireless timing jitter into a catch-up step.
+		const bool sameAsLast = initialized && rawX == lastRawX && rawY == lastRawY;
+		const float elapsed = pendingDt + dt;
+		pendingDt = sameAsLast ? elapsed : 0.f;
+		constexpr float kStopTime = .016f;
+		if (sameAsLast && (minCutoff <= 0.f || pendingDt >= kStopTime))
 		{
-			pendingDt += dt;
-			if (pendingDt >= kMaxDeferredDt && minCutoff > 0.f)
+			// Keep the existing bounded-stop policy: cancel remaining filter lag
+			// silently after a hold. Already computed output drains independently.
+			if (pendingDt >= kStopTime)
 			{
-				// Long enough that this is a confirmed stall, not a still-pending
-				// HID duplicate: bring the filter directly to the value it has
-				// already been telling us is true, rather than continuing to
-				// defer and later resolving the wait by actually PROCESSING this
-				// still-unchanged value. That fallthrough used to hand the
-				// filter a dt inflated by the whole deferred span for a sample
-				// where x == xPrev, so dx read exactly zero either way -- the
-				// only thing the big dt did was raise alpha on the position
-				// low-pass, snapping whatever lag the filter's smoothed output
-				// had accumulated during the stall onto the raw value in one
-				// oversized step instead of the several small ones continuous
-				// processing would have taken. A slow drag or a long, low-decay
-				// coast made that teleport highly visible, repeating on every
-				// quantisation-driven stall a steady slow swipe produces. Snapping
-				// silently instead emits nothing on this tick and leaves nothing
-				// to catch up on the next one either.
-				posFilterX.snapTo(rawX);
-				posFilterY.snapTo(rawY);
-				lastX = rawX;
-				lastY = rawY;
+				momentumX = momentumY = 0.f;
+				if (minCutoff > 0.f)
+				{
+					posFilterX.snapTo(rawX);
+					posFilterY.snapTo(rawY);
+					lastX = rawX;
+					lastY = rawY;
+				}
 			}
 			sampleConsumed = false;
 			return { 0.f, 0.f };
 		}
-
-		// A genuinely new position needs the true elapsed time, deferral
-		// included: dx = (x - xPrev)/dt has to reflect how long the finger has
-		// actually been travelling to correctly un-smooth a big jump after
-		// several stale HID duplicates, which is the whole reason the deferral
-		// above exists.
-		dt += pendingDt;
-		pendingDt = 0.f;
 		sampleConsumed = true;
-		consumedDt = dt;
+		// Unfiltered coordinates remain packets; acceleration needs their actual
+		// interval. Filtered displacement instead describes this output poll.
+		consumedDt = minCutoff > 0.f ? dt : elapsed;
 		lastRawX = rawX;
 		lastRawY = rawY;
 
@@ -245,12 +185,15 @@ struct TouchMousePipeline
 
 	// Applied AFTER the delta has been scaled into mouse units, so the speed term is
 	// measured in the same space the user tunes sensitivity in.
-	static FloatXY accelerate(FloatXY delta, float acceleration)
+	static FloatXY accelerate(FloatXY delta, float acceleration, float dt = .003f)
 	{
 		if (acceleration <= 0.f)
 			return delta;
 		float speed = sqrtf(delta.x() * delta.x() + delta.y() * delta.y());
-		float gain = 1.f + acceleration * speed;
+		// Preserve the legacy gain at the nominal 3 ms tick, independently of
+		// whether the displacement was generated over 1, 3, or 8 ms.
+		if (!std::isfinite(dt) || dt <= 0.f) dt = .003f;
+		float gain = 1.f + acceleration * speed * (.003f / dt);
 		if (gain > 4.f)
 			gain = 4.f;
 		return { delta.x() * gain, delta.y() * gain };

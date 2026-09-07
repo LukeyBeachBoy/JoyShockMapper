@@ -274,10 +274,9 @@ static float rescaleAdjustedSpeed(float vAdjusted, const AccelCurveShape &from, 
 
 // Shared touchpad -> mouse path for a single physical pad.
 //
-// Order matters here: the One Euro filter runs on normalised pad POSITION, the
-// result is differentiated, and only then is it scaled into mouse units and
-// accelerated. Filtering deltas instead (as the old TouchMousePipeline::process
-// did) compounds quantisation and cannot preserve displacement.
+// Evaluate filtered position on the output clock, differentiate in float, then
+// apply sensitivity and acceleration. Resample the computed displacement before
+// passing it to the shared mouse accumulator.
 static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POINT &point,
   int sourceIndex, FloatXY tpSize, FloatXY sens, float delta_time)
 {
@@ -313,15 +312,13 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 
 		pipe.active = true;
 
-		// No new report reached us this poll. There is nothing new to compute, and
-		// nothing to say about velocity either -- treating this as "the finger held
-		// still" would zero the momentum a real swipe had just built up. What is
-		// still owed from the last sample does go out, which is the whole point of
-		// the pacing: these are the polls that used to emit nothing at all.
+		// Unfiltered duplicate or confirmed hold. Finish previously computed
+		// displacement even when there is no new filter output this poll.
 		if (!pipe.sampleConsumed)
 		{
-			moveMouse(TouchMousePipeline::payOut(pipe.pendingOutX, pipe.outRateX, dt),
-			  TouchMousePipeline::payOut(pipe.pendingOutY, pipe.outRateY, dt));
+			float outX, outY;
+			pipe.output.advance(dt, outX, outY);
+			moveMouse(outX, outY);
 			return;
 		}
 
@@ -354,7 +351,7 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 			}
 		}
 
-		FloatXY moved = TouchMousePipeline::accelerate(scaled, js->getSetting(SettingID::TOUCHPAD_ACCELERATION));
+		FloatXY moved = TouchMousePipeline::accelerate(scaled, js->getSetting(SettingID::TOUCHPAD_ACCELERATION), sampleDt);
 		if (!std::isfinite(moved.x()) || !std::isfinite(moved.y()))
 		{
 			pipe.reset();
@@ -367,26 +364,12 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		pipe.momentumX = moved.x() / sampleDt;
 		pipe.momentumY = moved.y() / sampleDt;
 
-		// Queue the displacement rather than emitting it whole, and pay it out at
-		// the finger's own speed over the polls up to the next sample.
-		//
-		// Paying at exactly that speed is what tracks a changing gesture best, but
-		// on its own it leaves a backlog: a poll can only ever hand over what is
-		// actually owed, so intervals that would over-deliver are capped at the
-		// remainder while intervals that under-deliver carry theirs forward. Every
-		// deceleration therefore left a little undelivered, and with the finger
-		// still down -- no liftoff to flush it -- that residue trickled out for a
-		// good fraction of a second after the hand had stopped, which reads as the
-		// camera lurching on once more at the end of a flick. So bleed the carried
-		// part off over the next several samples: fast enough that no perceptible
-		// tail survives, gentle enough that it never becomes a lurch of its own.
-		constexpr float kBacklogBleedSamples = 6.f;
-		pipe.pendingOutX += moved.x();
-		pipe.pendingOutY += moved.y();
-		pipe.outRateX = pipe.momentumX + (pipe.pendingOutX - moved.x()) / (kBacklogBleedSamples * sampleDt);
-		pipe.outRateY = pipe.momentumY + (pipe.pendingOutY - moved.y()) / (kBacklogBleedSamples * sampleDt);
-		moveMouse(TouchMousePipeline::payOut(pipe.pendingOutX, pipe.outRateX, dt),
-		  TouchMousePipeline::payOut(pipe.pendingOutY, pipe.outRateY, dt));
+		// Each displacement has its own finite delivery window. Later samples
+		// cannot starve, accelerate, or indefinitely delay an older remainder.
+		pipe.output.add(moved.x(), moved.y(), sampleDt);
+		float outX, outY;
+		pipe.output.advance(dt, outX, outY);
+		moveMouse(outX, outY);
 	}
 	else
 	{
@@ -397,11 +380,9 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		// Whatever the pacing still owed goes out now: the gesture is over, so
 		// there is nothing left to spread it across, and holding it back would
 		// silently drop the tail of every swipe.
-		if (pipe.pendingOutX != 0.f || pipe.pendingOutY != 0.f)
-		{
-			moveMouse(pipe.pendingOutX, pipe.pendingOutY);
-			pipe.pendingOutX = pipe.pendingOutY = 0.f;
-		}
+		float outX, outY;
+		pipe.output.finish(outX, outY);
+		moveMouse(outX, outY);
 
 		if (!pipe.active)
 			return;

@@ -1,6 +1,7 @@
 #include "JSMVariable.hpp"
 #include "JslWrapper.h"
 #include "SteamController2026.h"
+#include "TritonGripSettings.h"
 #include "JSMVariable.hpp"
  #include "TriggerEffectGenerator.h"
 #include "SettingsManager.h"
@@ -527,20 +528,9 @@ public:
 	// SDL's Triton driver forwards any 64-byte payload straight through
 	// SDL_SendGamepadEffect, so JSM can set them without patching SDL.
 	//
-	// Numbers below are the wire values from SDL's
-	// src/joystick/hidapi/steam/controller_constants.h at the pinned SDL commit
-	// (verified against that file's own "// 50" / "// 70" index comments). The
-	// enum is append-only by contract, so these are stable.
+	// Grip calibration uses Triton's setting namespace. The older generic SDL
+	// controller enum's TIMP entries do not address these grip sensors.
 	static constexpr uint8_t TRITON_ID_SET_SETTINGS_VALUES = 0x87;
-	//
-	// TIMP_TOUCH_THRESHOLD_ON/OFF is the capacitive threshold pair -- a trip point
-	// and its own lower release point. It is what Steam Input's Grip Sensor
-	// Calibration drives as "Grip Sensor Range" and "Flicker Guard Size", and it is
-	// the only capacitive pair the firmware has. The *_GRIP_CLICK_PRESSURE settings
-	// nearby are force thresholds for the physical back buttons and have nothing to
-	// do with the capacitive strips in the handles.
-	static constexpr uint8_t TRITON_SETTING_TIMP_TOUCH_THRESHOLD_ON = 72;
-	static constexpr uint8_t TRITON_SETTING_TIMP_TOUCH_THRESHOLD_OFF = 73;
 
 	// Grip haptics ride an OUTPUT report rather than a feature report. SDL's
 	// SendJoystickEffect only forwarded feature reports until the build's SDL patch
@@ -696,25 +686,10 @@ public:
 		// Negative means "leave the firmware's own value alone" -- the settings
 		// default to that, so a fresh install never overwrites thresholds the
 		// device (or Steam) already had, and the pads keep working out of the box.
-		auto readSetting = [](SettingID id)
-		{
-			const float value = SettingsManager::get<float>(id)->value();
-			return value < 0.f ? -1 : int(value + 0.5f);
-		};
-		const int range = readSetting(SettingID::GRIP_SENSOR_RANGE);
-		const int guard = readSetting(SettingID::GRIP_FLICKER_GUARD);
-		// The flicker guard is expressed as a distance below the trip point, which
-		// is how it reads to a user; the firmware wants the release point itself.
-		// It can never sit above the trip point, or the sensor latches on.
-		int releasePoint = -1;
-		if (range >= 0)
-			releasePoint = guard >= 0 ? std::max(0, range - guard) : range;
-
-		vector<pair<uint8_t, uint16_t>> pending;
-		if (range >= 0 && range != device->_appliedGripRange)
-			pending.emplace_back(TRITON_SETTING_TIMP_TOUCH_THRESHOLD_ON, uint16_t(range));
-		if (releasePoint >= 0 && releasePoint != device->_appliedGripRelease)
-			pending.emplace_back(TRITON_SETTING_TIMP_TOUCH_THRESHOLD_OFF, uint16_t(releasePoint));
+		const int range = triton_grip::threshold(SettingsManager::get<float>(SettingID::GRIP_SENSOR_RANGE)->value());
+		const int guard = triton_grip::hysteresis(SettingsManager::get<float>(SettingID::GRIP_FLICKER_GUARD)->value());
+		const auto pending = triton_grip::pending(range, guard,
+		    device->_appliedGripRange, device->_appliedGripRelease);
 
 		if (pending.empty())
 			return;
@@ -722,7 +697,7 @@ public:
 		if (sendTritonSettings(device->_sdlController, pending))
 		{
 			device->_appliedGripRange = range;
-			device->_appliedGripRelease = releasePoint;
+			device->_appliedGripRelease = guard;
 		}
 		// On failure the cached values stay stale, so the next poll retries.
 	}

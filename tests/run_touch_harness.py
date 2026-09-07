@@ -10,6 +10,7 @@ against main.cpp's actual JSMSetting registration lines for TOUCHPAD_MIN_CUTOFF 
 TOUCHPAD_SPEED_COEFF / TOUCHPAD_TRACKBALL_DECAY, so the harness can't silently
 drift out of sync with what's really shipped.
 """
+import argparse
 import os
 import re
 import shutil
@@ -27,6 +28,8 @@ HARNESSES = [
     Path(__file__).parent / 'touch_retouch_harness.cpp',
     Path(__file__).parent / 'touch_stall_catchup_harness.cpp',
     Path(__file__).parent / 'touch_release_harness.cpp',
+    Path(__file__).parent / 'touch_cadence_harness.cpp',
+    Path(__file__).parent / 'touch_resampler_harness.cpp',
 ]
 
 BEGIN = 'struct LowPassFilter1E'
@@ -71,6 +74,17 @@ def check_defaults_in_sync() -> bool:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--only', help='Run only the named harness stem')
+    parser.add_argument('--source-ref', help='Replay/test an earlier backend git revision')
+    parser.add_argument('--replay', help='Input CSV recorded by capture_touch.py')
+    parser.add_argument('--output', help='Replayed mouse-output CSV')
+    args = parser.parse_args()
+    if args.replay and (args.only != 'touch_cadence_harness' or not args.output):
+        parser.error('--replay requires --only touch_cadence_harness and --output')
+    selected = [h for h in HARNESSES if args.only is None or h.stem == args.only]
+    if not selected:
+        parser.error('unknown harness')
     compiler = shutil.which('g++') or shutil.which('clang++')
     vcvars = Path(os.environ.get('ProgramFiles(x86)', 'C:/Program Files (x86)')) / 'Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvars64.bat'
     if compiler is None and not vcvars.exists():
@@ -81,21 +95,30 @@ def main() -> int:
         return 1
     print('Harness defaults match main.cpp registrations.\n')
 
-    src = HEADER.read_text(encoding='utf-8')
+    def source(path):
+        if args.source_ref:
+            return subprocess.check_output(['git', '-C', str(ROOT), 'show', f'{args.source_ref}:{path.relative_to(ROOT).as_posix()}'], text=True)
+        return path.read_text(encoding='utf-8')
+    src = source(HEADER)
     try:
-        lifted = src[src.index(BEGIN):src.index(END)]
+        lifted = '#include "TouchMouseResampler.h"\n' + src[src.index(BEGIN):src.index(END)]
     except ValueError:
         print(f'FAIL: could not locate {BEGIN!r}..{END!r} in {HEADER}')
         return 1
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
+        shutil.copyfile(ROOT / 'JoyShockMapper/include/TouchMouseResampler.h', tmp / 'TouchMouseResampler.h')
         (tmp / 'lifted.inc').write_text(lifted, encoding='utf-8')
-        main = MAIN.read_text(encoding='utf-8')
+        filter_src = source(ROOT / 'JoyShockMapper/src/JoyShock.cpp')
+        start = filter_src.index('float OneEuroFilter::filter(float x, float dt, float minCutoff, float beta)')
+        end = filter_src.index('\n}', start) + 2
+        (tmp / 'lifted_one_euro.inc').write_text(filter_src[start:end], encoding='utf-8')
+        main = source(MAIN)
         process = main[main.index('static void processTouchMouse('):main.index('void touchCallback(')]
         (tmp / 'lifted_process.inc').write_text(process, encoding='utf-8')
         (tmp / 'MouseMotionAccumulator.h').write_text((ROOT / 'JoyShockMapper/include/MouseMotionAccumulator.h').read_text(encoding='utf-8'), encoding='utf-8')
-        for harness in HARNESSES:
+        for harness in selected:
             binary = tmp / (harness.stem + ('.exe' if os.name == 'nt' else ''))
             if compiler:
                 build = subprocess.run(
@@ -110,7 +133,10 @@ def main() -> int:
                 print(build.stdout, build.stderr)
                 return 1
             print(f'--- {harness.name} ---')
-            result = subprocess.run([str(binary)])
+            command = [str(binary)]
+            if args.replay:
+                command += [args.replay, args.output]
+            result = subprocess.run(command)
             print()
             if result.returncode != 0:
                 return result.returncode

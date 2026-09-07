@@ -1,28 +1,6 @@
-// Numeric proof for the "double cursor" teleport reported during a slow drag
-// and a long, low-decay coast, reproducible about once a second: a value that
-// genuinely stalls (not a stale HID duplicate -- see step()'s own comment) used
-// to sit frozen past the 16ms deferral bound and then get "processed" anyway,
-// handing the position filter a dt inflated by the whole deferred span for a
-// sample where the raw position hadn't moved at all. dx read exactly zero
-// either way, so the inflated dt bought nothing except a bigger alpha, which
-// snapped whatever lag the filter's smoothed output had accumulated during the
-// stall onto the raw value in one oversized step -- worse the longer the stall
-// and the more lag had built up beforehand, which is exactly what a slow swipe
-// (long stalls between quantisation-identical samples) or a long coast (plenty
-// of time to watch it happen) makes visible.
-//
-// The fix settles the filter's state directly to the confirmed-stalled value,
-// emitting nothing, instead of resolving the wait by running the normal update
-// with an inflated dt. This proves two properties: a long hold emits nothing at
-// all (not the trailing smear of small catch-up ticks an earlier, incomplete
-// fix produced), and a newly-confirmed value's own tick delivers close to its
-// own real displacement rather than something amplified by the stall.
-//
-// The struct under test is lifted verbatim out of JoyShockMapper/include/JoyShock.h
-// at build time (see tests/run_touch_harness.py), so this exercises the committed
-// code rather than a copy of it.
-//
-// Run with:  python3 tests/run_touch_harness.py
+// A position filter advances on every output poll, including held coordinates.
+// Verify that this continuous catch-up has a bounded stop and never turns a
+// long quantisation stall into one oversized sample. Uses the real pipeline.
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -60,7 +38,7 @@ int main(){
         if (!ok) ++fails;
     };
 
-    printf("=== a long hold after real motion emits nothing, not a trailing smear ===\n");
+    printf("=== a long hold settles for at most 16 ms, then stops ===\n");
     {
         TouchMousePipeline pipe;
         pipe.reset();
@@ -73,17 +51,21 @@ int main(){
             pos += 0.00006f; // ~0.02 pad-widths/second: slow, but genuinely moving
             pipe.step(pos, 0.5f, TICK, MIN_CUTOFF, BETA, 15.0f);
         }
-        // Hold perfectly still for far longer than kMaxDeferredDt (~5-6 ticks).
+        // Hold perfectly still for far longer than the 16 ms stop threshold (~5-6 ticks).
         int nonzeroConsumedTicks = 0;
+        float lastOutputTime = 0;
         for (int i = 0; i < 400; ++i) // 1.2 real seconds
         {
             FloatXY d = pipe.step(pos, 0.5f, TICK, MIN_CUTOFF, BETA, 15.0f);
             if (pipe.sampleConsumed && (d.x() != 0.f || d.y() != 0.f))
+            {
                 ++nonzeroConsumedTicks;
+                lastOutputTime = (i + 1) * TICK;
+            }
         }
         printf("nonzero-output ticks during a 1.2s hold: %d\n", nonzeroConsumedTicks);
-        check(nonzeroConsumedTicks == 0,
-              "a held-still raw position never emits output, however long lag had built up before it");
+        check(lastOutputTime <= .016f,
+              "held position advances the filter briefly, with no output after the stop deadline");
     }
 
     printf("\n=== a newly-confirmed quantised step delivers close to its own size ===\n");
