@@ -272,6 +272,26 @@ static float rescaleAdjustedSpeed(float vAdjusted, const AccelCurveShape &from, 
 	return t * toRange;
 }
 
+// Fires the pad-click confirmation pulse on whichever pad just went down, and
+// only on the poll it went down. Left is pipeline/side index 0, right is 1,
+// matching touchPipelines and the firmware's own side bitmask.
+static void updatePadClickHaptics(shared_ptr<JoyShock> &js, bool leftDown, bool rightDown)
+{
+	const float intensity = js->getSetting(SettingID::TOUCHPAD_CLICK_HAPTIC_INTENSITY);
+	const auto effect = js->getSetting<HapticEffect>(SettingID::TOUCHPAD_CLICK_HAPTIC_EFFECT);
+	const bool enabled = intensity > 0.f && effect != HapticEffect::OFF && effect != HapticEffect::INVALID;
+	const bool down[2] = { leftDown, rightDown };
+
+	for (int side = 0; side < 2; ++side)
+	{
+		// Tracked even while disabled, so turning the pulse on with a pad already
+		// held down doesn't fire for a press that happened before it existed.
+		if (enabled && down[side] && !js->padClickWasOn[side])
+			js->fireHaptic(side == 1 ? 2 : 1, int(effect), hapticGainDb(intensity));
+		js->padClickWasOn[side] = down[side];
+	}
+}
+
 // Shared touchpad -> mouse path for a single physical pad.
 //
 // Evaluate filtered position on the output clock, differentiate in float, then
@@ -326,7 +346,55 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		// actually consumed, which is not necessarily this poll's.
 		const float sampleDt = std::max(pipe.consumedDt, 1e-4f);
 
-		FloatXY scaled{ normalised.x() * tpSize.x() * sens.x(), normalised.y() * tpSize.y() * sens.y() };
+		// Travel measured on the pad itself, before sensitivity: both the
+		// micro-movement gate and the haptic detents are about how far the finger
+		// physically moved, so neither should change when sensitivity does.
+		const float padDx = normalised.x() * tpSize.x();
+		const float padDy = normalised.y() * tpSize.y();
+		const float padTravel = hypotf(padDx, padDy);
+
+		// Micro-movement gate. A thumb held still still drifts, and the filter
+		// cannot tell that drift from a slow deliberate pan, so the choice has to
+		// be the user's: below this pad speed the displacement is dropped rather
+		// than sent. Momentum goes with it, so lifting off after a still hold
+		// cannot launch a trackball coast out of nothing.
+		const float minMove = js->getSetting(SettingID::TOUCHPAD_MOVEMENT_THRESHOLD);
+		if (minMove > 0.f && (padTravel / sampleDt) < minMove)
+		{
+			pipe.momentumX = 0.f;
+			pipe.momentumY = 0.f;
+			float outX, outY;
+			pipe.output.advance(dt, outX, outY);
+			moveMouse(outX, outY);
+			return;
+		}
+
+		// Detent ticks every TOUCHPAD_HAPTIC_INTERVAL pad pixels of travel. The
+		// remainder carries over rather than resetting, so a slow drag ticks at the
+		// same spacing as a fast one instead of falling silent between polls.
+		{
+			const float hapticIntensity = js->getSetting(SettingID::TOUCHPAD_HAPTIC_INTENSITY);
+			const auto hapticEffect = js->getSetting<HapticEffect>(SettingID::TOUCHPAD_HAPTIC_EFFECT);
+			const float interval = js->getSetting(SettingID::TOUCHPAD_HAPTIC_INTERVAL);
+			if (hapticIntensity > 0.f && interval > 0.f &&
+			    hapticEffect != HapticEffect::OFF && hapticEffect != HapticEffect::INVALID)
+			{
+				pipe.hapticTravel += padTravel;
+				if (pipe.hapticTravel >= interval)
+				{
+					// One tick per crossing however many intervals a single poll
+					// covered: a flick should feel like a flick, not a burst.
+					pipe.hapticTravel = fmodf(pipe.hapticTravel, interval);
+					js->fireHaptic(padIndex == 1 ? 2 : 1, int(hapticEffect), hapticGainDb(hapticIntensity));
+				}
+			}
+			else
+			{
+				pipe.hapticTravel = 0.f;
+			}
+		}
+
+		FloatXY scaled{ padDx * sens.x(), padDy * sens.y() };
 
 		// Curve-based acceleration: a gain between TOUCHPAD_ACCEL_MIN_GAIN and
 		// _MAX_GAIN chosen from finger speed in px/s, using either the pad's own
@@ -1790,6 +1858,13 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			// Right pad click, left pad click
 			jc->handleButtonChange(ButtonID::MISC2, buttons & (1ULL << JSOFFSET_MISC2));
 			jc->handleButtonChange(ButtonID::MISC3, buttons & (1ULL << JSOFFSET_MISC3));
+			// Confirmation pulse on the pad you actually pressed. Edge-triggered off
+			// padClickWasOn: a level check would replay the effect every poll the
+			// pad stayed held. Independent of what the click is bound to, since the
+			// feel of the click is not the same question as what it does.
+			updatePadClickHaptics(jc,
+			  (buttons & (1ULL << JSOFFSET_MISC3)) != 0,
+			  (buttons & (1ULL << JSOFFSET_MISC2)) != 0);
 			// Right grip, left grip
 			jc->handleButtonChange(ButtonID::MISC5, buttons & (1ULL << JSOFFSET_MISC5));
 			jc->handleButtonChange(ButtonID::MISC6, buttons & (1ULL << JSOFFSET_MISC6));
@@ -3887,6 +3962,52 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(grip_release_haptic_effect);
 	commandRegistry->add((new JSMAssignment<HapticEffect>("GRIP_RELEASE_HAPTIC_EFFECT", *grip_release_haptic_effect))
 	                       ->setHelp("Which effect the grip actuator plays when that grip sensor releases. Same valid values as GRIP_HAPTIC_EFFECT. Defaults to CLICK."));
+
+	// A resting thumb is never actually still, and the pad reports that. Off by
+	// default because the same gate that kills drift also kills a genuinely slow
+	// pan, so how much to trade is the user's call, not a default.
+	auto touch_move_threshold = new JSMSetting<float>(SettingID::TOUCHPAD_MOVEMENT_THRESHOLD, 0.f);
+	touch_move_threshold->setFilter([](auto, auto next) { return clamp(next, 0.f, 2000.f); });
+	SettingsManager::add(touch_move_threshold);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_MOVEMENT_THRESHOLD", *touch_move_threshold))
+	                       ->setHelp("Minimum finger speed, in pad pixels per second, before the trackpad moves the mouse at all. Filters out the drift a thumb makes while trying to hold still. Raise it until a resting thumb stops the cursor; too high and slow deliberate panning stops too. 0 (default) disables the gate."));
+
+	// The pads have their own haptic actuators. Off by default for the same reason
+	// as the grip pulse: an unasked-for buzz on every swipe would be worse than
+	// no feature.
+	auto touch_haptic = new JSMSetting<float>(SettingID::TOUCHPAD_HAPTIC_INTENSITY, 0.f);
+	touch_haptic->setFilter([](auto, auto next) { return clamp(next, 0.f, 100.f); });
+	SettingsManager::add(touch_haptic);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_HAPTIC_INTENSITY", *touch_haptic))
+	                       ->setHelp("Strength of the tick that pad's actuator plays as your finger travels across it, 0-100. 0 (default) disables trackpad movement haptics entirely."));
+
+	// TICK is the shortest effect the controller has, which is what a detent wants;
+	// CLICK (the grip default) is too heavy to repeat every few pad pixels.
+	auto touch_haptic_effect = new JSMSetting<HapticEffect>(SettingID::TOUCHPAD_HAPTIC_EFFECT, HapticEffect::TICK);
+	touch_haptic_effect->setFilter(&filterInvalidValue<HapticEffect, HapticEffect::INVALID>);
+	SettingsManager::add(touch_haptic_effect);
+	commandRegistry->add((new JSMAssignment<HapticEffect>("TOUCHPAD_HAPTIC_EFFECT", *touch_haptic_effect))
+	                       ->setHelp("Which effect the pad actuator plays for each movement tick. Valid values are OFF, TICK, CLICK, TONE, RUMBLE, NOISE, SCRIPT and SWEEP. Defaults to TICK."));
+
+	auto touch_haptic_interval = new JSMSetting<float>(SettingID::TOUCHPAD_HAPTIC_INTERVAL, 250.f);
+	touch_haptic_interval->setFilter([](auto, auto next) { return clamp(next, 1.f, 20000.f); });
+	SettingsManager::add(touch_haptic_interval);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_HAPTIC_INTERVAL", *touch_haptic_interval))
+	                       ->setHelp("How far your finger must travel across the pad, in pad pixels, between one movement tick and the next. Lower is a finer, busier detent. Defaults to 250."));
+
+	// Separate from the movement ticks above: clicking the pad is one discrete
+	// event, so it gets its own strength and a heavier default effect.
+	auto touch_click_haptic = new JSMSetting<float>(SettingID::TOUCHPAD_CLICK_HAPTIC_INTENSITY, 0.f);
+	touch_click_haptic->setFilter([](auto, auto next) { return clamp(next, 0.f, 100.f); });
+	SettingsManager::add(touch_click_haptic);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_CLICK_HAPTIC_INTENSITY", *touch_click_haptic))
+	                       ->setHelp("Strength of the pulse that pad's actuator plays when you click the pad down, 0-100. 0 (default) disables the click pulse, independent of TOUCHPAD_HAPTIC_INTENSITY."));
+
+	auto touch_click_haptic_effect = new JSMSetting<HapticEffect>(SettingID::TOUCHPAD_CLICK_HAPTIC_EFFECT, HapticEffect::CLICK);
+	touch_click_haptic_effect->setFilter(&filterInvalidValue<HapticEffect, HapticEffect::INVALID>);
+	SettingsManager::add(touch_click_haptic_effect);
+	commandRegistry->add((new JSMAssignment<HapticEffect>("TOUCHPAD_CLICK_HAPTIC_EFFECT", *touch_click_haptic_effect))
+	                       ->setHelp("Which effect the pad actuator plays when you click the pad down. Same valid values as TOUCHPAD_HAPTIC_EFFECT. Defaults to CLICK."));
 
 	auto hide_minimized = new JSMVariable<Switch>(Switch::OFF);
 	minimizeThread.reset(new PollingThread( "Minimize thread", [] (void *param)

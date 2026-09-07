@@ -624,17 +624,15 @@ public:
 
 	// The automatic pulse when a grip sensor trips, as opposed to one a binding
 	// asked for. Intensity is a 0-100 dial rather than raw decibels because it is
-	// the only haptic a user meets without choosing an effect by name; the scale is
-	// logarithmic, so the low end still has to reach a long way down to be gentle.
+	// the only haptic a user meets without choosing an effect by name; hapticGainDb
+	// is the shared mapping, so the pad ticks agree on what a given dial feels like.
 	static void sendGripHaptic(SDL_Gamepad *gamepad, bool rightSide, float intensity, HapticEffect effect)
 	{
 		if (intensity <= 0.f || effect == HapticEffect::OFF || effect == HapticEffect::INVALID)
 			return;
 
-		const float scale = std::clamp(intensity, 0.f, 100.f) / 100.f;
-		const int gainDb = int(std::lround(-24.0f + scale * 36.0f));
 		sendHapticEffect(gamepad, rightSide ? TRITON_HAPTIC_SIDE_RIGHT : TRITON_HAPTIC_SIDE_LEFT,
-		  uint8_t(effect), gainDb);
+		  uint8_t(effect), hapticGainDb(intensity));
 	}
 
 	// Pulses whichever grip sensor just changed state. Edge-triggered on purpose:

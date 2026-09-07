@@ -9,6 +9,8 @@
 
 #include "magic_enum.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <map>
 #include <functional>
 #include <sstream>
@@ -407,6 +409,21 @@ enum class SettingID
 	// -- or disabled -- separately; 0 intensity = off.
 	GRIP_RELEASE_HAPTIC_INTENSITY,
 	GRIP_RELEASE_HAPTIC_EFFECT,
+	// A thumb trying to hold still on a capacitive pad never is: the contact patch
+	// breathes and the reported position drifts, which the mouse path faithfully
+	// turns into a crawling cursor. Below this finger speed, in pad pixels per
+	// second, the displacement is dropped rather than sent. 0 (default) = off.
+	TOUCHPAD_MOVEMENT_THRESHOLD,
+	// Haptic ticks the pad's own actuator plays as the finger travels, the way a
+	// scroll wheel detents. Intensity 0 = off; the interval is how far the finger
+	// must travel, in pad pixels, between one tick and the next.
+	TOUCHPAD_HAPTIC_INTENSITY,
+	TOUCHPAD_HAPTIC_EFFECT,
+	TOUCHPAD_HAPTIC_INTERVAL,
+	// Physically clicking the pad down is a discrete event rather than a travel
+	// distance, so it gets its own pair instead of sharing the ticks above.
+	TOUCHPAD_CLICK_HAPTIC_INTENSITY,
+	TOUCHPAD_CLICK_HAPTIC_EFFECT,
 };
 
 // constexpr are like #define but with respect to typeness
@@ -483,6 +500,16 @@ enum class HapticEffect
 	SWEEP,
 	INVALID
 };
+
+// The 0-100 dial every automatic haptic is configured with, mapped to the signed
+// decibel gain the firmware actually takes. Shared so the grip pulse and the pad
+// ticks cannot drift apart on what "40" feels like. The firmware's scale is
+// logarithmic, so the bottom end has to reach a long way down to be gentle.
+inline int hapticGainDb(float intensity)
+{
+	const float scale = std::clamp(intensity, 0.f, 100.f) / 100.f;
+	return int(std::lround(-24.0f + scale * 36.0f));
+}
 
 enum class RingMode
 {

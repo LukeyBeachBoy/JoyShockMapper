@@ -87,6 +87,10 @@ struct TouchMousePipeline
 	// mid-coast differentiate the gap between liftoff and touchdown.
 	bool active = false;
 	bool contact = false;
+	// Pad pixels travelled since the last movement haptic tick. Distance, not time:
+	// ticking on a timer would buzz while a finger rests and go silent during a
+	// fast flick, which is the opposite of what a detent should feel like.
+	float hapticTravel = 0.f;
 
 	void reset()
 	{
@@ -103,6 +107,7 @@ struct TouchMousePipeline
 		output.reset();
 		active = false;
 		contact = false;
+		hapticTravel = 0.f;
 	}
 
 	// rawX / rawY: normalised pad position in [0, 1]. dt in SECONDS.
@@ -319,6 +324,16 @@ public:
 	// Keep independent filter state for dual-pad controllers; a left-pad sample
 	// must not influence the next right-pad sample.
 	TouchMousePipeline touchPipelines[2];
+
+	// Previous pad-click state, indexed the same way as touchPipelines (0 = left,
+	// 1 = right). The click haptic is edge-triggered off this: a level-triggered
+	// pulse would replay for every poll the pad stayed held down.
+	bool padClickWasOn[2] = { false, false };
+
+	// Plays one of the controller's own effects on this controller's actuators.
+	// Public because the touch path in main.cpp drives the pad haptics directly,
+	// rather than going through a binding the way sendHaptic's other caller does.
+	void fireHaptic(int side, int effect, int gainDb);
 
 	std::deque<std::pair<std::chrono::steady_clock::time_point, float>> decelBrakeHistory;
 	float decelBrakeEngagement = 0.f;

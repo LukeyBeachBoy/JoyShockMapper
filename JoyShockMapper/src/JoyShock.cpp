@@ -120,6 +120,11 @@ void JoyShock::sendHaptic(int side, int effect, int gainDb)
 	jsl->SetHaptic(_handle, side, effect, gainDb);
 }
 
+void JoyShock::fireHaptic(int side, int effect, int gainDb)
+{
+	sendHaptic(side, effect, gainDb);
+}
+
 void JoyShock::sendRumble(int smallRumble, int bigRumble)
 {
 	if (SettingsManager::getV<Switch>(SettingID::RUMBLE)->value() == Switch::ON)
