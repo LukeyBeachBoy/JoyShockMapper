@@ -316,8 +316,42 @@ static void updatePadClickHaptics(shared_ptr<JoyShock> &js, bool leftDown, bool 
 // Evaluate filtered position on the output clock, differentiate in float, then
 // apply sensitivity and acceleration. Resample the computed displacement before
 // passing it to the shared mouse accumulator.
+// How much of the mouse output to remove because the pad is being pressed, 0
+// (none) to 1 (all of it). Clicking a pad rolls the finger across it, and in
+// MOUSE mode that roll is a camera movement nobody asked for.
+//
+// Two signals, because neither alone is enough. The digital click is exact but
+// arrives after the roll that caused the problem, so it can only ever be a hard
+// stop for as long as the pad is held. Analog pressure leads the click, so
+// ramping on it settles the cursor before the switch trips -- but the pressure
+// at which a click actually registers lives in firmware and cannot be read, so
+// the ramp's endpoint has to be the top of the scale rather than the real click
+// point. Together: ease in from the threshold, and pin to full while held.
+//
+// padPressure defaults to 0 and clickHeld to false, which is "no damping" -- the
+// touch harnesses call this without either.
+static float clickDampen(shared_ptr<JoyShock> &js, float padPressure, bool clickHeld)
+{
+	const float amount = std::clamp(js->getSetting(SettingID::TOUCHPAD_CLICK_DAMPEN), 0.f, 1.f);
+	if (amount <= 0.f)
+		return 0.f;
+	if (clickHeld)
+		return amount;
+
+	const float threshold = js->getSetting(SettingID::TOUCHPAD_CLICK_DAMPEN_THRESHOLD);
+	if (threshold <= 0.f || !std::isfinite(padPressure) || padPressure <= threshold)
+		return 0.f;
+
+	// Linear from the threshold to the top of the pressure scale. A pad that
+	// clicks well before full scale simply reaches the switch part-way up this
+	// ramp, where clickHeld takes over and pins it to `amount` anyway.
+	const float span = std::max(1.f - threshold, 1e-4f);
+	return amount * std::clamp((padPressure - threshold) / span, 0.f, 1.f);
+}
+
 static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POINT &point,
-  int sourceIndex, FloatXY tpSize, FloatXY sens, float delta_time)
+  int sourceIndex, FloatXY tpSize, FloatXY sens, float delta_time,
+  float padPressure = 0.f, bool clickHeld = false)
 {
 	TouchMousePipeline &pipe = js->touchPipelines[padIndex];
 
@@ -378,7 +412,12 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		// than sent. Momentum goes with it, so lifting off after a still hold
 		// cannot launch a trackball coast out of nothing.
 		const float minMove = js->getSetting(SettingID::TOUCHPAD_MOVEMENT_THRESHOLD);
-		if (minMove > 0.f && (padTravel / sampleDt) < minMove)
+		const float dampen = clickDampen(js, padPressure, clickHeld);
+		// Fully damped is the same situation as below the movement gate: nothing
+		// new goes out, the pacing already in flight still drains so a swipe that
+		// ended in a click does not lose its tail, and momentum is dropped so
+		// letting go cannot fling a coast out of the press itself.
+		if ((minMove > 0.f && (padTravel / sampleDt) < minMove) || dampen >= 1.f)
 		{
 			pipe.momentumX = 0.f;
 			pipe.momentumY = 0.f;
@@ -387,6 +426,7 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 			moveMouse(outX, outY);
 			return;
 		}
+		const float dampScale = 1.f - dampen;
 
 		// Detent ticks every TOUCHPAD_HAPTIC_INTERVAL pad pixels of travel. The
 		// remainder carries over rather than resetting, so a slow drag ticks at the
@@ -398,7 +438,9 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 			if (hapticIntensity > 0.f && interval > 0.f &&
 			    hapticEffect != HapticEffect::OFF && hapticEffect != HapticEffect::INVALID)
 			{
-				pipe.hapticTravel += padTravel;
+				// Scaled the same way the output is: a half-damped pad should not
+				// tick at the rate the finger is moving when the cursor isn't.
+				pipe.hapticTravel += padTravel * dampScale;
 				if (pipe.hapticTravel >= interval)
 				{
 					// One tick per crossing however many intervals a single poll
@@ -413,7 +455,7 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 			}
 		}
 
-		FloatXY scaled{ padDx * sens.x(), padDy * sens.y() };
+		FloatXY scaled{ padDx * sens.x() * dampScale, padDy * sens.y() * dampScale };
 
 		// Curve-based acceleration: a gain between TOUCHPAD_ACCEL_MIN_GAIN and
 		// _MAX_GAIN chosen from finger speed in px/s, using either the pad's own
@@ -607,8 +649,11 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		}
 		else if (leftMode == TouchpadMode::MOUSE)
 		{
+			// Left pad's own pressure and its own click (MISC3), so damping on one
+			// pad never quiets the other.
 			processTouchMouse(js, 0, point0, 0, tpSize,
-			  js->getSetting<FloatXY>(SettingID::LEFT_TOUCHPAD_SENS), delta_time);
+			  js->getSetting<FloatXY>(SettingID::LEFT_TOUCHPAD_SENS), delta_time,
+			  newState.t0Pressure, js->isPressed(ButtonID::MISC3));
 		}
 
 		// Process right pad
@@ -637,7 +682,8 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		else if (rightMode == TouchpadMode::MOUSE)
 		{
 			processTouchMouse(js, 1, point1, 1, tpSize,
-			  js->getSetting<FloatXY>(SettingID::RIGHT_TOUCHPAD_SENS), delta_time);
+			  js->getSetting<FloatXY>(SettingID::RIGHT_TOUCHPAD_SENS), delta_time,
+			  newState.t1Pressure, js->isPressed(ButtonID::MISC2));
 		}
 
 		// PS_TOUCHPAD not supported for dual-pad controllers
@@ -684,8 +730,13 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			// restarts the position filter instead of teleporting the cursor.
 			int sourceIndex = point0.isDown() ? 0 : 1;
 			TOUCH_POINT &downPoint = point0.isDown() ? point0 : point1;
+			// One pad, so one click (CAPTURE) and whichever finger is driving it.
+			// These controllers report no pad pressure, so only the held-click half
+			// of the damping does anything here.
 			processTouchMouse(js, 0, downPoint, sourceIndex, tpSize,
-			  js->getSetting<FloatXY>(SettingID::TOUCHPAD_SENS), delta_time);
+			  js->getSetting<FloatXY>(SettingID::TOUCHPAD_SENS), delta_time,
+			  sourceIndex == 0 ? newState.t0Pressure : newState.t1Pressure,
+			  js->isPressed(ButtonID::CAPTURE));
 		}
 		else if (mode == TouchpadMode::PS_TOUCHPAD)
 		{
@@ -4042,6 +4093,25 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(touch_release_haptic_effect);
 	commandRegistry->add((new JSMAssignment<HapticEffect>("TOUCHPAD_RELEASE_HAPTIC_EFFECT", *touch_release_haptic_effect))
 	                       ->setHelp("Which effect the pad actuator plays when you let the pad click back up. Same valid values as TOUCHPAD_HAPTIC_EFFECT. Defaults to TICK, lighter than the press so the two edges are told apart."));
+
+	// Clicking a pad you are also using as a mouse rolls the finger, and that roll
+	// is a camera movement nobody asked for. Off by default: with no click bound
+	// there is nothing to protect against, and quieting a pad mid-swipe is the
+	// last thing you want if you never click it.
+	auto touch_click_dampen = new JSMSetting<float>(SettingID::TOUCHPAD_CLICK_DAMPEN, 0.f);
+	touch_click_dampen->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
+	SettingsManager::add(touch_click_dampen);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_CLICK_DAMPEN", *touch_click_dampen))
+	                       ->setHelp("How much trackpad mouse output to suppress while the pad is being clicked, 0 to 1. 1 stops the cursor completely, so clicking to interact cannot drag your aim; 0.5 halves it. 0 (default) disables the feature. Only meaningful on a pad in MOUSE mode that also has its click bound."));
+
+	// Leads the switch. The click itself only fires after the roll that caused the
+	// problem, so the analog pressure is what lets the cursor be settled by the
+	// time the click registers rather than stopping dead on it.
+	auto touch_click_dampen_threshold = new JSMSetting<float>(SettingID::TOUCHPAD_CLICK_DAMPEN_THRESHOLD, 0.f);
+	touch_click_dampen_threshold->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
+	SettingsManager::add(touch_click_dampen_threshold);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_CLICK_DAMPEN_THRESHOLD", *touch_click_dampen_threshold))
+	                       ->setHelp("Pad pressure, 0 to 1, at which TOUCHPAD_CLICK_DAMPEN starts easing in, before the click itself registers. Lower reacts earlier but bites during firm ordinary swipes. 0 (default) damps only while the click is physically held. The live pressure reading is on the Controller Status page."));
 
 	auto hide_minimized = new JSMVariable<Switch>(Switch::OFF);
 	minimizeThread.reset(new PollingThread( "Minimize thread", [] (void *param)

@@ -24,7 +24,7 @@ enum class SettingID {
     TOUCHPAD_ACCEL_MIN_GAIN, TOUCHPAD_ACCEL_MAX_GAIN, ACCEL_CURVE_LINK,
     TOUCHPAD_ACCELERATION, TOUCHPAD_TRACKBALL_DECAY, TOUCHPAD_TRACKBALL_MIN_VELOCITY,
     TOUCHPAD_MOVEMENT_THRESHOLD, TOUCHPAD_HAPTIC_INTENSITY, TOUCHPAD_HAPTIC_EFFECT,
-    TOUCHPAD_HAPTIC_INTERVAL
+    TOUCHPAD_HAPTIC_INTERVAL, TOUCHPAD_CLICK_DAMPEN, TOUCHPAD_CLICK_DAMPEN_THRESHOLD
 };
 enum class AccelCurveLink { NONE, TOUCHPAD_USES_GYRO };
 // Same ordinals as the real enum, because the setting is stored as its index.
@@ -57,6 +57,10 @@ struct AccelCurveShape { float minThreshold = 0; };
 static AccelCurveShape readTouchpadAccelShape(JoyShock&) { return {}; }
 static AccelCurveShape readGyroAccelShape(JoyShock&) { return {}; }
 static float rescaleAdjustedSpeed(float x, const AccelCurveShape&, const AccelCurveShape&) { return x; }
+// Mirrors main.cpp's clickDampen, which sits above the lifted region and so is
+// not carried in with processTouchMouse. Both settings default to 0, so every
+// harness that does not set them measures an undamped pipeline.
+static float clickDampen(shared_ptr<JoyShock> &js, float padPressure, bool clickHeld);
 static float evaluateAccelCurve(const AccelCurveShape&, float, float low, float) { return low; }
 static MouseMotionAccumulator motion;
 static double totalX = 0, totalY = 0;
@@ -66,3 +70,14 @@ static void moveMouse(float x, float y) {
     motion.add(x, y);
 }
 #include "lifted_process.inc"
+
+// Defined after the lift so it can use the same JoyShock the lifted code does.
+static float clickDampen(shared_ptr<JoyShock> &js, float padPressure, bool clickHeld) {
+    const float amount = std::clamp(js->getSetting(SettingID::TOUCHPAD_CLICK_DAMPEN), 0.f, 1.f);
+    if (amount <= 0.f) return 0.f;
+    if (clickHeld) return amount;
+    const float threshold = js->getSetting(SettingID::TOUCHPAD_CLICK_DAMPEN_THRESHOLD);
+    if (threshold <= 0.f || !std::isfinite(padPressure) || padPressure <= threshold) return 0.f;
+    const float span = std::max(1.f - threshold, 1e-4f);
+    return amount * std::clamp((padPressure - threshold) / span, 0.f, 1.f);
+}

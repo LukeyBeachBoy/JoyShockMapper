@@ -430,6 +430,15 @@ enum class SettingID
 	// press pulse so the two can feel different, or either can run alone.
 	TOUCHPAD_RELEASE_HAPTIC_INTENSITY,
 	TOUCHPAD_RELEASE_HAPTIC_EFFECT,
+	// Pressing a pad hard enough to click it rolls the finger, and in MOUSE mode
+	// that roll is a camera movement you did not ask for. This scales mouse output
+	// down as the press comes on: 0 (default) off, 1 stops output entirely while
+	// the pad is being clicked.
+	TOUCHPAD_CLICK_DAMPEN,
+	// Analog pad pressure at which that damping starts easing in, so the cursor
+	// is already settling before the click registers rather than stopping dead on
+	// the switch. 0 damps only while the click is physically held.
+	TOUCHPAD_CLICK_DAMPEN_THRESHOLD,
 };
 
 // constexpr are like #define but with respect to typeness
