@@ -72,12 +72,16 @@ static void moveMouse(float x, float y) {
 #include "lifted_process.inc"
 
 // Defined after the lift so it can use the same JoyShock the lifted code does.
+// Mirrors main.cpp's computePadPressLevel + clickDampen: the threshold is the
+// pressure at which the press counts as fully on, eased in over the top half of
+// the way there.
 static float clickDampen(shared_ptr<JoyShock> &js, float padPressure, bool clickHeld) {
     const float amount = std::clamp(js->getSetting(SettingID::TOUCHPAD_CLICK_DAMPEN), 0.f, 1.f);
     if (amount <= 0.f) return 0.f;
     if (clickHeld) return amount;
-    const float threshold = js->getSetting(SettingID::TOUCHPAD_CLICK_DAMPEN_THRESHOLD);
-    if (threshold <= 0.f || !std::isfinite(padPressure) || padPressure <= threshold) return 0.f;
-    const float span = std::max(1.f - threshold, 1e-4f);
-    return amount * std::clamp((padPressure - threshold) / span, 0.f, 1.f);
+    const float full = js->getSetting(SettingID::TOUCHPAD_CLICK_DAMPEN_THRESHOLD);
+    if (full <= 0.f || !std::isfinite(padPressure)) return 0.f;
+    const float start = full * 0.5f;
+    if (padPressure <= start) return 0.f;
+    return amount * std::clamp((padPressure - start) / (full - start), 0.f, 1.f);
 }

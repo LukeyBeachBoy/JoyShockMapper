@@ -50,19 +50,33 @@ int main() {
       half > undamped * .40 && half < undamped * .60);
 
     // The analog ramp: leads the switch, so the cursor is already settling by the
-    // time the click registers rather than stopping dead on it.
+    // time the click registers rather than stopping dead on it. The threshold is
+    // where the press counts as fully on, eased in over the top half of the way
+    // there -- NOT where the ramp starts. Anchoring it at the far end of the 0-1
+    // scale instead made the setting inert on real hardware, whose pressures live
+    // far down that scale, so these pin the direction.
     js->settings[SettingID::TOUCHPAD_CLICK_DAMPEN] = 1.f;
     js->settings[SettingID::TOUCHPAD_CLICK_DAMPEN_THRESHOLD] = .5f;
-    check("pressure below the threshold is undamped",
-      std::abs(swipe(js, .4f, false) - undamped) < undamped * .05);
-    const double middle = swipe(js, .75f, false);
+    check("pressure below the ramp is undamped",
+      std::abs(swipe(js, .2f, false) - undamped) < undamped * .05);
+    const double middle = swipe(js, .375f, false);
     check("pressure halfway up the ramp roughly halves the distance",
       middle > undamped * .35 && middle < undamped * .65);
-    check("pressure at the top of the ramp stops the cursor", swipe(js, 1.f, false) == 0.0);
-    check("the ramp is monotonic", swipe(js, .6f, false) > swipe(js, .9f, false));
+    check("pressure at the threshold stops the cursor", swipe(js, .5f, false) == 0.0);
+    check("pressure past the threshold stays stopped", swipe(js, .8f, false) == 0.0);
+    check("the ramp is monotonic", swipe(js, .3f, false) > swipe(js, .45f, false));
+
+    // The bug this replaced: with a threshold well below full scale, a press just
+    // over it must already be damping hard rather than by a couple of percent.
+    js->settings[SettingID::TOUCHPAD_CLICK_DAMPEN_THRESHOLD] = .02f;
+    check("a small threshold still reaches full damping at a small pressure",
+      swipe(js, .02f, false) == 0.0);
+    check("a small threshold is untouched by pressures well below it",
+      std::abs(swipe(js, .005f, false) - undamped) < undamped * .05);
 
     // A swipe that ends in a click must not lose the tail it had already earned,
     // nor fling a coast out of the press itself.
+    js->settings[SettingID::TOUCHPAD_CLICK_DAMPEN_THRESHOLD] = .5f;
     js->settings[SettingID::TOUCHPAD_TRACKBALL_DECAY] = 30.f;
     js->touchPipelines[1].reset();
     tick(js, .3f, .3f);

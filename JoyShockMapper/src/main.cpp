@@ -339,15 +339,30 @@ static float computePadPressLevel(shared_ptr<JoyShock> &js, float padPressure, b
 	if (clickHeld)
 		return 1.f;
 
-	const float threshold = js->getSetting(SettingID::TOUCHPAD_CLICK_DAMPEN_THRESHOLD);
-	if (threshold <= 0.f || !std::isfinite(padPressure) || padPressure <= threshold)
+	// The threshold is where the press counts as FULLY on, not where it starts.
+	//
+	// Ramping from the threshold up to 1.0 instead -- which is what this did at
+	// first -- assumed a press covers most of the 0-1 range SDL reports. It does
+	// not: the pad's raw channel is a 16-bit force reading whose useful values sit
+	// far down the scale, so a threshold anywhere near a real press left a
+	// denominator of almost 1 and a ramp that reached a couple of percent before
+	// the switch fired and clickHeld took over. The setting looked inert.
+	//
+	// Anchoring full damping AT the threshold makes the number mean what its label
+	// says, and makes it readable straight off the live pressure display: press
+	// until the reading is where you want the cursor already still, and use that.
+	const float full = js->getSetting(SettingID::TOUCHPAD_CLICK_DAMPEN_THRESHOLD);
+	if (full <= 0.f || !std::isfinite(padPressure))
 		return 0.f;
 
-	// Linear from the threshold to the top of the pressure scale. A pad that
-	// clicks well before full scale simply reaches the switch part-way up this
-	// ramp, where clickHeld takes over and pins it to 1 anyway.
-	const float span = std::max(1.f - threshold, 1e-4f);
-	return std::clamp((padPressure - threshold) / span, 0.f, 1.f);
+	// Eased in over the top half of the way there rather than switched on at a
+	// point, so the cursor settles instead of stopping dead. The band is a
+	// fraction of the threshold, so it stays sensible at any scale without a
+	// second setting to keep in step with the first.
+	const float start = full * 0.5f;
+	if (padPressure <= start)
+		return 0.f;
+	return std::clamp((padPressure - start) / (full - start), 0.f, 1.f);
 }
 
 static float clickDampen(shared_ptr<JoyShock> &js, float padPressure, bool clickHeld)
@@ -4154,7 +4169,7 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	touch_click_dampen_threshold->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
 	SettingsManager::add(touch_click_dampen_threshold);
 	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_CLICK_DAMPEN_THRESHOLD", *touch_click_dampen_threshold))
-	                       ->setHelp("Pad pressure, 0 to 1, at which TOUCHPAD_CLICK_DAMPEN and GYRO_CLICK_DAMPEN start easing in, before the click itself registers. Lower reacts earlier but bites during firm ordinary swipes. 0 (default) damps only while the click is physically held. The live pressure reading is on the Controller Status page."));
+	                       ->setHelp("Pad pressure, 0 to 1, at which TOUCHPAD_CLICK_DAMPEN and GYRO_CLICK_DAMPEN are fully applied, eased in over the second half of the way there so the damping lands before the click itself registers. The pads report force far down the 0 to 1 scale, so read a value off the live pressure display on the Trackpad tuning page rather than guessing. Lower reacts earlier but bites during firm ordinary swipes. 0 (default) damps only while the click is physically held."));
 
 	// The same press, on the other input it disturbs. Separate from the trackpad's
 	// own amount because which output needs quieting depends on what the pad does:
