@@ -4053,13 +4053,13 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	grip_sensor_range->setFilter(&filterFirmwareThreshold);
 	SettingsManager::add(grip_sensor_range);
 	commandRegistry->add((new JSMAssignment<float>("GRIP_SENSOR_RANGE", *grip_sensor_range))
-	                       ->setHelp("How near your hand must come to the grip before the sensor trips, in raw firmware units. Lower detects your hands sooner. -1 (default) keeps the controller's own value."));
+	                       ->setHelp("Grip activation threshold, 25..400 raw firmware units. HIGHER requires closer contact (shorter sensing range). Studio reverses this into a range percentage. -1 (default) leaves the controller's current value unchanged."));
 
 	auto grip_flicker_guard = new JSMSetting<float>(SettingID::GRIP_FLICKER_GUARD, -1.f);
 	grip_flicker_guard->setFilter(&filterFirmwareThreshold);
 	SettingsManager::add(grip_flicker_guard);
 	commandRegistry->add((new JSMAssignment<float>("GRIP_FLICKER_GUARD", *grip_flicker_guard))
-	                       ->setHelp("Extra distance your hand must move away before the grip sensor releases, so resting right at the edge of the range can't flicker it on and off. Same units as GRIP_SENSOR_RANGE. -1 (default) keeps the controller's own value."));
+	                       ->setHelp("Grip hysteresis firmware value, 0..100. Steam's slider uses 25..100 in reverse: HIGHER means less stickiness and earlier release. Independent of GRIP_SENSOR_RANGE. -1 (default) leaves the controller's current value unchanged."));
 
 	// The grips have their own haptic actuators. Off by default: an unasked-for
 	// buzz every time you adjust your hands would be worse than no feature.
@@ -4181,7 +4181,7 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<float>("GYRO_CLICK_DAMPEN", *gyro_click_dampen))
 	                       ->setHelp("How much gyro output to suppress while a trackpad is being pressed, 0 to 1. Pressing a pad shoves the whole controller and the gyro reports that shove as aiming, so a setup that pans with the pad and corrects with the gyro gets the jolt twice. 1 freezes the gyro while the pad is clicked. Uses the same pressure ramp as TOUCHPAD_CLICK_DAMPEN_THRESHOLD. 0 (default) disables it."));
 
-	auto hide_minimized = new JSMVariable<Switch>(Switch::OFF);
+	auto hide_minimized = new JSMVariable<Switch>(Switch::ON);
 	minimizeThread.reset(new PollingThread( "Minimize thread", [] (void *param)
 		{
 			if (isConsoleMinimized())

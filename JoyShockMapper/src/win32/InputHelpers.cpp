@@ -255,6 +255,15 @@ void initConsole()
 {
 	AllocConsole();
 	SetConsoleTitle(L"JoyShockMapper");
+	// The console host terminates attached processes after CTRL_CLOSE_EVENT,
+	// even if our handler returns TRUE. Prevent accidental mapper shutdown;
+	// minimize hides the console and the tray Quit command remains available.
+	if (HWND console = GetConsoleWindow())
+	{
+		if (HMENU menu = GetSystemMenu(console, FALSE))
+			DeleteMenu(menu, SC_CLOSE, MF_BYCOMMAND);
+		DrawMenuBar(console);
+	}
 	// https://stackoverflow.com/a/15547699/1130520
 	freopen_s((FILE **)stdin, "conin$", "r", stdin);
 	freopen_s((FILE **)stdout, "conout$", "w", stdout);

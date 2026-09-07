@@ -14,17 +14,17 @@ right one, so all three are asserted *out*:
     back buttons (L4/R4/L5/R5), which have nothing to do with the capacitive
     strips, so writing them changed nothing a grip sensor does.
 
-What is actually adjustable is TIMP_TOUCH_THRESHOLD_ON/OFF, the firmware's one
-capacitive threshold pair -- the same pair behind Steam Input's Grip Sensor
-Calibration page, where it appears as "Grip Sensor Range" and "Flicker Guard
-Size". Written with an ID_SET_SETTINGS_VALUES feature report through
-SDL_SendGamepadEffect.
+Triton uses auxiliary-capacitance settings 0x22/0x23, verified from Steam's
+personalization path. The older generic TIMP pair was another incorrect
+implementation. Hysteresis is written independently, not subtracted from the
+activation threshold. Numeric coverage lives in run_grip_harness.py.
 """
 import re
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
 SDL = (ROOT / 'JoyShockMapper/src/SDLWrapper.cpp').read_text()
+GRIP = (ROOT / 'JoyShockMapper/include/TritonGripSettings.h').read_text()
 MAIN = (ROOT / 'JoyShockMapper/src/main.cpp').read_text()
 JSLW_H = (ROOT / 'JoyShockMapper/include/JslWrapper.h').read_text()
 JSLW_CPP = (ROOT / 'JoyShockMapper/src/JslWrapper.cpp').read_text()
@@ -70,8 +70,6 @@ def test_firmware_setting_numbers_match_sdl_header():
     by contract, so a mismatch here means someone mistyped an index."""
     expected = {
         'TRITON_ID_SET_SETTINGS_VALUES': 0x87,
-        'TRITON_SETTING_TIMP_TOUCH_THRESHOLD_ON': 72,
-        'TRITON_SETTING_TIMP_TOUCH_THRESHOLD_OFF': 73,
         'TRITON_ID_OUT_REPORT_HAPTIC_COMMAND': 0x82,
     }
     for name, value in expected.items():
@@ -114,21 +112,22 @@ def test_unset_thresholds_never_overwrite_the_firmware():
     install would stamp our defaults over whatever the device (or Steam) had,
     and a bad guess at the raw units could leave the pads unresponsive."""
     body = SDL.split('void applyTritonSettings', 1)[1].split('\n\tint pollDevices', 1)[0]
-    assert 'value < 0.f ? -1' in body
-    for setting in ('range', 'releasePoint'):
-        assert f'{setting} >= 0 && {setting} != device->_applied' in body, setting
+    assert 'triton_grip::threshold(' in body
+    assert 'triton_grip::hysteresis(' in body
+    assert 'triton_grip::pending(' in body
+    assert 'value < 0 ? -1' in GRIP
     for name in ('GRIP_SENSOR_RANGE', 'GRIP_FLICKER_GUARD'):
         assert re.search(rf'SettingID::{name}, -1\.f\)', MAIN), name
         assert re.search(rf'{name}[\s\S]{{0,400}}?setFilter\(&filterFirmwareThreshold\)', MAIN), name
     assert 'if (next < 0.f)' in MAIN.split('float filterFirmwareThreshold', 1)[1][:300]
 
 
-def test_flicker_guard_is_a_distance_below_the_trip_point():
-    """The user sets a guard *size*, the way Steam Input presents it; the firmware
-    wants the release point itself. Converting in the wrong direction, or letting
-    the release point rise above the trip point, latches the sensor on."""
+def test_flicker_guard_uses_triton_setting_independently():
     body = SDL.split('void applyTritonSettings', 1)[1].split('\n\tint pollDevices', 1)[0]
-    assert 'releasePoint = guard >= 0 ? std::max(0, range - guard) : range;' in body
+    assert 'range - guard' not in body
+    assert 'TRITON_SETTING_TIMP_TOUCH_THRESHOLD' not in SDL
+    assert 'thresholdSetting = 0x22' in GRIP
+    assert 'hysteresisSetting = 0x23' in GRIP
 
 
 def test_grip_haptics_are_edge_triggered_and_off_by_default():
