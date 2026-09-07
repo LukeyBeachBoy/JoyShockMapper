@@ -437,8 +437,15 @@ enum class SettingID
 	TOUCHPAD_CLICK_DAMPEN,
 	// Analog pad pressure at which that damping starts easing in, so the cursor
 	// is already settling before the click registers rather than stopping dead on
-	// the switch. 0 damps only while the click is physically held.
+	// the switch. 0 damps only while the click is physically held. Shared with
+	// GYRO_CLICK_DAMPEN: one press, so one description of how far into it you are.
 	TOUCHPAD_CLICK_DAMPEN_THRESHOLD,
+	// The same press, applied to the gyro. Pressing a pad shoves the whole
+	// controller, so a setup that pans with the pad and aims with the gyro gets
+	// the jolt twice over -- once through the pad and once through the IMU.
+	// Its own amount rather than sharing TOUCHPAD_CLICK_DAMPEN, because which of
+	// the two outputs needs quieting depends on what the pad is even doing.
+	GYRO_CLICK_DAMPEN,
 };
 
 // constexpr are like #define but with respect to typeness

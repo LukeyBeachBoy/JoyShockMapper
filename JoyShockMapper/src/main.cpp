@@ -330,13 +330,14 @@ static void updatePadClickHaptics(shared_ptr<JoyShock> &js, bool leftDown, bool 
 //
 // padPressure defaults to 0 and clickHeld to false, which is "no damping" -- the
 // touch harnesses call this without either.
-static float clickDampen(shared_ptr<JoyShock> &js, float padPressure, bool clickHeld)
+// How far into a press one pad is, 0 (resting) to 1 (clicked). The shape of the
+// press, with no opinion about what it should silence -- the trackpad's own
+// output and the gyro's each scale it by their own amount, because pressing the
+// pad disturbs both and someone may well want only one of them quieted.
+static float computePadPressLevel(shared_ptr<JoyShock> &js, float padPressure, bool clickHeld)
 {
-	const float amount = std::clamp(js->getSetting(SettingID::TOUCHPAD_CLICK_DAMPEN), 0.f, 1.f);
-	if (amount <= 0.f)
-		return 0.f;
 	if (clickHeld)
-		return amount;
+		return 1.f;
 
 	const float threshold = js->getSetting(SettingID::TOUCHPAD_CLICK_DAMPEN_THRESHOLD);
 	if (threshold <= 0.f || !std::isfinite(padPressure) || padPressure <= threshold)
@@ -344,9 +345,17 @@ static float clickDampen(shared_ptr<JoyShock> &js, float padPressure, bool click
 
 	// Linear from the threshold to the top of the pressure scale. A pad that
 	// clicks well before full scale simply reaches the switch part-way up this
-	// ramp, where clickHeld takes over and pins it to `amount` anyway.
+	// ramp, where clickHeld takes over and pins it to 1 anyway.
 	const float span = std::max(1.f - threshold, 1e-4f);
-	return amount * std::clamp((padPressure - threshold) / span, 0.f, 1.f);
+	return std::clamp((padPressure - threshold) / span, 0.f, 1.f);
+}
+
+static float clickDampen(shared_ptr<JoyShock> &js, float padPressure, bool clickHeld)
+{
+	const float amount = std::clamp(js->getSetting(SettingID::TOUCHPAD_CLICK_DAMPEN), 0.f, 1.f);
+	if (amount <= 0.f)
+		return 0.f;
+	return amount * computePadPressLevel(js, padPressure, clickHeld);
 }
 
 static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POINT &point,
@@ -604,6 +613,24 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		{
 			js->_context->chordStack.erase(currentlyActive);
 		}
+	}
+
+	// Whichever pad is being pressed harder, for the gyro to damp against. Read
+	// here rather than in the poll callback because this is where the pressure
+	// already is, and computed for both pads whatever mode they are in: pressing
+	// a pad shoves the controller regardless of what that pad is bound to.
+	if (isSteam)
+	{
+		js->padPressLevel = std::max(
+		  computePadPressLevel(js, newState.t0Pressure, js->isPressed(ButtonID::MISC3)),
+		  computePadPressLevel(js, newState.t1Pressure, js->isPressed(ButtonID::MISC2)));
+	}
+	else
+	{
+		// One pad, one click, and no pressure channel on these controllers -- so
+		// only the held-click half of the press level ever registers here.
+		js->padPressLevel = computePadPressLevel(js,
+		  std::max(newState.t0Pressure, newState.t1Pressure), js->isPressed(ButtonID::CAPTURE));
 	}
 
 	if (isSteam)
@@ -1565,6 +1592,22 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	{
 		gyroXVelocity *= decelBrakeMultiplier;
 		gyroYVelocity *= decelBrakeMultiplier;
+	}
+
+	// Pressing a trackpad shoves the whole controller, and the IMU reports that
+	// shove as honestly as it reports aiming. A setup that pans with the pad and
+	// makes fine corrections with the gyro therefore gets the jolt twice over --
+	// TOUCHPAD_CLICK_DAMPEN quiets the pad's own contribution, this quiets the
+	// gyro's. Applied here, alongside the deceleration brake, so it reaches the
+	// gyro-as-stick output too and not only the mouse path.
+	{
+		const float gyroDampen = std::clamp(jc->getSetting(SettingID::GYRO_CLICK_DAMPEN), 0.f, 1.f);
+		if (gyroDampen > 0.f && jc->padPressLevel > 0.f)
+		{
+			const float scale = std::max(0.f, 1.f - gyroDampen * jc->padPressLevel);
+			gyroXVelocity *= scale;
+			gyroYVelocity *= scale;
+		}
 	}
 
 	TelemetrySample telemetrySample;
@@ -4111,7 +4154,17 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	touch_click_dampen_threshold->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
 	SettingsManager::add(touch_click_dampen_threshold);
 	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_CLICK_DAMPEN_THRESHOLD", *touch_click_dampen_threshold))
-	                       ->setHelp("Pad pressure, 0 to 1, at which TOUCHPAD_CLICK_DAMPEN starts easing in, before the click itself registers. Lower reacts earlier but bites during firm ordinary swipes. 0 (default) damps only while the click is physically held. The live pressure reading is on the Controller Status page."));
+	                       ->setHelp("Pad pressure, 0 to 1, at which TOUCHPAD_CLICK_DAMPEN and GYRO_CLICK_DAMPEN start easing in, before the click itself registers. Lower reacts earlier but bites during firm ordinary swipes. 0 (default) damps only while the click is physically held. The live pressure reading is on the Controller Status page."));
+
+	// The same press, on the other input it disturbs. Separate from the trackpad's
+	// own amount because which output needs quieting depends on what the pad does:
+	// panning with the pad and correcting with the gyro wants both, a pad used
+	// only as buttons wants the gyro one alone.
+	auto gyro_click_dampen = new JSMSetting<float>(SettingID::GYRO_CLICK_DAMPEN, 0.f);
+	gyro_click_dampen->setFilter([](auto, auto next) { return clamp(next, 0.f, 1.f); });
+	SettingsManager::add(gyro_click_dampen);
+	commandRegistry->add((new JSMAssignment<float>("GYRO_CLICK_DAMPEN", *gyro_click_dampen))
+	                       ->setHelp("How much gyro output to suppress while a trackpad is being pressed, 0 to 1. Pressing a pad shoves the whole controller and the gyro reports that shove as aiming, so a setup that pans with the pad and corrects with the gyro gets the jolt twice. 1 freezes the gyro while the pad is clicked. Uses the same pressure ramp as TOUCHPAD_CLICK_DAMPEN_THRESHOLD. 0 (default) disables it."));
 
 	auto hide_minimized = new JSMVariable<Switch>(Switch::OFF);
 	minimizeThread.reset(new PollingThread( "Minimize thread", [] (void *param)

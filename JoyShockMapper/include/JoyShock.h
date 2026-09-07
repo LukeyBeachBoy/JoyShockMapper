@@ -330,6 +330,12 @@ public:
 	// pulse would replay for every poll the pad stayed held down.
 	bool padClickWasOn[2] = { false, false };
 
+	// How far into a press the harder-pressed pad is, 0 to 1. Written by the touch
+	// callback, read by the gyro path a tick later -- the poll callback runs first,
+	// so the gyro sees the press about 3ms after the pad does, which is well under
+	// the time it takes a thumb to actually push the switch down.
+	float padPressLevel = 0.f;
+
 	// Plays one of the controller's own effects on this controller's actuators.
 	// Public because the touch path in main.cpp drives the pad haptics directly,
 	// rather than going through a binding the way sendHaptic's other caller does.
