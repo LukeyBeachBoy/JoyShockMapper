@@ -424,6 +424,12 @@ enum class SettingID
 	// distance, so it gets its own pair instead of sharing the ticks above.
 	TOUCHPAD_CLICK_HAPTIC_INTENSITY,
 	TOUCHPAD_CLICK_HAPTIC_EFFECT,
+	// And the matching pair for letting the click back up. The pad's switch
+	// releases well before your thumb leaves it, so without a pulse there is
+	// nothing telling you the binding has actually let go. Independent of the
+	// press pulse so the two can feel different, or either can run alone.
+	TOUCHPAD_RELEASE_HAPTIC_INTENSITY,
+	TOUCHPAD_RELEASE_HAPTIC_EFFECT,
 };
 
 // constexpr are like #define but with respect to typeness

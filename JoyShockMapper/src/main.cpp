@@ -272,22 +272,41 @@ static float rescaleAdjustedSpeed(float vAdjusted, const AccelCurveShape &from, 
 	return t * toRange;
 }
 
-// Fires the pad-click confirmation pulse on whichever pad just went down, and
-// only on the poll it went down. Left is pipeline/side index 0, right is 1,
-// matching touchPipelines and the firmware's own side bitmask.
+// Fires the pad-click pulses on whichever pad just changed, and only on the poll
+// it changed. Left is pipeline/side index 0, right is 1, matching touchPipelines
+// and the firmware's own side bitmask.
+//
+// Press and release carry independent settings: the pad's switch lets go well
+// before your thumb leaves it, so the release pulse is the only thing that tells
+// you the binding has actually stopped firing, and someone may want that alone.
 static void updatePadClickHaptics(shared_ptr<JoyShock> &js, bool leftDown, bool rightDown)
 {
-	const float intensity = js->getSetting(SettingID::TOUCHPAD_CLICK_HAPTIC_INTENSITY);
-	const auto effect = js->getSetting<HapticEffect>(SettingID::TOUCHPAD_CLICK_HAPTIC_EFFECT);
-	const bool enabled = intensity > 0.f && effect != HapticEffect::OFF && effect != HapticEffect::INVALID;
+	const auto usable = [](float intensity, HapticEffect effect)
+	{
+		return intensity > 0.f && effect != HapticEffect::OFF && effect != HapticEffect::INVALID;
+	};
+
+	const float pressIntensity = js->getSetting(SettingID::TOUCHPAD_CLICK_HAPTIC_INTENSITY);
+	const auto pressEffect = js->getSetting<HapticEffect>(SettingID::TOUCHPAD_CLICK_HAPTIC_EFFECT);
+	const float releaseIntensity = js->getSetting(SettingID::TOUCHPAD_RELEASE_HAPTIC_INTENSITY);
+	const auto releaseEffect = js->getSetting<HapticEffect>(SettingID::TOUCHPAD_RELEASE_HAPTIC_EFFECT);
 	const bool down[2] = { leftDown, rightDown };
 
 	for (int side = 0; side < 2; ++side)
 	{
-		// Tracked even while disabled, so turning the pulse on with a pad already
-		// held down doesn't fire for a press that happened before it existed.
-		if (enabled && down[side] && !js->padClickWasOn[side])
-			js->fireHaptic(side == 1 ? 2 : 1, int(effect), hapticGainDb(intensity));
+		const int sideMask = side == 1 ? 2 : 1;
+		// Tracked even while disabled, so turning a pulse on with a pad already
+		// held down doesn't fire for an edge that happened before it existed.
+		if (down[side] && !js->padClickWasOn[side])
+		{
+			if (usable(pressIntensity, pressEffect))
+				js->fireHaptic(sideMask, int(pressEffect), hapticGainDb(pressIntensity));
+		}
+		else if (!down[side] && js->padClickWasOn[side])
+		{
+			if (usable(releaseIntensity, releaseEffect))
+				js->fireHaptic(sideMask, int(releaseEffect), hapticGainDb(releaseIntensity));
+		}
 		js->padClickWasOn[side] = down[side];
 	}
 }
@@ -4008,6 +4027,21 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(touch_click_haptic_effect);
 	commandRegistry->add((new JSMAssignment<HapticEffect>("TOUCHPAD_CLICK_HAPTIC_EFFECT", *touch_click_haptic_effect))
 	                       ->setHelp("Which effect the pad actuator plays when you click the pad down. Same valid values as TOUCHPAD_HAPTIC_EFFECT. Defaults to CLICK."));
+
+	// The other half of the click. The pad's switch releases while your thumb is
+	// still resting on it, so this pulse is the only feedback that the click
+	// binding has stopped firing. Independent of the press pulse above.
+	auto touch_release_haptic = new JSMSetting<float>(SettingID::TOUCHPAD_RELEASE_HAPTIC_INTENSITY, 0.f);
+	touch_release_haptic->setFilter([](auto, auto next) { return clamp(next, 0.f, 100.f); });
+	SettingsManager::add(touch_release_haptic);
+	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_RELEASE_HAPTIC_INTENSITY", *touch_release_haptic))
+	                       ->setHelp("Strength of the pulse that pad's actuator plays when you let the pad click back up, 0-100. Tells you the click binding has released, which the switch does before your thumb leaves the pad. 0 (default) disables it, independent of TOUCHPAD_CLICK_HAPTIC_INTENSITY."));
+
+	auto touch_release_haptic_effect = new JSMSetting<HapticEffect>(SettingID::TOUCHPAD_RELEASE_HAPTIC_EFFECT, HapticEffect::TICK);
+	touch_release_haptic_effect->setFilter(&filterInvalidValue<HapticEffect, HapticEffect::INVALID>);
+	SettingsManager::add(touch_release_haptic_effect);
+	commandRegistry->add((new JSMAssignment<HapticEffect>("TOUCHPAD_RELEASE_HAPTIC_EFFECT", *touch_release_haptic_effect))
+	                       ->setHelp("Which effect the pad actuator plays when you let the pad click back up. Same valid values as TOUCHPAD_HAPTIC_EFFECT. Defaults to TICK, lighter than the press so the two edges are told apart."));
 
 	auto hide_minimized = new JSMVariable<Switch>(Switch::OFF);
 	minimizeThread.reset(new PollingThread( "Minimize thread", [] (void *param)
