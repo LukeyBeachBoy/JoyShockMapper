@@ -626,6 +626,11 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 
 	bool isSteam = js->_controllerType == JS_TYPE_STEAM_CONTROLLER_2026;
 	auto mode = js->getSetting<TouchpadMode>(SettingID::TOUCHPAD_MODE);
+	auto gridChord = [&](SettingID modeId) {
+		for (auto chord : js->_context->chordStack)
+			if (SettingsManager::get<TouchpadMode>(modeId)->chordedValue(chord)) return int(chord);
+		return int(ButtonID::NONE);
+	};
 
 	// Clear touch chords when no fingers are down
 	if (!point0.isDown() && !point1.isDown())
@@ -681,10 +686,10 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
             }
             js->handleTouchStickChange(js->_touchpads[pad], false, 0.f, 0.f, delta_time);
         };
-        if (js->touchGridActive[0] && leftMode != TouchpadMode::GRID_AND_STICK) releaseGrid(left_grid_mappings, FIRST_LEFT_TOUCH_BUTTON, 0);
-        if (js->touchGridActive[1] && rightMode != TouchpadMode::GRID_AND_STICK) releaseGrid(right_grid_mappings, FIRST_RIGHT_TOUCH_BUTTON, 1);
-        js->touchGridActive[0] = leftMode == TouchpadMode::GRID_AND_STICK;
-        js->touchGridActive[1] = rightMode == TouchpadMode::GRID_AND_STICK;
+		const auto leftSize = js->getSetting<FloatXY>(SettingID::LEFT_GRID_SIZE);
+		const auto rightSize = js->getSetting<FloatXY>(SettingID::RIGHT_GRID_SIZE);
+		if (js->touchGridRouting[0].update(leftMode == TouchpadMode::GRID_AND_STICK, gridChord(SettingID::LEFT_TOUCHPAD_MODE), int(leftSize.x()), int(leftSize.y()))) releaseGrid(left_grid_mappings, FIRST_LEFT_TOUCH_BUTTON, 0);
+		if (js->touchGridRouting[1].update(rightMode == TouchpadMode::GRID_AND_STICK, gridChord(SettingID::RIGHT_TOUCHPAD_MODE), int(rightSize.x()), int(rightSize.y()))) releaseGrid(right_grid_mappings, FIRST_RIGHT_TOUCH_BUTTON, 1);
 		// NOTE: the pipelines are deliberately NOT reset here on finger-up. Resetting
 		// unconditionally wiped trackball momentum before it could ever be applied.
 		// processTouchMouse owns the lifecycle instead.
@@ -692,19 +697,13 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		// Process left pad
 		if (leftMode == TouchpadMode::GRID_AND_STICK)
 		{
-			auto &grid_size = *SettingsManager::getV<FloatXY>(SettingID::LEFT_GRID_SIZE);
+			const auto grid_size = js->getSetting<FloatXY>(SettingID::LEFT_GRID_SIZE);
 			// LEFT_GRID_REQUIRES_CLICK gates activation on the left pad's own click
 			// (MISC3) rather than mere contact, so resting a finger over a region
 			// previews it (via the live diagram) without firing it.
 			bool leftGridActive = point0.isDown()
 			  && (js->getSetting<Switch>(SettingID::LEFT_GRID_REQUIRES_CLICK) != Switch::ON || js->isPressed(ButtonID::MISC3));
-			int index = -1;
-			if (leftGridActive)
-			{
-				float row = std::clamp(floorf(point0.posY * grid_size.value().y()), 0.f, grid_size.value().y() - 1.f);
-				float col = std::clamp(floorf(point0.posX * grid_size.value().x()), 0.f, grid_size.value().x() - 1.f);
-				index = int(row * grid_size.value().x() + col);
-			}
+			const int index = touchGridCell(leftGridActive, point0.posX, point0.posY, int(grid_size.x()), int(grid_size.y()));
 			for (size_t i = 0; i < left_grid_mappings.size(); ++i)
 			{
 				auto optId = magic_enum::enum_cast<ButtonID>(int(FIRST_LEFT_TOUCH_BUTTON + i));
@@ -725,18 +724,12 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		// Process right pad
 		if (rightMode == TouchpadMode::GRID_AND_STICK)
 		{
-			auto &grid_size = *SettingsManager::getV<FloatXY>(SettingID::RIGHT_GRID_SIZE);
+			const auto grid_size = js->getSetting<FloatXY>(SettingID::RIGHT_GRID_SIZE);
 			// RIGHT_GRID_REQUIRES_CLICK gates activation on the right pad's own
 			// click (MISC2), mirroring LEFT_GRID_REQUIRES_CLICK above.
 			bool rightGridActive = point1.isDown()
 			  && (js->getSetting<Switch>(SettingID::RIGHT_GRID_REQUIRES_CLICK) != Switch::ON || js->isPressed(ButtonID::MISC2));
-			int index = -1;
-			if (rightGridActive)
-			{
-				float row = std::clamp(floorf(point1.posY * grid_size.value().y()), 0.f, grid_size.value().y() - 1.f);
-				float col = std::clamp(floorf(point1.posX * grid_size.value().x()), 0.f, grid_size.value().x() - 1.f);
-				index = int(row * grid_size.value().x() + col);
-			}
+			const int index = touchGridCell(rightGridActive, point1.posX, point1.posY, int(grid_size.x()), int(grid_size.y()));
 			for (size_t i = 0; i < right_grid_mappings.size(); ++i)
 			{
 				auto optId = magic_enum::enum_cast<ButtonID>(int(FIRST_RIGHT_TOUCH_BUTTON + i));
@@ -758,9 +751,16 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 	{
 		// --- Legacy single-pad behavior (DS4, DualSense, etc.) ---
 		if (mode != TouchpadMode::MOUSE) js->touchPipelines[0].reset();
+		const auto size = js->getSetting<FloatXY>(SettingID::GRID_SIZE);
+		if (js->touchGridRouting[0].update(mode == TouchpadMode::GRID_AND_STICK, gridChord(SettingID::TOUCHPAD_MODE), int(size.x()), int(size.y())))
+		{
+			for (size_t i = 0; i < grid_mappings.size(); ++i)
+				js->handleButtonChange(*magic_enum::enum_cast<ButtonID>(int(FIRST_TOUCH_BUTTON + i)), false);
+			for (auto &pad : js->_touchpads) js->handleTouchStickChange(pad, false, 0.f, 0.f, delta_time);
+		}
 		if (mode == TouchpadMode::GRID_AND_STICK)
 		{
-			auto &grid_size = *SettingsManager::getV<FloatXY>(SettingID::GRID_SIZE);
+			const auto grid_size = js->getSetting<FloatXY>(SettingID::GRID_SIZE);
 			// TOUCHPAD_GRID_REQUIRES_CLICK gates activation on the pad's physical
 			// click (CAPTURE) rather than mere capacitive contact, so a finger
 			// resting over a region previews it without firing it.
@@ -770,15 +770,15 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			if (point0.isDown() && clickHeld)
 			{
 				point0.posY += 1e-6f;
-				float row = std::clamp(floorf(point0.posY * grid_size.value().y()), 0.f, grid_size.value().y() - 1.f);
-				float col = std::clamp(floorf(point0.posX * grid_size.value().x()), 0.f, grid_size.value().x() - 1.f);
-				index0 = int(row * grid_size.value().x() + col);
+				float row = std::clamp(floorf(point0.posY * grid_size.y()), 0.f, grid_size.y() - 1.f);
+				float col = std::clamp(floorf(point0.posX * grid_size.x()), 0.f, grid_size.x() - 1.f);
+				index0 = int(row * grid_size.x() + col);
 			}
 			if (point1.isDown() && clickHeld)
 			{
-				float row = std::clamp(floorf(point1.posY * grid_size.value().y()), 0.f, grid_size.value().y() - 1.f);
-				float col = std::clamp(floorf(point1.posX * grid_size.value().x()), 0.f, grid_size.value().x() - 1.f);
-				index1 = int(row * grid_size.value().x() + col);
+				float row = std::clamp(floorf(point1.posY * grid_size.y()), 0.f, grid_size.y() - 1.f);
+				float col = std::clamp(floorf(point1.posX * grid_size.x()), 0.f, grid_size.x() - 1.f);
+				index1 = int(row * grid_size.x() + col);
 			}
 			for (size_t i = 0; i < grid_mappings.size(); ++i)
 			{
@@ -3007,133 +3007,60 @@ void refreshAutoLoadHelp(JSMAssignment<Switch> *autoloadCmd)
 	autoloadCmd->setHelp(ss.str());
 }
 
-void onNewGridDimensions(CmdRegistry *registry, const FloatXY &newGridDims)
+void onNewGridDimensions(CmdRegistry *registry, const FloatXY &)
 {
-	_ASSERT_EXPR(registry, U("You forgot to bind the command registry properly!"));
-	auto numberOfButtons = size_t(newGridDims.first * newGridDims.second);
-
-	if (numberOfButtons < grid_mappings.size())
+	// Register every possible cell once. Layout changes only change dispatch;
+	// shrinking a base grid must not delete bindings used by a larger modeshift.
+	while (grid_mappings.size() < MAX_GRID_BUTTONS)
 	{
-		// Remove all extra touch button commands
-		bool successfulRemove = true;
-		for (auto id = FIRST_TOUCH_BUTTON + numberOfButtons; successfulRemove; ++id)
-		{
-			string name(magic_enum::enum_name(*magic_enum::enum_cast<ButtonID>(id)));
-			successfulRemove = registry->Remove(name);
-		}
-
-		// Remove extra touch button variables. This has to happen before the
-		// DigitalButtons are resized: each one holds a reference to the JSMButton
-		// it was built from, so resizing first left buttons referring to entries
-		// that were about to be popped.
-		while (grid_mappings.size() > numberOfButtons)
-			grid_mappings.pop_back();
-
-		// For all joyshocks, remove extra touch DigitalButtons
-		for (auto &js : handle_to_joyshock)
-		{
-			lock_guard guard(js.second->_context->callback_lock);
-			js.second->updateGridSize();
-		}
+		const int id = FIRST_TOUCH_BUTTON + int(grid_mappings.size());
+		JSMButton button(*magic_enum::enum_cast<ButtonID>(id), Mapping::NO_MAPPING);
+		button.setFilter(&filterMapping);
+		grid_mappings.push_back(button);
+		registry->add(new JSMAssignment<Mapping>(grid_mappings.back()));
 	}
-	else if (numberOfButtons > grid_mappings.size())
+	for (auto &entry : handle_to_joyshock)
 	{
-		// Add new touch button variables and commands
-		for (int id = FIRST_TOUCH_BUTTON + int(grid_mappings.size()); grid_mappings.size() < numberOfButtons; ++id)
-		{
-			JSMButton touchButton(*magic_enum::enum_cast<ButtonID>(id), Mapping::NO_MAPPING);
-			touchButton.setFilter(&filterMapping);
-			grid_mappings.push_back(touchButton);
-			registry->add(new JSMAssignment<Mapping>(grid_mappings.back()));
-		}
-
-		// For all joyshocks, remove extra touch DigitalButtons
-		for (auto &js : handle_to_joyshock)
-		{
-			lock_guard guard(js.second->_context->callback_lock);
-			js.second->updateGridSize();
-		}
-	}
-	// Else numbers are the same, possibly just reconfigured
-}
-
-void onNewLeftGridDimensions(CmdRegistry *registry, const FloatXY &newGridDims)
-{
-	_ASSERT_EXPR(registry, U("You forgot to bind the command registry properly!"));
-	auto numberOfButtons = size_t(newGridDims.first * newGridDims.second);
-
-	if (numberOfButtons < left_grid_mappings.size())
-	{
-		bool successfulRemove = true;
-		for (auto id = FIRST_LEFT_TOUCH_BUTTON + numberOfButtons; successfulRemove; ++id)
-		{
-			string name(magic_enum::enum_name(*magic_enum::enum_cast<ButtonID>(id)));
-			successfulRemove = registry->Remove(name);
-		}
-		while (left_grid_mappings.size() > numberOfButtons)
-			left_grid_mappings.pop_back();
-
-		for (auto &js : handle_to_joyshock)
-		{
-			lock_guard guard(js.second->_context->callback_lock);
-			js.second->updateGridSize();
-		}
-	}
-	else if (numberOfButtons > left_grid_mappings.size())
-	{
-		for (int id = FIRST_LEFT_TOUCH_BUTTON + int(left_grid_mappings.size()); left_grid_mappings.size() < numberOfButtons; ++id)
-		{
-			JSMButton touchButton(*magic_enum::enum_cast<ButtonID>(id), Mapping::NO_MAPPING);
-			touchButton.setFilter(&filterMapping);
-			left_grid_mappings.push_back(touchButton);
-			registry->add(new JSMAssignment<Mapping>(left_grid_mappings.back()));
-		}
-
-		for (auto &js : handle_to_joyshock)
-		{
-			lock_guard guard(js.second->_context->callback_lock);
-			js.second->updateGridSize();
-		}
+		lock_guard guard(entry.second->_context->callback_lock);
+		entry.second->updateGridSize();
 	}
 }
 
-void onNewRightGridDimensions(CmdRegistry *registry, const FloatXY &newGridDims)
+void onNewLeftGridDimensions(CmdRegistry *registry, const FloatXY &)
 {
-	_ASSERT_EXPR(registry, U("You forgot to bind the command registry properly!"));
-	auto numberOfButtons = size_t(newGridDims.first * newGridDims.second);
-
-	if (numberOfButtons < right_grid_mappings.size())
+	// Register every possible cell once. Layout changes only change dispatch;
+	// shrinking a base grid must not delete bindings used by a larger modeshift.
+	while (left_grid_mappings.size() < MAX_GRID_BUTTONS)
 	{
-		bool successfulRemove = true;
-		for (auto id = FIRST_RIGHT_TOUCH_BUTTON + numberOfButtons; successfulRemove; ++id)
-		{
-			string name(magic_enum::enum_name(*magic_enum::enum_cast<ButtonID>(id)));
-			successfulRemove = registry->Remove(name);
-		}
-		while (right_grid_mappings.size() > numberOfButtons)
-			right_grid_mappings.pop_back();
-
-		for (auto &js : handle_to_joyshock)
-		{
-			lock_guard guard(js.second->_context->callback_lock);
-			js.second->updateGridSize();
-		}
+		const int id = FIRST_LEFT_TOUCH_BUTTON + int(left_grid_mappings.size());
+		JSMButton button(*magic_enum::enum_cast<ButtonID>(id), Mapping::NO_MAPPING);
+		button.setFilter(&filterMapping);
+		left_grid_mappings.push_back(button);
+		registry->add(new JSMAssignment<Mapping>(left_grid_mappings.back()));
 	}
-	else if (numberOfButtons > right_grid_mappings.size())
+	for (auto &entry : handle_to_joyshock)
 	{
-		for (int id = FIRST_RIGHT_TOUCH_BUTTON + int(right_grid_mappings.size()); right_grid_mappings.size() < numberOfButtons; ++id)
-		{
-			JSMButton touchButton(*magic_enum::enum_cast<ButtonID>(id), Mapping::NO_MAPPING);
-			touchButton.setFilter(&filterMapping);
-			right_grid_mappings.push_back(touchButton);
-			registry->add(new JSMAssignment<Mapping>(right_grid_mappings.back()));
-		}
+		lock_guard guard(entry.second->_context->callback_lock);
+		entry.second->updateGridSize();
+	}
+}
 
-		for (auto &js : handle_to_joyshock)
-		{
-			lock_guard guard(js.second->_context->callback_lock);
-			js.second->updateGridSize();
-		}
+void onNewRightGridDimensions(CmdRegistry *registry, const FloatXY &)
+{
+	// Register every possible cell once. Layout changes only change dispatch;
+	// shrinking a base grid must not delete bindings used by a larger modeshift.
+	while (right_grid_mappings.size() < MAX_GRID_BUTTONS)
+	{
+		const int id = FIRST_RIGHT_TOUCH_BUTTON + int(right_grid_mappings.size());
+		JSMButton button(*magic_enum::enum_cast<ButtonID>(id), Mapping::NO_MAPPING);
+		button.setFilter(&filterMapping);
+		right_grid_mappings.push_back(button);
+		registry->add(new JSMAssignment<Mapping>(right_grid_mappings.back()));
+	}
+	for (auto &entry : handle_to_joyshock)
+	{
+		lock_guard guard(entry.second->_context->callback_lock);
+		entry.second->updateGridSize();
 	}
 }
 
@@ -3887,12 +3814,12 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(SettingID::AUTOCONNECT, autoConnectSwitch);
 	commandRegistry->add((new JSMAssignment<Switch>("AUTOCONNECT", *autoConnectSwitch))->setHelp("Enable or disable device hotplugging. Valid values are ON and OFF."));
 
-	auto grid_size = new JSMVariable(FloatXY{ 2.f, 1.f });
+	auto grid_size = new JSMSetting<FloatXY>(SettingID::GRID_SIZE, FloatXY{ 2.f, 1.f });
 	grid_size->setFilter([](auto current, auto next)
 	  {
 		float floorX = floorf(next.x());
 		float floorY = floorf(next.y());
-		return floorX * floorY >= 1 && floorX * floorY <= 25 ? FloatXY{ floorX, floorY } : current; });
+		return floorX >= 1 && floorY >= 1 && floorX * floorY <= 25 ? FloatXY{ floorX, floorY } : current; });
 	grid_size->addOnChangeListener(bind(&onNewGridDimensions, commandRegistry, placeholders::_1), true); // Call the listener now
 	SettingsManager::add(SettingID::GRID_SIZE, grid_size);
 	commandRegistry->add((new JSMAssignment<FloatXY>("GRID_SIZE", *grid_size))
@@ -4261,10 +4188,10 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 		commandRegistry->add((new JSMAssignment<TouchpadMode>("LEFT_TOUCHPAD_MODE", *left_touchpad_mode))
 		                       ->setHelp("Assign a mode to the left touchpad. Valid values are GRID_AND_STICK or MOUSE."));
 
-		auto left_grid_size = new JSMVariable(FloatXY{ 2.f, 1.f });
+		auto left_grid_size = new JSMSetting<FloatXY>(SettingID::LEFT_GRID_SIZE, FloatXY{ 2.f, 1.f });
 		left_grid_size->setFilter([](auto current, auto next)
 		  { float floorX = floorf(next.x()); float floorY = floorf(next.y());
-		    return floorX * floorY >= 1 && floorX * floorY <= 25 ? FloatXY{ floorX, floorY } : current; });
+		    return floorX >= 1 && floorY >= 1 && floorX * floorY <= 25 ? FloatXY{ floorX, floorY } : current; });
 		left_grid_size->addOnChangeListener(bind(&onNewLeftGridDimensions, commandRegistry, placeholders::_1), true);
 		SettingsManager::add(SettingID::LEFT_GRID_SIZE, left_grid_size);
 		commandRegistry->add((new JSMAssignment<FloatXY>("LEFT_GRID_SIZE", *left_grid_size))
@@ -4327,10 +4254,10 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 		commandRegistry->add((new JSMAssignment<TouchpadMode>("RIGHT_TOUCHPAD_MODE", *right_touchpad_mode))
 		                       ->setHelp("Assign a mode to the right touchpad. Valid values are GRID_AND_STICK or MOUSE."));
 
-		auto right_grid_size = new JSMVariable(FloatXY{ 2.f, 1.f });
+		auto right_grid_size = new JSMSetting<FloatXY>(SettingID::RIGHT_GRID_SIZE, FloatXY{ 2.f, 1.f });
 		right_grid_size->setFilter([](auto current, auto next)
 		  { float floorX = floorf(next.x()); float floorY = floorf(next.y());
-		    return floorX * floorY >= 1 && floorX * floorY <= 25 ? FloatXY{ floorX, floorY } : current; });
+		    return floorX >= 1 && floorY >= 1 && floorX * floorY <= 25 ? FloatXY{ floorX, floorY } : current; });
 		right_grid_size->addOnChangeListener(bind(&onNewRightGridDimensions, commandRegistry, placeholders::_1), true);
 		SettingsManager::add(SettingID::RIGHT_GRID_SIZE, right_grid_size);
 		commandRegistry->add((new JSMAssignment<FloatXY>("RIGHT_GRID_SIZE", *right_grid_size))

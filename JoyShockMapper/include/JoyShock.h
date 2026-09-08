@@ -3,6 +3,7 @@
 #include "InputGuards.h"
 #include "JoyShockMapper.h"
 #include "TouchMouseResampler.h"
+#include "TouchGridRouting.h"
 #include "MotionIf.h"
 #include "DigitalButton.h"
 #include "Stick.h"
@@ -329,7 +330,7 @@ public:
 	// Keep independent filter state for dual-pad controllers; a left-pad sample
 	// must not influence the next right-pad sample.
 	TouchMousePipeline touchPipelines[2];
-	bool touchGridActive[2] = {};
+	TouchGridRouting touchGridRouting[2];
 
 	// Previous pad-click state, indexed the same way as touchPipelines (0 = left,
 	// 1 = right). The click haptic is edge-triggered off this: a level-triggered
