@@ -1,3 +1,4 @@
+#include "ConsoleFeed.h"
 #include <cstdlib>
 
 #include <string>
@@ -26,6 +27,7 @@ struct ColorStream : public std::stringbuf
 	~ColorStream()
 	{
 
+		ConsoleFeed::append(str());
 		(*stdio) << "\033[" << (color >> 8) << ';' << (color & 0x00FF) << 'm' << str() << "\033[0;" << DEFAULT_COLOR << 'm';
 	}
 };

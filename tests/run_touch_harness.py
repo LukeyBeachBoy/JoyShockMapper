@@ -23,6 +23,7 @@ ROOT = Path(__file__).parents[1]
 HEADER = ROOT / 'JoyShockMapper/include/JoyShock.h'
 MAIN = ROOT / 'JoyShockMapper/src/main.cpp'
 HARNESSES = [
+    Path(__file__).parent / 'input_guards_harness.cpp',
     Path(__file__).parent / 'touch_pipeline_harness.cpp',
     Path(__file__).parent / 'touch_short_gesture_harness.cpp',
     Path(__file__).parent / 'touch_retouch_harness.cpp',
@@ -102,13 +103,14 @@ def main() -> int:
         return path.read_text(encoding='utf-8')
     src = source(HEADER)
     try:
-        lifted = '#include "TouchMouseResampler.h"\n' + src[src.index(BEGIN):src.index(END)]
+        lifted = '#include "InputGuards.h"\n#include "TouchMouseResampler.h"\n' + src[src.index(BEGIN):src.index(END)]
     except ValueError:
         print(f'FAIL: could not locate {BEGIN!r}..{END!r} in {HEADER}')
         return 1
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
+        shutil.copyfile(ROOT / 'JoyShockMapper/include/InputGuards.h', tmp / 'InputGuards.h')
         shutil.copyfile(ROOT / 'JoyShockMapper/include/TouchMouseResampler.h', tmp / 'TouchMouseResampler.h')
         (tmp / 'lifted.inc').write_text(lifted, encoding='utf-8')
         filter_src = source(ROOT / 'JoyShockMapper/src/JoyShock.cpp')

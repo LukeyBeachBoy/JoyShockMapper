@@ -202,6 +202,7 @@ enum class SettingID
 		VIRTUAL_STICK_CALIBRATION,
 		IN_GAME_SENS,
 		TRIGGER_THRESHOLD,
+		TRIGGER_HYSTERESIS,
 		RESET_MAPPINGS,
 		IGNORE_GYRO_DEVICES,
 		NO_GYRO_BUTTON,
@@ -440,6 +441,7 @@ enum class SettingID
 	// the switch. 0 damps only while the click is physically held. Shared with
 	// GYRO_CLICK_DAMPEN: one press, so one description of how far into it you are.
 	TOUCHPAD_CLICK_DAMPEN_THRESHOLD,
+	TOUCHPAD_LIFT_SPEED,
 	// The same press, applied to the gyro. Pressing a pad shoves the whole
 	// controller, so a setup that pans with the pad and aims with the gyro gets
 	// the jolt twice over -- once through the pad and once through the IMU.

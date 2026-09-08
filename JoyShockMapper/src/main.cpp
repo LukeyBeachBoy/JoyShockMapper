@@ -408,6 +408,15 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		  js->getSetting(SettingID::TOUCHPAD_D_CUTOFF));
 
 		pipe.active = true;
+        const float padSpeed = hypotf(normalised.x() * tpSize.x(), normalised.y() * tpSize.y()) / std::max(pipe.consumedDt, 1e-4f);
+        pipe.fingerSpeed = hypotf(normalised.x() * tpSize.x() * sens.x(), normalised.y() * tpSize.y() * sens.y()) / std::max(pipe.consumedDt, 1e-4f);
+        const float liftScale = pipe.liftGuard.update(padPressure, padSpeed, js->getSetting(SettingID::TOUCHPAD_LIFT_SPEED));
+        if (liftScale < 1.f) {
+            pipe.momentumX = pipe.momentumY = 0.f;
+            // Suppressed release motion must never reappear as queued output.
+            pipe.output.reset();
+        }
+
 
 		// Unfiltered duplicate or confirmed hold. Finish previously computed
 		// displacement even when there is no new filter output this poll.
@@ -441,7 +450,7 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		// new goes out, the pacing already in flight still drains so a swipe that
 		// ended in a click does not lose its tail, and momentum is dropped so
 		// letting go cannot fling a coast out of the press itself.
-		if ((minMove > 0.f && (padTravel / sampleDt) < minMove) || dampen >= 1.f)
+		if ((minMove > 0.f && (padTravel / sampleDt) < minMove) || dampen >= 1.f || liftScale <= 0.f)
 		{
 			pipe.momentumX = 0.f;
 			pipe.momentumY = 0.f;
@@ -450,7 +459,7 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 			moveMouse(outX, outY);
 			return;
 		}
-		const float dampScale = 1.f - dampen;
+		const float dampScale = (1.f - dampen) * liftScale;
 
 		// Detent ticks every TOUCHPAD_HAPTIC_INTERVAL pad pixels of travel. The
 		// remainder carries over rather than resetting, so a slow drag ticks at the
@@ -480,6 +489,7 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		}
 
 		FloatXY scaled{ padDx * sens.x() * dampScale, padDy * sens.y() * dampScale };
+		pipe.fingerSpeed = hypotf(scaled.x(), scaled.y()) / sampleDt;
 
 		// Curve-based acceleration: a gain between TOUCHPAD_ACCEL_MIN_GAIN and
 		// _MAX_GAIN chosen from finger speed in px/s, using either the pad's own
@@ -514,8 +524,8 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		// Velocity, not this tick's displacement: the coast below re-integrates it
 		// against its own dt, so a jittering poll interval no longer shows up as a
 		// stuttering coast.
-		pipe.momentumX = moved.x() / sampleDt;
-		pipe.momentumY = moved.y() / sampleDt;
+		pipe.momentumX = liftScale < 1.f ? 0.f : moved.x() / sampleDt;
+		pipe.momentumY = liftScale < 1.f ? 0.f : moved.y() / sampleDt;
 
 		// Each displacement has its own finite delivery window. Later samples
 		// cannot starve, accelerate, or indefinitely delay an older remainder.
@@ -529,11 +539,13 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		// True only on the tick the finger actually left the pad.
 		const bool justLifted = pipe.contact;
 		pipe.contact = false;
+		pipe.fingerSpeed = 0.f;
 
 		// Whatever the pacing still owed goes out now: the gesture is over, so
 		// there is nothing left to spread it across, and holding it back would
 		// silently drop the tail of every swipe.
 		float outX, outY;
+		if (pipe.liftGuard.scale < 1.f) pipe.output.reset();
 		pipe.output.finish(outX, outY);
 		moveMouse(outX, outY);
 
@@ -661,6 +673,18 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		if (leftMode != TouchpadMode::MOUSE) js->touchPipelines[0].reset();
 		if (rightMode != TouchpadMode::MOUSE) js->touchPipelines[1].reset();
 
+
+        auto releaseGrid = [&](auto &mappings, int first, int pad) {
+            for (size_t i = 0; i < mappings.size(); ++i) {
+                auto id = magic_enum::enum_cast<ButtonID>(int(first + i));
+                if (id) js->handleButtonChange(*id, false);
+            }
+            js->handleTouchStickChange(js->_touchpads[pad], false, 0.f, 0.f, delta_time);
+        };
+        if (js->touchGridActive[0] && leftMode != TouchpadMode::GRID_AND_STICK) releaseGrid(left_grid_mappings, FIRST_LEFT_TOUCH_BUTTON, 0);
+        if (js->touchGridActive[1] && rightMode != TouchpadMode::GRID_AND_STICK) releaseGrid(right_grid_mappings, FIRST_RIGHT_TOUCH_BUTTON, 1);
+        js->touchGridActive[0] = leftMode == TouchpadMode::GRID_AND_STICK;
+        js->touchGridActive[1] = rightMode == TouchpadMode::GRID_AND_STICK;
 		// NOTE: the pipelines are deliberately NOT reset here on finger-up. Resetting
 		// unconditionally wiped trackball momentum before it could ever be applied.
 		// processTouchMouse owns the lifecycle instead.
@@ -677,8 +701,8 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			int index = -1;
 			if (leftGridActive)
 			{
-				float row = ceilf(point0.posY * grid_size.value().y()) - 1.f;
-				float col = ceilf(point0.posX * grid_size.value().x()) - 1.f;
+				float row = std::clamp(floorf(point0.posY * grid_size.value().y()), 0.f, grid_size.value().y() - 1.f);
+				float col = std::clamp(floorf(point0.posX * grid_size.value().x()), 0.f, grid_size.value().x() - 1.f);
 				index = int(row * grid_size.value().x() + col);
 			}
 			for (size_t i = 0; i < left_grid_mappings.size(); ++i)
@@ -709,8 +733,8 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			int index = -1;
 			if (rightGridActive)
 			{
-				float row = ceilf(point1.posY * grid_size.value().y()) - 1.f;
-				float col = ceilf(point1.posX * grid_size.value().x()) - 1.f;
+				float row = std::clamp(floorf(point1.posY * grid_size.value().y()), 0.f, grid_size.value().y() - 1.f);
+				float col = std::clamp(floorf(point1.posX * grid_size.value().x()), 0.f, grid_size.value().x() - 1.f);
 				index = int(row * grid_size.value().x() + col);
 			}
 			for (size_t i = 0; i < right_grid_mappings.size(); ++i)
@@ -746,14 +770,14 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			if (point0.isDown() && clickHeld)
 			{
 				point0.posY += 1e-6f;
-				float row = ceilf(point0.posY * grid_size.value().y()) - 1.f;
-				float col = ceilf(point0.posX * grid_size.value().x()) - 1.f;
+				float row = std::clamp(floorf(point0.posY * grid_size.value().y()), 0.f, grid_size.value().y() - 1.f);
+				float col = std::clamp(floorf(point0.posX * grid_size.value().x()), 0.f, grid_size.value().x() - 1.f);
 				index0 = int(row * grid_size.value().x() + col);
 			}
 			if (point1.isDown() && clickHeld)
 			{
-				float row = ceilf(point1.posY * grid_size.value().y()) - 1.f;
-				float col = ceilf(point1.posX * grid_size.value().x()) - 1.f;
+				float row = std::clamp(floorf(point1.posY * grid_size.value().y()), 0.f, grid_size.value().y() - 1.f);
+				float col = std::clamp(floorf(point1.posX * grid_size.value().x()), 0.f, grid_size.value().x() - 1.f);
 				index1 = int(row * grid_size.value().x() + col);
 			}
 			for (size_t i = 0; i < grid_mappings.size(); ++i)
@@ -1748,10 +1772,12 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			status.leftPad.y = touch.t0Y * 2.f - 1.f;
 			status.leftPad.touched = touch.t0Down;
 			status.leftPad.pressure = touch.t0Pressure;
+            status.leftPad.speed = device->touchPipelines[0].fingerSpeed;
 			status.rightPad.x = touch.t1X * 2.f - 1.f;
 			status.rightPad.y = touch.t1Y * 2.f - 1.f;
 			status.rightPad.touched = touch.t1Down;
 			status.rightPad.pressure = touch.t1Pressure;
+            status.rightPad.speed = device->touchPipelines[1].fingerSpeed;
 
 			// Grip is a capacitive contact bit, not an analog channel -- the squeeze
 			// force needed to trip it is set in the controller's firmware from
@@ -3527,6 +3553,11 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<float>(*in_game_sens))
 	                       ->setHelp("Set this value to the sensitivity you use in game. It is used by stick FLICK and AIM modes as well as GYRO aiming."));
 
+
+    auto trigger_hysteresis = new JSMSetting<float>(SettingID::TRIGGER_HYSTERESIS, 0.02f);
+    trigger_hysteresis->setFilter(&filterClamp01);
+    SettingsManager::add(trigger_hysteresis);
+    commandRegistry->add((new JSMAssignment<float>("TRIGGER_HYSTERESIS", *trigger_hysteresis))->setHelp("Digital trigger release margin below TRIGGER_THRESHOLD, 0 to 1. Prevents chatter at soft press. 0 disables. Does not affect virtual analog passthrough or hair triggers."));
 	auto trigger_threshold = new JSMSetting<float>(SettingID::TRIGGER_THRESHOLD, 0.0f);
 	trigger_threshold->setFilter(&filterFloat);
 	SettingsManager::add(trigger_threshold);
@@ -3922,6 +3953,11 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(touch_min_cutoff);
 	commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_MIN_CUTOFF", *touch_min_cutoff))->setHelp("Touchpad One Euro minimum cutoff in Hz. Lower is smoother when panning slowly, but laggier on quick flicks. 0 disables filtering."));
 
+
+    auto touch_lift_speed = new JSMSetting<float>(SettingID::TOUCHPAD_LIFT_SPEED, 150.f);
+    touch_lift_speed->setFilter(&filterPositive);
+    SettingsManager::add(touch_lift_speed);
+    commandRegistry->add((new JSMAssignment<float>("TOUCHPAD_LIFT_SPEED", *touch_lift_speed))->setHelp("Maximum finger speed in pad pixels/s for pressure-release damping. Below this speed, decreasing pressure suppresses thumb lift motion. 0 disables. Fast flicks and controllers without pressure are unaffected."));
 	auto touch_speed_coeff = new JSMSetting<float>(SettingID::TOUCHPAD_SPEED_COEFF, 0.6f);
 	touch_speed_coeff->setFilter(&filterPositive);
 	SettingsManager::add(touch_speed_coeff);

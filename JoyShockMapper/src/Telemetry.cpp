@@ -1,3 +1,4 @@
+#include "ConsoleFeed.h"
 #include "Telemetry.h"
 
 #include <algorithm>
@@ -99,7 +100,8 @@ public:
 		    << ",\"SmaxY\":" << sample.sMaxY
 		    << ",\"curve\":\"" << sample.curve << "\""
 		    << ",\"params\":" << (sample.paramsJson.empty() ? "{}" : sample.paramsJson)
-		    << ",\"sampleHz\":" << sample.sampleRateHz;
+		    << ",\"console\":" << ConsoleFeed::json()
+            << ",\"sampleHz\":" << sample.sampleRateHz;
 
 		if (!sample.devices.empty())
 		{
@@ -129,8 +131,8 @@ public:
 					    << ",\"rightStick\":{\"x\":" << status.rightStick.x << ",\"y\":" << status.rightStick.y << "}"
 					    << ",\"triggers\":{\"left\":" << status.triggers.left << ",\"right\":" << status.triggers.right << "}"
 					    << ",\"gyro\":{\"x\":" << status.gyro.x << ",\"y\":" << status.gyro.y << ",\"z\":" << status.gyro.z << "}"
-					    << ",\"leftPad\":{\"x\":" << status.leftPad.x << ",\"y\":" << status.leftPad.y << ",\"touched\":" << (status.leftPad.touched ? "true" : "false") << ",\"pressure\":" << status.leftPad.pressure << "}"
-					    << ",\"rightPad\":{\"x\":" << status.rightPad.x << ",\"y\":" << status.rightPad.y << ",\"touched\":" << (status.rightPad.touched ? "true" : "false") << ",\"pressure\":" << status.rightPad.pressure << "}"
+					    << ",\"leftPad\":{\"x\":" << status.leftPad.x << ",\"y\":" << status.leftPad.y << ",\"touched\":" << (status.leftPad.touched ? "true" : "false") << ",\"pressure\":" << status.leftPad.pressure << ",\"speed\":" << status.leftPad.speed << "}"
+					    << ",\"rightPad\":{\"x\":" << status.rightPad.x << ",\"y\":" << status.rightPad.y << ",\"touched\":" << (status.rightPad.touched ? "true" : "false") << ",\"pressure\":" << status.rightPad.pressure << ",\"speed\":" << status.rightPad.speed << "}"
 					    << ",\"leftGrip\":{\"pressed\":" << (status.leftGrip.pressed ? "true" : "false") << "}"
 					    << ",\"rightGrip\":{\"pressed\":" << (status.rightGrip.pressed ? "true" : "false") << "}"
 				    << ",\"leftStickTouch\":" << (status.leftStickTouch ? "true" : "false")

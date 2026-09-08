@@ -1,3 +1,4 @@
+#include "ConsoleFeed.h"
 #include <cstdlib>
 
 #include "JoyShockMapper.h"
@@ -18,6 +19,7 @@ public:
 		lock_guard<mutex> guard(print_mutex);
 		HANDLE hStdout = GetStdHandle(STD_ERROR_HANDLE);
 		SetConsoleTextAttribute(hStdout, color);
+		ConsoleFeed::append(str());
 		(*stdio) << str();
 		SetConsoleTextAttribute(hStdout, DEFAULT_COLOR);
 	}

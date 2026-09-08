@@ -1,5 +1,6 @@
 #pragma once
 
+#include "InputGuards.h"
 #include "JoyShockMapper.h"
 #include "TouchMouseResampler.h"
 #include "MotionIf.h"
@@ -82,6 +83,8 @@ struct TouchMousePipeline
 	// to be, so it visibly stuttered whenever the poll interval jittered.
 	float momentumX = 0.f, momentumY = 0.f;
 	TouchMouseResampler output;
+	TouchLiftGuard liftGuard;
+	float fingerSpeed = 0.f;
 	// active: a coast is in flight. contact: a finger is on the pad RIGHT NOW.
 	// These are not the same thing, and conflating them is what let a re-touch
 	// mid-coast differentiate the gap between liftoff and touchdown.
@@ -105,6 +108,8 @@ struct TouchMousePipeline
 		sourceIndex = -1;
 		momentumX = momentumY = 0.f;
 		output.reset();
+		liftGuard.reset();
+		fingerSpeed = 0.f;
 		active = false;
 		contact = false;
 		hapticTravel = 0.f;
@@ -324,6 +329,7 @@ public:
 	// Keep independent filter state for dual-pad controllers; a left-pad sample
 	// must not influence the next right-pad sample.
 	TouchMousePipeline touchPipelines[2];
+	bool touchGridActive[2] = {};
 
 	// Previous pad-click state, indexed the same way as touchPipelines (0 = left,
 	// 1 = right). The click haptic is edge-triggered off this: a level-triggered
@@ -390,6 +396,7 @@ private:
 	ScrollAxis _touchScrollX;
 	ScrollAxis _touchScrollY;
 
+	bool _softPullDown[NUM_ANALOG_TRIGGERS] = {};
 	vector<DstState> _triggerState; // State of analog triggers when skip mode is active
 	vector<deque<float>> _prevTriggerPosition;
 };

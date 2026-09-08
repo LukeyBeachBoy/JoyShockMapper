@@ -20,7 +20,7 @@ struct FloatXY {
 #include "lifted_one_euro.inc"
 float OneEuroFilter::filter(float x, float dt) { return filter(x, dt, 1, .007f); }
 enum class SettingID {
-    TOUCHPAD_MIN_CUTOFF, TOUCHPAD_SPEED_COEFF, TOUCHPAD_D_CUTOFF,
+    TOUCHPAD_LIFT_SPEED, TOUCHPAD_MIN_CUTOFF, TOUCHPAD_SPEED_COEFF, TOUCHPAD_D_CUTOFF,
     TOUCHPAD_ACCEL_MIN_GAIN, TOUCHPAD_ACCEL_MAX_GAIN, ACCEL_CURVE_LINK,
     TOUCHPAD_ACCELERATION, TOUCHPAD_TRACKBALL_DECAY, TOUCHPAD_TRACKBALL_MIN_VELOCITY,
     TOUCHPAD_MOVEMENT_THRESHOLD, TOUCHPAD_HAPTIC_INTENSITY, TOUCHPAD_HAPTIC_EFFECT,
@@ -37,7 +37,7 @@ struct JoyShock {
     // Movement threshold and haptic intensity default to 0 -- both features off --
     // so every existing harness measures the same pipeline it always did.
     std::map<SettingID, float> settings {
-        {SettingID::TOUCHPAD_MIN_CUTOFF, 6}, {SettingID::TOUCHPAD_SPEED_COEFF, .6f},
+        {SettingID::TOUCHPAD_LIFT_SPEED, 150}, {SettingID::TOUCHPAD_MIN_CUTOFF, 6}, {SettingID::TOUCHPAD_SPEED_COEFF, .6f},
         {SettingID::TOUCHPAD_D_CUTOFF, 15}, {SettingID::TOUCHPAD_ACCEL_MIN_GAIN, 1},
         {SettingID::TOUCHPAD_ACCEL_MAX_GAIN, 1}, {SettingID::TOUCHPAD_TRACKBALL_MIN_VELOCITY, 200},
         {SettingID::TOUCHPAD_HAPTIC_EFFECT, float(int(HapticEffect::TICK))},

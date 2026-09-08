@@ -969,7 +969,8 @@ bool JoyShock::isSoftPullPressed(int triggerIndex, float triggerPosition)
 		threshold = max(0.f, threshold); // hair trigger disabled on dual sense when adaptive triggers are active
 	if (threshold >= 0)
 	{
-		return triggerPosition > threshold;
+		_softPullDown[triggerIndex] = digitalTriggerPressed(_softPullDown[triggerIndex], triggerPosition, threshold, triggerIndex == int(ButtonID::CAPTURE) - FIRST_ANALOG_TRIGGER ? 0.f : getSetting(SettingID::TRIGGER_HYSTERESIS));
+		return _softPullDown[triggerIndex];
 	}
 	// else HAIR TRIGGER
 
