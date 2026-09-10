@@ -1650,7 +1650,6 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	}
 
 	TelemetrySample telemetrySample;
-	telemetrySample.activeProfile = CmdRegistry::activeProfile();
 	telemetrySample.omega = omega;
 	// Report post-curve normalized value so the live dot follows the selected curve
 	telemetrySample.normalized = normalizedPostCurve;
@@ -1733,68 +1732,72 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		}
 	}
 #endif
-	for (const auto &entry : handle_to_joyshock)
+	if (Telemetry::IsDue())
 	{
-		const auto &device = entry.second;
-		TelemetryDevice dev;
-		dev.handle = device->_handle;
-		dev.controllerType = device->_controllerType;
-		dev.supportedButtons = jsl->GetSupportedButtons(device->_handle);
-		dev.splitType = device->_splitType;
-		dev.vendorId = jsl->GetControllerVendor(device->_handle);
-		dev.productId = jsl->GetControllerProduct(device->_handle);
-		jsl->GetBatteryLevel(device->_handle, dev.batteryPercent, dev.batteryState);
+		telemetrySample.activeProfile = CmdRegistry::activeProfile();
+		for (const auto &entry : handle_to_joyshock)
+		{
+			const auto &device = entry.second;
+			TelemetryDevice dev;
+			dev.handle = device->_handle;
+			dev.controllerType = device->_controllerType;
+			dev.supportedButtons = jsl->GetSupportedButtons(device->_handle);
+			dev.splitType = device->_splitType;
+			dev.vendorId = jsl->GetControllerVendor(device->_handle);
+			dev.productId = jsl->GetControllerProduct(device->_handle);
+			jsl->GetBatteryLevel(device->_handle, dev.batteryPercent, dev.batteryState);
 #ifdef SDL
-		TelemetryDeviceStatus status;
-		status.buttons = jsl->GetButtons(device->_handle);
-		if (device->_splitType != JS_SPLIT_TYPE_RIGHT)
-		{
-			status.leftStick.x = jsl->GetLeftX(device->_handle);
-			status.leftStick.y = jsl->GetLeftY(device->_handle);
-			status.triggers.left = jsl->GetLeftTrigger(device->_handle);
-		}
-		if (device->_splitType != JS_SPLIT_TYPE_LEFT)
-		{
-			status.rightStick.x = jsl->GetRightX(device->_handle);
-			status.rightStick.y = jsl->GetRightY(device->_handle);
-			status.triggers.right = jsl->GetRightTrigger(device->_handle);
-		}
-		const auto imu = jsl->GetIMUState(device->_handle);
-		status.gyro.x = imu.gyroX;
-		status.gyro.y = imu.gyroY;
-		status.gyro.z = imu.gyroZ;
-		// Touchpad position data (for Steam Controller 2026 and DualSense)
-		if (device->_controllerType == JS_TYPE_STEAM_CONTROLLER_2026)
-		{
-			TOUCH_STATE touch = jsl->GetTouchState(device->_handle);
-			// Steam Controller 2026: t0 = left pad, t1 = right pad
-			status.leftPad.x = touch.t0X * 2.f - 1.f;
-			status.leftPad.y = touch.t0Y * 2.f - 1.f;
-			status.leftPad.touched = touch.t0Down;
-			status.leftPad.pressure = touch.t0Pressure;
-            status.leftPad.speed = device->touchPipelines[0].fingerSpeed;
-			status.rightPad.x = touch.t1X * 2.f - 1.f;
-			status.rightPad.y = touch.t1Y * 2.f - 1.f;
-			status.rightPad.touched = touch.t1Down;
-			status.rightPad.pressure = touch.t1Pressure;
-            status.rightPad.speed = device->touchPipelines[1].fingerSpeed;
+			TelemetryDeviceStatus status;
+			status.buttons = jsl->GetButtons(device->_handle);
+			if (device->_splitType != JS_SPLIT_TYPE_RIGHT)
+			{
+				status.leftStick.x = jsl->GetLeftX(device->_handle);
+				status.leftStick.y = jsl->GetLeftY(device->_handle);
+				status.triggers.left = jsl->GetLeftTrigger(device->_handle);
+			}
+			if (device->_splitType != JS_SPLIT_TYPE_LEFT)
+			{
+				status.rightStick.x = jsl->GetRightX(device->_handle);
+				status.rightStick.y = jsl->GetRightY(device->_handle);
+				status.triggers.right = jsl->GetRightTrigger(device->_handle);
+			}
+			const auto imu = jsl->GetIMUState(device->_handle);
+			status.gyro.x = imu.gyroX;
+			status.gyro.y = imu.gyroY;
+			status.gyro.z = imu.gyroZ;
+			// Touchpad position data (for Steam Controller 2026 and DualSense)
+			if (device->_controllerType == JS_TYPE_STEAM_CONTROLLER_2026)
+			{
+				TOUCH_STATE touch = jsl->GetTouchState(device->_handle);
+				// Steam Controller 2026: t0 = left pad, t1 = right pad
+				status.leftPad.x = touch.t0X * 2.f - 1.f;
+				status.leftPad.y = touch.t0Y * 2.f - 1.f;
+				status.leftPad.touched = touch.t0Down;
+				status.leftPad.pressure = touch.t0Pressure;
+	            status.leftPad.speed = device->touchPipelines[0].fingerSpeed;
+				status.rightPad.x = touch.t1X * 2.f - 1.f;
+				status.rightPad.y = touch.t1Y * 2.f - 1.f;
+				status.rightPad.touched = touch.t1Down;
+				status.rightPad.pressure = touch.t1Pressure;
+	            status.rightPad.speed = device->touchPipelines[1].fingerSpeed;
 
-			// Grip is a capacitive contact bit, not an analog channel -- the squeeze
-			// force needed to trip it is set in the controller's firmware from
-			// GRIP_SENSOR_RANGE / GRIP_FLICKER_GUARD. JSOFFSET_MISC6 = left grip,
-			// JSOFFSET_MISC5 = right, the same bits a binding sees.
-			status.leftGrip.pressed = (status.buttons & (1ULL << JSOFFSET_MISC6)) != 0;
-			status.rightGrip.pressed = (status.buttons & (1ULL << JSOFFSET_MISC5)) != 0;
-			// Same family of signal as the pads and the grips: a capacitive contact
-			// bit. Display only -- there is no MISC slot left to bind it to.
-			status.leftStickTouch = jsl->GetStickTouch(device->_handle, false);
-			status.rightStickTouch = jsl->GetStickTouch(device->_handle, true);
-		}
-		dev.status = status;
+				// Grip is a capacitive contact bit, not an analog channel -- the squeeze
+				// force needed to trip it is set in the controller's firmware from
+				// GRIP_SENSOR_RANGE / GRIP_FLICKER_GUARD. JSOFFSET_MISC6 = left grip,
+				// JSOFFSET_MISC5 = right, the same bits a binding sees.
+				status.leftGrip.pressed = (status.buttons & (1ULL << JSOFFSET_MISC6)) != 0;
+				status.rightGrip.pressed = (status.buttons & (1ULL << JSOFFSET_MISC5)) != 0;
+				// Same family of signal as the pads and the grips: a capacitive contact
+				// bit. Display only -- there is no MISC slot left to bind it to.
+				status.leftStickTouch = jsl->GetStickTouch(device->_handle, false);
+				status.rightStickTouch = jsl->GetStickTouch(device->_handle, true);
+			}
+			dev.status = status;
 #endif
-		telemetrySample.devices.push_back(dev);
+			telemetrySample.devices.push_back(dev);
+		}
+		Telemetry::MaybeSend(telemetrySample);
 	}
-	Telemetry::MaybeSend(telemetrySample);
 
 	jc->gyroXVelocity = gyroXVelocity;
 	jc->gyroYVelocity = gyroYVelocity;
@@ -4009,9 +4012,10 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	//
 	// Both knobs live in the controller, which is the only place a threshold on a
 	// capacitive signal can act; by the time the host sees it, it is one bit. They
-	// are the pair behind Steam Input's Grip Sensor Calibration page. The firmware
-	// carries a single capacitive threshold pair rather than one per side, which is
-	// also why Steam Input shows a single Range and a single Flicker Guard.
+	// are the pair behind Steam Input's Grip Sensor Calibration page. The verified
+	// Triton settings path applies both values to both sensors. No supported
+	// per-side calibration command is known (see docs/grip-calibration-investigation.md
+	// in the Studio repository).
 	auto grip_sensor_range = new JSMSetting<float>(SettingID::GRIP_SENSOR_RANGE, -1.f);
 	grip_sensor_range->setFilter(&filterFirmwareThreshold);
 	SettingsManager::add(grip_sensor_range);
@@ -4026,6 +4030,20 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 
 	// The grips have their own haptic actuators. Off by default: an unasked-for
 	// buzz every time you adjust your hands would be worse than no feature.
+	// Per-side gates cover both contact and release. ON preserves old profiles;
+	// the shared intensities still default to zero.
+	auto left_grip_haptics = new JSMSetting<Switch>(SettingID::LEFT_GRIP_HAPTICS, Switch::ON);
+	left_grip_haptics->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(left_grip_haptics);
+	commandRegistry->add((new JSMAssignment<Switch>("LEFT_GRIP_HAPTICS", *left_grip_haptics))
+	                       ->setHelp("Enable automatic left grip-sense contact and release haptics. ON (default) or OFF. Does not affect grip bindings or explicitly bound haptic effects."));
+
+	auto right_grip_haptics = new JSMSetting<Switch>(SettingID::RIGHT_GRIP_HAPTICS, Switch::ON);
+	right_grip_haptics->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(right_grip_haptics);
+	commandRegistry->add((new JSMAssignment<Switch>("RIGHT_GRIP_HAPTICS", *right_grip_haptics))
+	                       ->setHelp("Enable automatic right grip-sense contact and release haptics. ON (default) or OFF. Does not affect grip bindings or explicitly bound haptic effects."));
+
 	auto grip_haptic = new JSMSetting<float>(SettingID::GRIP_HAPTIC_INTENSITY, 0.f);
 	grip_haptic->setFilter([](auto, auto next) { return clamp(next, 0.f, 100.f); });
 	SettingsManager::add(grip_haptic);
@@ -4502,7 +4520,7 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 			"This deadzone is determined by the angle of the output from the stick position to the center.\n"
 			"It is fully active up to RETURN_DEADZONE_ANGLE and tapers off until RETURN_DEADZONE_CUTOFF_ANGLE.\n"
 			"When in DEADZONE_INNER it transitions to an output deadzone based on the distance to the center so the relative part of the input smoothly fades back in."));
-	
+
 	auto edge_push_is_active = new JSMSetting<Switch>(SettingID::EDGE_PUSH_IS_ACTIVE, Switch::ON);
 	edge_push_is_active->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
 	SettingsManager::add(SettingID::EDGE_PUSH_IS_ACTIVE, edge_push_is_active);

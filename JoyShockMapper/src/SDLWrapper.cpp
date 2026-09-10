@@ -414,16 +414,6 @@ private:
 		}
 	}
 
-	// Call before using a waitable timer to ensure resolution is still correct.
-	void ReapplyMaxTimerRes()
-	{
-		if (ZwSetTimerResolution != nullptr)
-		{
-			ULONG cur_res = 0;
-			ZwSetTimerResolution(win_timer_res, TRUE, &cur_res);
-		}
-	}
-
 	uint64_t next_poll_time = 0;
 
 	void InitPollingTimer()
@@ -439,23 +429,11 @@ private:
 		uint64_t now = SDL_GetTicksNS();
 		if (now < next_poll_time)
 		{
-			// Sleep when delay is longer than timer resolution.
-			const uint64_t delay_thresh_ns = now + timer_res_ns;
-			if (delay_thresh_ns < next_poll_time)
-			{
-				// Leave a gap equal to the timer resolution.
-				const uint64_t delay_ns = next_poll_time - delay_thresh_ns;
-				ReapplyMaxTimerRes();
-				SDL_DelayNS(delay_ns);
-				now = SDL_GetTicksNS();
-			}
-
-			// Busy-wait for the remaining time.
-			while (now < next_poll_time)
-			{
-				SDL_CPUPauseInstruction();
-				now = SDL_GetTicksNS();
-			}
+			// SDL uses a high-resolution waitable timer on modern Windows.
+			// Sleep to the deadline rather than burning up to 0.5-1 ms of a
+			// high-priority CPU thread on every poll. Keep absolute deadlines
+			// so wake-up latency does not accumulate into a slower input rate.
+			SDL_DelayNS(next_poll_time - now);
 		}
 		else
 		{
@@ -653,15 +631,17 @@ public:
 		const HapticEffect releaseEffect = SettingsManager::get<HapticEffect>(SettingID::GRIP_RELEASE_HAPTIC_EFFECT)->value();
 		const bool left = SDL_GetGamepadCapSense(device->_sdlController, SDL_GAMEPAD_CAPSENSE_LEFT_GRIP);
 		const bool right = SDL_GetGamepadCapSense(device->_sdlController, SDL_GAMEPAD_CAPSENSE_RIGHT_GRIP);
+		const bool leftEnabled = SettingsManager::get<Switch>(SettingID::LEFT_GRIP_HAPTICS)->value() == Switch::ON;
+		const bool rightEnabled = SettingsManager::get<Switch>(SettingID::RIGHT_GRIP_HAPTICS)->value() == Switch::ON;
 
-		if (left && !device->_leftGripWasOn)
+		if (leftEnabled && left && !device->_leftGripWasOn)
 			sendGripHaptic(device->_sdlController, false, intensity, effect);
-		else if (!left && device->_leftGripWasOn)
+		else if (leftEnabled && !left && device->_leftGripWasOn)
 			sendGripHaptic(device->_sdlController, false, releaseIntensity, releaseEffect);
 
-		if (right && !device->_rightGripWasOn)
+		if (rightEnabled && right && !device->_rightGripWasOn)
 			sendGripHaptic(device->_sdlController, true, intensity, effect);
-		else if (!right && device->_rightGripWasOn)
+		else if (rightEnabled && !right && device->_rightGripWasOn)
 			sendGripHaptic(device->_sdlController, true, releaseIntensity, releaseEffect);
 
 		// Tracked even when haptics are off, so turning them on mid-session doesn't

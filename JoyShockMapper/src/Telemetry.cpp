@@ -60,6 +60,11 @@ public:
 		closeSocket();
 	}
 
+	bool isDue() const
+	{
+		return _enabled && std::chrono::steady_clock::now() >= _nextSend;
+	}
+
 	void maybeSend(const TelemetrySample &sample)
 	{
 		if (!_enabled)
@@ -86,7 +91,9 @@ public:
 		oss.precision(4);
 		oss << "{"
 		    << "\"protoVer\":" << Telemetry::kProtoVersion
-		    << ",\"ts\":" << sample.timestampMs
+		    << ",\"ts\":" << (sample.timestampMs != 0 ? sample.timestampMs :
+		      std::chrono::duration_cast<std::chrono::milliseconds>(
+		        std::chrono::system_clock::now().time_since_epoch()).count())
 		    << ",\"activeProfile\":" << std::quoted(sample.activeProfile)
 		    << ",\"omega\":" << sample.omega
 		    << ",\"t\":" << sample.normalized
@@ -257,12 +264,6 @@ private:
 #endif
 };
 
-uint64_t TimestampNowMs()
-{
-	using namespace std::chrono;
-	return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
-}
-
 } // namespace
 
 namespace Telemetry
@@ -280,12 +281,12 @@ void Shutdown()
 
 void MaybeSend(const TelemetrySample &sample)
 {
-	TelemetrySample enriched = sample;
-	if (enriched.timestampMs == 0)
-	{
-		enriched.timestampMs = TimestampNowMs();
-	}
-	TelemetryEmitter::Instance().maybeSend(enriched);
+	TelemetryEmitter::Instance().maybeSend(sample);
+}
+
+bool IsDue()
+{
+	return TelemetryEmitter::Instance().isDue();
 }
 
 } // namespace Telemetry

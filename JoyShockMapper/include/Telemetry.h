@@ -104,6 +104,9 @@ constexpr int kMaxRateHz = 120;
 
 void Configure(bool enabled, uint16_t port);
 void Shutdown();
+// Check before gathering device snapshots; discarded polls need no allocation
+// or extra SDL queries. Called on the same input thread as MaybeSend.
+bool IsDue();
 void MaybeSend(const TelemetrySample &sample);
 
 } // namespace Telemetry

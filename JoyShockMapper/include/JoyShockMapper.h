@@ -403,6 +403,8 @@ enum class SettingID
 	GRIP_FLICKER_GUARD,
 	// Haptic pulse fired by the grip actuators when a grip sensor trips. 0 = off.
 	GRIP_HAPTIC_INTENSITY,
+	LEFT_GRIP_HAPTICS,
+	RIGHT_GRIP_HAPTICS,
 	// Which of the controller's effects that pulse plays.
 	GRIP_HAPTIC_EFFECT,
 	// Same pair, but for the pulse fired when a grip sensor releases (hand pulled
