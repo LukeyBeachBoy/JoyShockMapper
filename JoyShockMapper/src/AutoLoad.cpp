@@ -52,11 +52,18 @@ bool AutoLoad::AutoLoadPoll(void* param)
 		bool success = false;
 		for (auto file : files)
 		{
+			// Only <name>.txt is a rule. Studio pauses an association by renaming
+			// it <name>.txt.paused, which the name comparison below would match.
+			if (file.size() < 4 || !iequals(file.substr(file.size() - 4), ".txt"))
+				continue;
 			auto noextconfig = file.substr(0, file.find_first_of('.'));
 			if (iequals(noextconfig, noextmodule))
 			{
 				COUT_INFO << "loading \"AutoLoad\\" << noextconfig << ".txt\".\n";
-				WriteToConsole(path + file);
+				// Prefixed so the registry can tell a background switch from one the
+				// player asked for: a held configuration ignores this, but must not
+				// ignore a binding that loads a config on purpose.
+				WriteToConsole(string{ "STUDIO_AUTOLOAD " } + path + file);
 				success = true;
 				break;
 			}

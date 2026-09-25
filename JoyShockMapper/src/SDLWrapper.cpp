@@ -332,9 +332,20 @@ public:
 	// which also forces a re-apply after a reconnect (the struct is rebuilt).
 	int _appliedGripRange = -1;
 	int _appliedGripRelease = -1;
+	// Whether the firmware's gyro auto-calibration has been switched off on this
+	// connection. The struct is rebuilt on reconnect, so that sends it again.
+	bool _gyroAutoCalOff = false;
+	// CONNECT_SOUND plays once per connection, a moment after it: at startup the
+	// controller is found before OnStartUp has set the sound at all.
+	chrono::steady_clock::time_point _connectedAt = chrono::steady_clock::now();
+	bool _connectSoundDone = false;
 	// Rising edge of each grip sensor, for the haptic pulse.
 	bool _leftGripWasOn = false;
 	bool _rightGripWasOn = false;
+	// When each grip (0 left, 1 right) last read held, for its release delay.
+	chrono::steady_clock::time_point _gripLastHeld[2] {};
+	// Last LED_BRIGHTNESS written; -1 = never, so a reconnect writes it again.
+	int _appliedLedBrightness = -1;
 };
 
 struct SdlInstance : public JslWrapper
@@ -587,7 +598,7 @@ public:
 	// signed decibel gain the firmware limits rather than clips -- which is why
 	// positive values are legitimate and a hand-rolled waveform was never going to
 	// match the tap Steam plays while calibrating the grips.
-	static bool sendHapticEffect(SDL_Gamepad *gamepad, int side, int effect, int gainDb)
+	static bool sendHapticCommand(SDL_Gamepad *gamepad, int side, int effect, int gainDb)
 	{
 		if (gamepad == nullptr)
 			return false;
@@ -600,6 +611,115 @@ public:
 		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
 	}
 
+	// The command report above only carries side, effect and gain, which is all
+	// TICK and CLICK need. TONE, RUMBLE and SWEEP need a frequency and duration
+	// it has no room for, so sent that way they play nothing; they go out on
+	// their own reports instead. Those address actuators by number rather than
+	// bitmask (SteamHapticsSinger's protocol notes, confirmed by feel):
+	// 0 / 1 = left / right pad, 3 / 4 = left / right back rumble motor.
+	static constexpr uint8_t TRITON_ID_OUT_REPORT_HAPTIC_LFO_TONE = 0x83;
+	static constexpr uint8_t TRITON_ID_OUT_REPORT_HAPTIC_LOG_SWEEP = 0x84;
+
+	static bool sendToneBurst(SDL_Gamepad *gamepad, uint8_t target, int gainDb, uint16_t frequency, uint16_t durationMs)
+	{
+		const uint8_t buffer[7] = {
+			TRITON_ID_OUT_REPORT_HAPTIC_LFO_TONE, target, uint8_t(int8_t(std::clamp(gainDb, -127, 127))),
+			uint8_t(frequency & 0xFF), uint8_t(frequency >> 8),
+			uint8_t(durationMs & 0xFF), uint8_t(durationMs >> 8),
+		};
+		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
+	}
+
+	static bool sendSweep(SDL_Gamepad *gamepad, uint8_t target, int gainDb, uint16_t durationMs, uint16_t fromHz, uint16_t toHz)
+	{
+		const uint8_t buffer[9] = {
+			TRITON_ID_OUT_REPORT_HAPTIC_LOG_SWEEP, target, uint8_t(int8_t(std::clamp(gainDb, -127, 127))),
+			uint8_t(durationMs & 0xFF), uint8_t(durationMs >> 8),
+			uint8_t(fromHz & 0xFF), uint8_t(fromHz >> 8),
+			uint8_t(toHz & 0xFF), uint8_t(toHz >> 8),
+		};
+		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
+	}
+
+	// The controller's built-in tunes: output report 0x85 (side/target, script,
+	// gain). Copied from Steam's "Identify Controller" ping, 85 05 0c 00, where
+	// 0x0c is script 12 and target 5 plays it on the whole controller.
+	static constexpr uint8_t TRITON_ID_OUT_REPORT_HAPTIC_SCRIPT = 0x85;
+
+	static bool sendHapticScript(SDL_Gamepad *gamepad, int script)
+	{
+		if (gamepad == nullptr)
+			return false;
+		const uint8_t buffer[4] = { TRITON_ID_OUT_REPORT_HAPTIC_SCRIPT, 0x05, uint8_t(std::clamp(script, 0, 255)), 0x00 };
+		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
+	}
+
+	// side is the command report's bitmask (1 = left, 2 = right, 3 = both).
+	static bool sendHapticEffect(SDL_Gamepad *gamepad, int side, int effect, int gainDb)
+	{
+		if (gamepad == nullptr)
+			return false;
+
+		const auto kind = HapticEffect(effect);
+		if (kind != HapticEffect::TONE && kind != HapticEffect::RUMBLE && kind != HapticEffect::SWEEP)
+			return sendHapticCommand(gamepad, side, effect, gainDb);
+
+		bool sent = false;
+		for (const bool right : { false, true })
+		{
+			if ((side & (right ? 2 : 1)) == 0)
+				continue;
+			const uint8_t pad = right ? 1 : 0;
+			const uint8_t motor = right ? 4 : 3;
+			if (kind == HapticEffect::TONE)
+				sent |= sendToneBurst(gamepad, pad, gainDb, 200, 60);
+			else if (kind == HapticEffect::RUMBLE)
+				sent |= sendToneBurst(gamepad, motor, gainDb, 60, 40);
+			else
+				sent |= sendSweep(gamepad, pad, gainDb, 80, 100, 600);
+		}
+		return sent;
+	}
+
+	// The tap Steam's grip calibration plays, copied byte for byte from its USB
+	// traffic: a pulse report (0x81) with 300 us on, 300 us off, one repeat, and
+	// no gain field. Steam addresses the grips as targets 3 (left) and 4 (right),
+	// beyond the 1/2 the pad effects use -- which is why it feels unlike any pad
+	// effect.
+	static constexpr uint8_t TRITON_ID_OUT_REPORT_HAPTIC_PULSE = 0x81;
+	static constexpr uint8_t TRITON_HAPTIC_TARGET_LEFT_GRIP = 0x03;
+	static constexpr uint8_t TRITON_HAPTIC_TARGET_RIGHT_GRIP = 0x04;
+
+	// Steam leaves the gain off (an 8-byte report); SDL's MsgHapticPulse ends in a
+	// 16-bit gain_db, which is filled here so the intensity dial reaches the pulse.
+	static bool sendHapticPulse(SDL_Gamepad *gamepad, uint8_t target, int gainDb)
+	{
+		if (gamepad == nullptr)
+			return false;
+
+		constexpr uint16_t onUs = 300, offUs = 300, repeats = 1;
+		const uint16_t gain = uint16_t(int16_t(std::clamp(gainDb, -128, 127)));
+		const uint8_t buffer[10] = {
+			TRITON_ID_OUT_REPORT_HAPTIC_PULSE, target,
+			uint8_t(onUs & 0xFF), uint8_t(onUs >> 8),
+			uint8_t(offUs & 0xFF), uint8_t(offUs >> 8),
+			uint8_t(repeats & 0xFF), uint8_t(repeats >> 8),
+			uint8_t(gain & 0xFF), uint8_t(gain >> 8),
+		};
+		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
+	}
+
+	// PULSE is the pulse alone. TAP is the whole thing Steam plays when the right
+	// grip trips in its calibration tool: a CLICK on that side's pad actuator,
+	// then the pulse ~90 ms later (sent back to back here -- this runs on the
+	// poll thread and cannot wait). The click is what gives TAP its weight.
+	static void sendGripTap(SDL_Gamepad *gamepad, HapticEffect effect, uint8_t padSide, uint8_t pulseTarget, int gainDb)
+	{
+		if (effect == HapticEffect::TAP)
+			sendHapticEffect(gamepad, padSide, int(HapticEffect::CLICK), gainDb);
+		sendHapticPulse(gamepad, pulseTarget, gainDb);
+	}
+
 	// The automatic pulse when a grip sensor trips, as opposed to one a binding
 	// asked for. Intensity is a 0-100 dial rather than raw decibels because it is
 	// the only haptic a user meets without choosing an effect by name; hapticGainDb
@@ -608,6 +728,13 @@ public:
 	{
 		if (intensity <= 0.f || effect == HapticEffect::OFF || effect == HapticEffect::INVALID)
 			return;
+
+		if (effect == HapticEffect::PULSE || effect == HapticEffect::TAP)
+		{
+			sendGripTap(gamepad, effect, rightSide ? TRITON_HAPTIC_SIDE_RIGHT : TRITON_HAPTIC_SIDE_LEFT,
+			  rightSide ? TRITON_HAPTIC_TARGET_RIGHT_GRIP : TRITON_HAPTIC_TARGET_LEFT_GRIP, hapticGainDb(intensity));
+			return;
+		}
 
 		sendHapticEffect(gamepad, rightSide ? TRITON_HAPTIC_SIDE_RIGHT : TRITON_HAPTIC_SIDE_LEFT,
 		  uint8_t(effect), hapticGainDb(intensity));
@@ -650,6 +777,27 @@ public:
 		device->_rightGripWasOn = right;
 	}
 
+	// A grip's release delay: keeps the bit set until the grip has read released
+	// for the side's LEFT/RIGHT_GRIP_RELEASE_DELAY. Time-based, so it holds
+	// however often the buttons are read in one poll.
+	static void holdGripRelease(ControllerDevice *device, uint64_t &buttons, int offset, int side, SettingID delaySetting)
+	{
+		if (device == nullptr)
+			return;
+		const auto now = chrono::steady_clock::now();
+		if (buttons & (1ULL << offset))
+		{
+			device->_gripLastHeld[side] = now;
+			return;
+		}
+		const float delayMs = SettingsManager::get<float>(delaySetting)->value();
+		if (delayMs > 0.f && device->_gripLastHeld[side] != chrono::steady_clock::time_point {} &&
+		    now - device->_gripLastHeld[side] < chrono::microseconds(int64_t(delayMs * 1000.f)))
+		{
+			buttons |= 1ULL << offset;
+		}
+	}
+
 	// Pushes grip range / touch gate to the controller when the user changes them.
 	// Only writes on an actual change: a feature report is a round trip to the
 	// device and has no business running every poll.
@@ -659,6 +807,38 @@ public:
 		    device->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
 		{
 			return;
+		}
+
+		// The firmware re-estimates gyro bias whenever it thinks the controller is
+		// still, and a slow deliberate tilt passes that test: the tilt is subtracted
+		// as drift, and once the hand stops the leftover bias drags the cursor back.
+		// Steam's "Enable Software Calibration for Steam Controller" switch turns it
+		// off with these two settings (captured from Steam's own traffic): 84 = the
+		// auto-calibration switch, 85 = its speed threshold. Steam writes 84=1 and
+		// 85=<slider> to turn it back on, and restores firmware defaults (84=1,
+		// 85=100) when it quits. Sent once per connection: HidHide keeps Steam
+		// from ever opening the controller under JSM, and each write is a ~3 ms
+		// round trip on this thread that would show up as a gyro hitch.
+		if (!device->_gyroAutoCalOff &&
+		    sendTritonSettings(device->_sdlController, { { uint8_t(84), uint16_t(0) }, { uint8_t(85), uint16_t(0) } }))
+		{
+			device->_gyroAutoCalOff = true;
+		}
+
+		if (!device->_connectSoundDone && chrono::steady_clock::now() - device->_connectedAt > chrono::milliseconds(1500))
+		{
+			device->_connectSoundDone = true;
+			const int sound = SettingsManager::get<int>(SettingID::CONNECT_SOUND)->value();
+			if (sound >= 0)
+				sendHapticScript(device->_sdlController, sound);
+		}
+
+		// The light: only written when LED_BRIGHTNESS changes (or on reconnect).
+		if (const int led = SettingsManager::get<int>(SettingID::LED_BRIGHTNESS)->value();
+		    led >= 0 && led != device->_appliedLedBrightness &&
+		    sendTritonSettings(device->_sdlController, { { uint8_t(45), uint16_t(led) } }))
+		{
+			device->_appliedLedBrightness = led;
 		}
 
 		// Negative means "leave the firmware's own value alone" -- the settings
@@ -726,6 +906,9 @@ public:
 
 	std::vector<SDL_JoystickID> _joysticks;
 	map<int, ControllerDevice *> _controllerMap;
+	/// How many devices the last connect attempt tried to open and could not.
+	/// Recorded rather than recomputed -- see TakeDeviceCensus for why.
+	int _failedToOpen = 0;
 	void (*g_callback)(int, JOY_SHOCK_STATE, JOY_SHOCK_STATE, IMU_STATE, IMU_STATE, float) = nullptr;
 	void (*g_touch_callback)(int, TOUCH_STATE, TOUCH_STATE, float) = nullptr;
 	atomic_bool keep_polling = false;
@@ -815,6 +998,50 @@ public:
 		return count;
 	}
 
+	// Everything AutoConnect needs about the device list, from ONE refresh.
+	// It polls every second for the life of the session and RefreshDeviceList()
+	// carries a 20ms settle, so this must not be paid twice per tick.
+	//
+	// `failedToOpen` is deliberately the count recorded by the last connect
+	// attempt, NOT a live diff of "SDL lists it but we have not got it open".
+	// That diff sounds equivalent and is not: our own virtual pad is created
+	// by the configuration AFTER ConnectDevices() has enumerated, so SDL lists
+	// it while _controllerMap does not, permanently. A retry driven by the diff
+	// spends its whole budget chasing a device JoyShockMapper created itself
+	// and must never open. Only the connect attempt knows which devices it
+	// actually tried.
+	// SDL only rescans HID devices when Windows reports a device change, and it
+	// hears about those on a hidden window owned by the thread that called
+	// SDL_Init -- our main thread, which sits in the console read and never
+	// pumps it. So a device SDL drops (a Steam Controller turned off through
+	// its dongle: the dongle's interfaces stay, the read fails, SDL removes it)
+	// never comes back: Windows reports no change, because the dongle never
+	// left. Restarting the gamepad subsystem enumerates from scratch, as a
+	// fresh process does. Only done while nothing is open, so no controller is
+	// closed (and handed back to Lizard Mode) by it.
+	void RescanDevices() override
+	{
+		lock_guard guard(controller_lock);
+		if (!_controllerMap.empty())
+			return;
+		SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
+		SDL_InitSubSystem(SDL_INIT_GAMEPAD);
+	}
+
+	DeviceCensus TakeDeviceCensus() override
+	{
+		RefreshDeviceList();
+		std::lock_guard guard(controller_lock);
+		int count = 0;
+		SDL_JoystickID *joysticksArray = SDL_GetJoysticks(&count);
+		SDL_free(joysticksArray);
+		DeviceCensus census;
+		census.listed = count;
+		census.opened = int(_controllerMap.size());
+		census.failedToOpen = _failedToOpen;
+		return census;
+	}
+
 	std::vector<ControllerInfo> ListAvailableDevices() override
 	{
 		RefreshDeviceList();
@@ -849,6 +1076,7 @@ public:
 	int GetConnectedDeviceHandles(int *deviceHandleArray, int size) override
 	{
 		lock_guard guard(controller_lock);
+		_failedToOpen = 0;
 		auto iter = _controllerMap.begin();
 		while (iter != _controllerMap.end())
 		{
@@ -868,6 +1096,11 @@ public:
 			{
                 deviceHandleArray[i] = -1;
 				delete device;
+				// Recorded rather than dropped. This is the only moment anyone
+				// knows a device we MEANT to open did not open: afterwards it
+				// is indistinguishable from a device that was never there, and
+				// AutoConnect's retry hangs on exactly that distinction.
+				++_failedToOpen;
 			}
 		}
 		for (int i = limit; i < size; i++)
@@ -1086,6 +1319,11 @@ public:
 			// to threshold here; just read the bit.
 			buttons |= (supported || SDL_GetGamepadCapSense(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_CAPSENSE_LEFT_GRIP)) ? 1ULL << JSOFFSET_MISC6 : 0;
 			buttons |= (supported || SDL_GetGamepadCapSense(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_CAPSENSE_RIGHT_GRIP)) ? 1ULL << JSOFFSET_MISC5 : 0;
+			if (!supported)
+			{
+				holdGripRelease(_controllerMap[deviceId], buttons, JSOFFSET_MISC6, 0, SettingID::LEFT_GRIP_RELEASE_DELAY);
+				holdGripRelease(_controllerMap[deviceId], buttons, JSOFFSET_MISC5, 1, SettingID::RIGHT_GRIP_RELEASE_DELAY);
+			}
 		}
 		break;
 		case JS_TYPE_DS:
@@ -1384,6 +1622,18 @@ public:
 		auto *jc = _controllerMap[deviceId];
 		if (jc == nullptr || jc->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
 			return;
+		// A binding's PULSE / TAP is the same haptic, aimed at the pads. On the
+		// pulse report the targets are numbered, not a bitmask -- 3 is the left
+		// grip, not "both" -- so both pads means two reports.
+		if (effect == int(HapticEffect::PULSE) || effect == int(HapticEffect::TAP))
+		{
+			const auto kind = HapticEffect(effect);
+			if (side & 1)
+				sendGripTap(jc->_sdlController, kind, TRITON_HAPTIC_SIDE_LEFT, TRITON_HAPTIC_SIDE_LEFT, gainDb);
+			if (side & 2)
+				sendGripTap(jc->_sdlController, kind, TRITON_HAPTIC_SIDE_RIGHT, TRITON_HAPTIC_SIDE_RIGHT, gainDb);
+			return;
+		}
 		sendHapticEffect(jc->_sdlController, side, effect, gainDb);
 	}
 
@@ -1408,6 +1658,16 @@ public:
 			return false;
 		}
 		return true;
+	}
+
+	bool PlayHapticScript(int deviceId, int script) override
+	{
+		lock_guard guard(controller_lock);
+		auto iter = _controllerMap.find(deviceId);
+		if (iter == _controllerMap.end() || iter->second == nullptr ||
+		    iter->second->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
+			return false;
+		return sendHapticScript(iter->second->_sdlController, script);
 	}
 
 	void GetBatteryLevel(int deviceId, int &percent, int &state) override

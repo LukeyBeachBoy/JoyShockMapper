@@ -26,6 +26,20 @@ public:
 		return _deviceCount;
 	}
 
+	// JSL does not report which devices failed to open, so failedToOpen stays
+	// at zero and the retry simply never engages on this backend, rather than
+	// misfiring. Reporting the count it does know keeps AutoConnect's
+	// device-count trigger working exactly as before here; taking the base
+	// class default instead would report zero devices every poll, which reads
+	// as "everything just got unplugged".
+	DeviceCensus TakeDeviceCensus() override
+	{
+		DeviceCensus census;
+		census.listed = _deviceCount;
+		census.opened = _deviceCount;
+		return census;
+	}
+
 	int GetConnectedDeviceHandles(int* deviceHandleArray, int size) override
 	{
 		return JslGetConnectedDeviceHandles(deviceHandleArray, size);

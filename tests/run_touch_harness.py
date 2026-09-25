@@ -32,6 +32,9 @@ HARNESSES = [
     Path(__file__).parent / 'touch_cadence_harness.cpp',
     Path(__file__).parent / 'touch_resampler_harness.cpp',
     Path(__file__).parent / 'touch_click_dampen_harness.cpp',
+    Path(__file__).parent / 'touch_lift_partial_harness.cpp',
+    Path(__file__).parent / 'touch_filter_precision_harness.cpp',
+    Path(__file__).parent / 'touch_four_way_harness.cpp',
 ]
 
 BEGIN = 'struct LowPassFilter1E'

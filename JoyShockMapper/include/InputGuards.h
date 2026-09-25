@@ -26,6 +26,21 @@ struct TouchLiftGuard
   }
 };
 
+// The end of travel, which a normalized axis rarely reports as exactly 1.0:
+// SDL divides the raw reading by the axis maximum, so a trigger that stops a
+// count or two short of it never satisfies an equality test and its full-pull
+// binding silently never fires. Accept the top of the range instead.
+//
+// Engages at the top of the range and releases a little lower, because a
+// trigger whose maximum sits near the engage point would otherwise cross the
+// boundary every poll and chatter the binding on and off. Same reason the soft
+// pull has TRIGGER_HYSTERESIS.
+inline bool fullPullPressed(bool wasPressed, float position)
+{
+  if (!std::isfinite(position)) return false;
+  return position >= (wasPressed ? 0.97f : 0.99f);
+}
+
 inline bool digitalTriggerPressed(bool wasPressed, float position, float threshold, float hysteresis)
 {
   if (!std::isfinite(position)) return false;

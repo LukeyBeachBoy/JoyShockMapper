@@ -144,7 +144,12 @@ def test_autoconnect_still_polls_every_second_by_default_on():
     either while fixing the lock contention."""
     autoconnect_cpp = (ROOT / 'JoyShockMapper/src/AutoConnect.cpp').read_text(encoding='utf-8')
     check('1000' in autoconnect_cpp, 'AutoConnect no longer polls on a 1000ms period')
-    check('GetDeviceCount()' in autoconnect_cpp, 'AutoConnectPoll no longer calls GetDeviceCount()')
+    # The per-poll device-list query used to be GetDeviceCount(); it is now
+    # TakeDeviceCensus(), which answers the same question and a second one in
+    # the same refresh. Either way it goes through RefreshDeviceList, which is
+    # what this file's lock discipline is about.
+    check('TakeDeviceCensus()' in autoconnect_cpp or 'GetDeviceCount()' in autoconnect_cpp,
+          'AutoConnectPoll no longer queries the device list each poll')
 
 
 def main():

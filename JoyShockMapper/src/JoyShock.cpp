@@ -8,6 +8,8 @@ extern shared_ptr<JslWrapper> jsl;
 extern vector<JSMButton> mappings;
 extern vector<JSMButton> grid_mappings;
 extern vector<JSMButton> left_grid_mappings;
+extern vector<JSMButton> left_stick_menu_mappings;
+extern vector<JSMButton> right_stick_menu_mappings;
 extern vector<JSMButton> right_grid_mappings;
 extern float os_mouse_speed;
 extern float last_flick_and_rotation;
@@ -41,9 +43,13 @@ JoyShock::JoyShock(int uniqueHandle, int controllerSplitType, shared_ptr<Digital
   , _context(sharedButtonCommon)
   , _motion(MotionIf::getNew())
   , _leftStick(SettingID::LEFT_STICK_DEADZONE_INNER, SettingID::LEFT_STICK_DEADZONE_OUTER, SettingID::LEFT_RING_MODE,
-      SettingID::LEFT_STICK_MODE, ButtonID::LRING, ButtonID::LLEFT, ButtonID::LRIGHT, ButtonID::LUP, ButtonID::LDOWN)
+      SettingID::LEFT_STICK_MODE, ButtonID::LRING, ButtonID::LLEFT, ButtonID::LRIGHT, ButtonID::LUP, ButtonID::LDOWN,
+      SettingID::ZERO, SettingID::ZERO,
+      SettingID::LEFT_STICK_MENU_SIZE, SettingID::LEFT_STICK_MENU_DEADZONE, FIRST_LEFT_STICK_MENU_BUTTON)
   , _rightStick(SettingID::RIGHT_STICK_DEADZONE_INNER, SettingID::RIGHT_STICK_DEADZONE_OUTER, SettingID::RIGHT_RING_MODE,
-      SettingID::RIGHT_STICK_MODE, ButtonID::RRING, ButtonID::RLEFT, ButtonID::RRIGHT, ButtonID::RUP, ButtonID::RDOWN)
+      SettingID::RIGHT_STICK_MODE, ButtonID::RRING, ButtonID::RLEFT, ButtonID::RRIGHT, ButtonID::RUP, ButtonID::RDOWN,
+      SettingID::ZERO, SettingID::ZERO,
+      SettingID::RIGHT_STICK_MENU_SIZE, SettingID::RIGHT_STICK_MENU_DEADZONE, FIRST_RIGHT_STICK_MENU_BUTTON)
   , _motionStick(SettingID::MOTION_DEADZONE_INNER, SettingID::MOTION_DEADZONE_OUTER, SettingID::MOTION_RING_MODE,
       SettingID::MOTION_STICK_MODE, ButtonID::MRING, ButtonID::MLEFT, ButtonID::MRIGHT, ButtonID::MUP, ButtonID::MDOWN)
 {
@@ -610,7 +616,8 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		trigger_rumble.force = 0;
 		trigger_rumble.start = offset + 0.05 * range;
 		_context->updateChordStack(position > 0, softIndex);
-		_context->updateChordStack(position >= 1.0, fullIndex);
+		_fullPullDown[idxState] = fullPullPressed(_fullPullDown[idxState], position);
+		_context->updateChordStack(_fullPullDown[idxState], fullIndex);
 		return;
 	}
 	else if (mode == TriggerMode::X_RT)
@@ -621,7 +628,8 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		trigger_rumble.force = 0;
 		trigger_rumble.start = offset + 0.05 * range;
 		_context->updateChordStack(position > 0, softIndex);
-		_context->updateChordStack(position >= 1.0, fullIndex);
+		_fullPullDown[idxState] = fullPullPressed(_fullPullDown[idxState], position);
+		_context->updateChordStack(_fullPullDown[idxState], fullIndex);
 		return;
 	}
 
@@ -687,7 +695,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 			_triggerState[idxState] = DstState::QuickSoftTap;
 			handleButtonChange(softIndex, true);
 		}
-		else if (position == 1.0)
+		else if (fullPullPressed(false, position))
 		{
 			// Trigger has been full pressed quickly
 			_triggerState[idxState] = DstState::QuickFullPress;
@@ -718,7 +726,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 			_triggerState[idxState] = DstState::NoPress;
 			handleButtonChange(softIndex, false);
 		}
-		else if (position == 1.0)
+		else if (fullPullPressed(false, position))
 		{
 			// Trigger has been full pressed quickly
 			_triggerState[idxState] = DstState::QuickFullPress;
@@ -750,7 +758,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		trigger_rumble.force = UINT16_MAX;
 		trigger_rumble.start = offset + 0.89 * range;
 		trigger_rumble.end = offset + 0.99 * range;
-		if (position < 1.0f)
+		if (!fullPullPressed(true, position))
 		{
 			// Full press is being release
 			_triggerState[idxState] = DstState::QuickFullRelease;
@@ -771,7 +779,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		{
 			_triggerState[idxState] = DstState::NoPress;
 		}
-		else if (position == 1.0f)
+		else if (fullPullPressed(false, position))
 		{
 			// Trigger is being full pressed again
 			_triggerState[idxState] = DstState::QuickFullPress;
@@ -795,7 +803,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 				trigger_rumble.start = min(offset + 0.89 * range, trigger_rumble.start + 1 / 150. * tick_time * range);
 				trigger_rumble.end = trigger_rumble.start + 0.1 * range;
 				handleButtonChange(softIndex, true);
-				if (position == 1.0)
+				if (fullPullPressed(false, position))
 				{
 					// Full press is allowed in addition to soft press
 					_triggerState[idxState] = DstState::DelayFullPress;
@@ -808,7 +816,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 				trigger_rumble.start = min(offset + 0.89 * range, trigger_rumble.start + 1 / 150. * tick_time * range);
 				trigger_rumble.end = trigger_rumble.start + 0.1 * range;
 				handleButtonChange(softIndex, false);
-				if (position == 1.0)
+				if (fullPullPressed(false, position))
 				{
 					_triggerState[idxState] = DstState::ExclFullPress;
 					handleButtonChange(fullIndex, true);
@@ -828,7 +836,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		trigger_rumble.force = UINT16_MAX;
 		trigger_rumble.start = offset + 0.8 * range;
 		trigger_rumble.end = offset + 0.99 * range;
-		if (position < 1.0)
+		if (!fullPullPressed(true, position))
 		{
 			// Full Press is being released
 			_triggerState[idxState] = DstState::SoftPress;
@@ -846,7 +854,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		trigger_rumble.force = UINT16_MAX;
 		trigger_rumble.start = offset + 0.89 * range;
 		trigger_rumble.end = offset + 0.99 * range;
-		if (position < 1.0f)
+		if (!fullPullPressed(true, position))
 		{
 			// Full press is being release
 			_triggerState[idxState] = DstState::SoftPress;
@@ -921,6 +929,8 @@ void JoyShock::updateGridSize()
 	resizeGridButtons(_gridButtons, grid_mappings, _context);
 	resizeGridButtons(_leftGridButtons, left_grid_mappings, _context);
 	resizeGridButtons(_rightGridButtons, right_grid_mappings, _context);
+	resizeGridButtons(_leftStickMenuButtons, left_stick_menu_mappings, _context);
+	resizeGridButtons(_rightStickMenuButtons, right_stick_menu_mappings, _context);
 }
 
 JoyShock::GridSlot JoyShock::findGridSlot(ButtonID id)
@@ -930,7 +940,21 @@ JoyShock::GridSlot JoyShock::findGridSlot(ButtonID id)
 	vector<DigitalButton> *buttons = nullptr;
 	int offset = 0;
 
-	if (index >= FIRST_RIGHT_TOUCH_BUTTON)
+	// Highest first, and the stick menus are numbered ABOVE the grids, so these
+	// two must be tested before the touch ranges or they would never be reached.
+	if (index >= FIRST_RIGHT_STICK_MENU_BUTTON)
+	{
+		maps = &right_stick_menu_mappings;
+		buttons = &_rightStickMenuButtons;
+		offset = index - FIRST_RIGHT_STICK_MENU_BUTTON;
+	}
+	else if (index >= FIRST_LEFT_STICK_MENU_BUTTON)
+	{
+		maps = &left_stick_menu_mappings;
+		buttons = &_leftStickMenuButtons;
+		offset = index - FIRST_LEFT_STICK_MENU_BUTTON;
+	}
+	else if (index >= FIRST_RIGHT_TOUCH_BUTTON)
 	{
 		maps = &right_grid_mappings;
 		buttons = &_rightGridButtons;
@@ -1327,6 +1351,38 @@ void JoyShock::processStick(float stickX, float stickY, Stick &stick, float mous
 		handleButtonChange(stick._downId, down, stick._touchpadIndex);
 
 		anyStickInput = left || right || up || down; // ring doesn't count
+	}
+	else if (stickMode == StickMode::RADIAL_MENU)
+	{
+		// A weapon wheel on the stick. The maths is deliberately the SAME as a
+		// RADIAL touch grid -- touchRadialCell numbered clockwise from up -- so
+		// a wheel feels identical whether it is driven by a pad or a stick, and
+		// the overlay can draw both from one implementation.
+		const int segments = stick._menuFirstId < 0 ? 0 : int(getSetting(stick._menuSize));
+		int selected = -1;
+		if (segments >= 2)
+		{
+			const float menuDeadzone = getSetting(stick._menuDeadzone);
+			// The stick reports -1..1 with +y up; touchRadialCell expects 0..1
+			// with +y DOWN, so y is flipped rather than the angle maths forked.
+			selected = touchRadialCell(true,
+			  stick.lastX * .5f + .5f, -stick.lastY * .5f + .5f, segments, menuDeadzone);
+			if (selected >= segments) selected = -1;
+		}
+		if (selected != stick._menuSelected)
+		{
+			// Release the old segment before pressing the new one, or sweeping
+			// around the wheel leaves a trail of buttons held down.
+			auto press = [&](int segment, bool down) {
+				if (segment < 0) return;
+				if (auto id = magic_enum::enum_cast<ButtonID>(stick._menuFirstId + segment))
+					handleButtonChange(*id, down, stick._touchpadIndex);
+			};
+			press(stick._menuSelected, false);
+			press(selected, true);
+			stick._menuSelected = selected;
+		}
+		anyStickInput = selected >= 0;
 	}
 	else if (stickMode == StickMode::LEFT_STICK || stickMode == StickMode::RIGHT_STICK)
 	{

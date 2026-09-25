@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -72,6 +73,14 @@ struct TelemetryDevice
 	// (wired/no cell), 3 charging, 4 charged. Kept as a raw int rather than an
 	// enum so the JSON wire format doesn't depend on this header's enum layout.
 	int batteryState = 0;
+	// Physical touchpad dimensions as the driver reports them, in the device's
+	// own units. Only the RATIO is meaningful to a consumer: a Steam Controller
+	// pad is square, a DualSense pad is roughly twice as wide as it is tall, and
+	// anything drawing a pad has to match or the regions it shows are not where
+	// the finger actually is. 0 means this device has no touchpad, or the driver
+	// would not say -- draw nothing rather than guessing a shape.
+	int touchpadWidth = 0;
+	int touchpadHeight = 0;
 	std::optional<TelemetryDeviceStatus> status;
 };
 
@@ -93,6 +102,13 @@ struct TelemetrySample
 	std::string paramsJson = "{}";
 	std::vector<TelemetryDevice> devices;
 	float sampleRateHz = 0.0f;
+	// CALIBRATE_GYRO progress: 0 idle, 1 waiting to start, 2 calibrating,
+	// 3 cancelled because the controller moved (held briefly so it can be shown).
+	int gyroCalPhase = 0;
+	int gyroCalRemainingMs = 0;
+	int gyroCalTotalMs = 0;
+	// How far a cancelled run got, 0-100.
+	int gyroCalReachedPct = 0;
 };
 
 namespace Telemetry
@@ -108,5 +124,8 @@ void Shutdown();
 // or extra SDL queries. Called on the same input thread as MaybeSend.
 bool IsDue();
 void MaybeSend(const TelemetrySample &sample);
+// Whether a packet went out within the window: the idle heartbeat stays quiet
+// while a controller is polling and sending its own.
+bool SentWithin(std::chrono::milliseconds window);
 
 } // namespace Telemetry

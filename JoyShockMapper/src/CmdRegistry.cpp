@@ -1,4 +1,5 @@
 #include "CmdRegistry.h"
+#include "ConfigErrors.h"
 #include "PlatformDefinitions.h"
 
 #include <cctype>
@@ -84,20 +85,44 @@ bool CmdRegistry::loadConfigFile(string fileName)
 	}
 	if (file)
 	{
-        // Autoload may enqueue a file while a chord is held. Leave the held
-        // configuration intact; only the internal restore may replace it.
-        if (!_chordRestore.empty() && !_chordLoading && _loadingFiles.empty()) return true;
+        // A configuration the player loaded on purpose replaces one being held
+        // by a chord or a layer. There is nothing left to restore, and leaving
+        // the held state set makes STUDIO_CHORD_BEGIN refuse every later chord
+        // and layer -- which reads as "my layers stopped working".
+        // The RESET_MAPPINGS at the top of the file cannot do this itself: that
+        // clear is guarded on _loadingFiles being empty, and it never is while
+        // a file is loading.
+        if (!_chordLoading && _loadingFiles.empty() && !_chordRestore.empty())
+        {
+            _chordRestore.clear();
+            _restoreLines.clear();
+        }
+        const bool outerProfile = _loadingFiles.empty() &&
+            (fileName.find("profiles-library") != string::npos || fileName.find("AutoLoad") != string::npos);
+        // Loading a profile again replaces what was reported about it.
+        if (_loadingFiles.empty()) ConfigErrors::clearProfile(fileName);
         _loadingFiles.push_back(fileName);
+        _loadingLines.push_back(0);
+        // Reset only the polling fallback at a Studio profile boundary. Nested
+        // imports must retain normal last-assignment precedence.
+        if (outerProfile) loadConfigFile("StudioDefaults.txt");
 		COUT << "Loading commands from file ";
 		COUT_INFO << fileName << '\n';
 		// https://stackoverflow.com/questions/6892754/creating-a-simple-configuration-file-and-parser-in-c
 		string line;
 		while (getline(file, line))
 		{
+			++_loadingLines.back();
+			// Restored after, so an IMPORT line that loads a file of its own
+			// does not leave the imported file's last line as "current".
+			const auto outer = ConfigErrors::current;
+			ConfigErrors::current = { _loadingFiles.front(), _loadingFiles.back(), _loadingLines.back(), string{ strtrim(line) }, true };
 			processLine(line);
+			ConfigErrors::current = outer;
 		}
 		file.close();
         _loadingFiles.pop_back();
+        _loadingLines.pop_back();
 		return true;
 	}
 	return false;
@@ -195,6 +220,17 @@ bool CmdRegistry::isCommandValid(string_view line) const
 void CmdRegistry::processLine(const string& line)
 {
 	auto trimmedLine = string{ strtrim(line) };
+    // A configuration switch nobody asked for -- Autoload reacting to the
+    // focused window -- must not replace a configuration being held by a chord
+    // or a layer. One the player asked for, by pressing a binding that loads a
+    // config, must: it used to be swallowed by the same guard and looked
+    // exactly like a dead binding.
+    const string autoload = "STUDIO_AUTOLOAD ";
+    if (trimmedLine.compare(0, autoload.size(), autoload) == 0) {
+        if (!_chordRestore.empty()) return;
+        loadConfigFile(trimmedLine.substr(autoload.size()));
+        return;
+    }
     const string begin = "STUDIO_CHORD_BEGIN ";
     if (trimmedLine.compare(0, begin.size(), begin) == 0) {
         if (!_chordRestore.empty()) return;
@@ -209,9 +245,14 @@ void CmdRegistry::processLine(const string& line)
         processLine("RESET_MAPPINGS");
         loadConfigFile(target);
         { std::lock_guard<std::mutex> lock(profileMutex); liveProfile = target; }
+        // What the chord configuration itself asked for. The two lines below
+        // are ours, not its, and must not join the record -- see the note in
+        // STUDIO_CHORD_END for what happens when they do.
+        const auto chordLines = _profileLines;
         // Chord files must not turn off the release detector.
         processLine("TELEMETRY_ENABLED = ON");
         processLine("TELEMETRY_PORT = 8974");
+        _profileLines = chordLines;
         _chordLoading = false;
         return;
     }
@@ -229,6 +270,16 @@ void CmdRegistry::processLine(const string& line)
         _restoreLines.clear();
         processLine("TELEMETRY_ENABLED = ON");
         processLine("TELEMETRY_PORT = 8974");
+        // The restored profile is exactly the lines that were saved -- no more.
+        //
+        // These two telemetry lines are Studio's, and letting them into the
+        // record made every chord permanently more expensive than the last:
+        // the next STUDIO_CHORD_BEGIN snapshots _profileLines into
+        // _restoreLines, so each press/release cycle added two lines that the
+        // following release then replayed and re-appended. A session's log
+        // showed the restore growing 1, 2, 3 ... 7 copies of the same
+        // assignments, and by then chord presses were being dropped outright.
+        _profileLines = lines;
         _chordLoading = false;
         return;
     }
@@ -273,6 +324,7 @@ void CmdRegistry::processLine(const string& line)
 
 		bool hasProcessed = false;
 		CmdMap::iterator cmd = find_if(_registry.begin(), _registry.end(), bind(&CmdRegistry::findCommandWithName, name, placeholders::_1));
+		const bool known = cmd != _registry.end();
 		while (cmd != _registry.end())
 		{
 			if (combo.empty())
@@ -293,6 +345,9 @@ void CmdRegistry::processLine(const string& line)
 
 		if (!hasProcessed)
 		{
+			// Only lines read from a file have somewhere to point at; a line typed
+			// at the console or replayed from memory is reported there as before.
+			ConfigErrors::report(known ? "invalid value for " + name : "unknown command " + (name.empty() ? trimmedLine : name));
 			CERR << "Unrecognized command: \"" << trimmedLine << "\"\nEnter ";
 			COUT_INFO << "HELP";
 			CERR << " to display all commands.\n";

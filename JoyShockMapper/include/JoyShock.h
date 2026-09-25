@@ -61,12 +61,49 @@ struct OneEuroFilter
 	}
 };
 
+// Touch coordinates are absolute positions that are differentiated afterwards.
+// Keep the recurrence and subtraction in double precision, and update by the
+// error rather than summing two weighted absolute positions. This leaves an
+// unchanged perpendicular axis exactly unchanged, even at very low cutoffs.
+// Gyro filtering remains independent: its input is already a velocity, so it
+// keeps OneEuroFilter and is deliberately untouched here.
+struct TouchPositionFilter
+{
+	double position = 0, previousRaw = 0, derivative = 0;
+	double cutoff = 0;
+	float dCutoff = 15.f;
+	bool initialized = false;
+	void reset() { *this = {}; }
+	// Same contract as OneEuroFilter::snapTo: the terminal state of a signal that
+	// has genuinely stopped, reached without emitting any output of its own.
+	void snapTo(float raw)
+	{
+		position = previousRaw = raw;
+		derivative = 0;
+		initialized = true;
+	}
+	double filter(float raw, float dt, float minCutoff, float beta)
+	{
+		if (!initialized) snapTo(raw);
+		const double speed = (double(raw) - previousRaw) / dt;
+		previousRaw = raw;
+		const auto alpha = [dt](double hz) {
+			const double a = 6.283185307179586 * std::max(0., hz) * dt;
+			return a / (1 + a);
+		};
+		derivative += alpha(dCutoff) * (speed - derivative);
+		cutoff = minCutoff + beta * std::abs(derivative);
+		position += alpha(cutoff) * (double(raw) - position);
+		return position;
+	}
+};
+
 struct TouchMousePipeline
 {
 	// Filter absolute pad position, then differentiate in floating point. Retain
 	// sub-pixel motion through sensitivity and acceleration until OS injection.
-	OneEuroFilter posFilterX, posFilterY;
-	float lastX = 0.f, lastY = 0.f;
+	TouchPositionFilter posFilterX, posFilterY;
+	double lastX = 0, lastY = 0;
 	bool initialized = false;
 	// Last observed coordinates and time since they changed. Coordinate equality
 	// cannot distinguish an unchanged report from a poll without a new report.
@@ -100,7 +137,7 @@ struct TouchMousePipeline
 	{
 		posFilterX.reset();
 		posFilterY.reset();
-		lastX = lastY = 0.f;
+		lastX = lastY = 0;
 		initialized = false;
 		lastRawX = lastRawY = 0.f;
 		pendingDt = 0.f;
@@ -167,8 +204,8 @@ struct TouchMousePipeline
 		lastRawX = rawX;
 		lastRawY = rawY;
 
-		float fx = rawX;
-		float fy = rawY;
+		double fx = rawX;
+		double fy = rawY;
 		if (minCutoff > 0.f)
 		{
 			fx = posFilterX.filter(rawX, dt, minCutoff, beta);
@@ -188,7 +225,7 @@ struct TouchMousePipeline
 			return { 0.f, 0.f };
 		}
 
-		FloatXY delta{ fx - lastX, fy - lastY };
+		FloatXY delta{ float(fx - lastX), float(fy - lastY) };
 		lastX = fx;
 		lastY = fy;
 		return delta;
@@ -282,6 +319,8 @@ public:
 	vector<DigitalButton> _gridButtons;
 	vector<DigitalButton> _leftGridButtons;
 	vector<DigitalButton> _rightGridButtons;
+	vector<DigitalButton> _leftStickMenuButtons;
+	vector<DigitalButton> _rightStickMenuButtons;
 	vector<TouchStick> _touchpads;
 	chrono::steady_clock::time_point _timeNow;
 	// Separate clock for the touch callback: it runs on the same poll iteration as
@@ -398,6 +437,7 @@ private:
 	ScrollAxis _touchScrollY;
 
 	bool _softPullDown[NUM_ANALOG_TRIGGERS] = {};
+	bool _fullPullDown[NUM_ANALOG_TRIGGERS] = {};
 	vector<DstState> _triggerState; // State of analog triggers when skip mode is active
 	vector<deque<float>> _prevTriggerPosition;
 };

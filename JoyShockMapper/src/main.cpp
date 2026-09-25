@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <deque>
 #include <unordered_map>
 #include <sstream>
@@ -43,6 +44,8 @@ unique_ptr<Whitelister> whitelister;
 vector<JSMButton> grid_mappings;      // array of virtual _buttons on the touchpad grid (legacy — DS4/DualSense)
 vector<JSMButton> left_grid_mappings;  // array of virtual _buttons on the left touchpad grid (Steam Controller 2026)
 vector<JSMButton> right_grid_mappings; // array of virtual _buttons on the right touchpad grid (Steam Controller 2026)
+vector<JSMButton> left_stick_menu_mappings;  // segments of the left stick radial menu
+vector<JSMButton> right_stick_menu_mappings; // segments of the right stick radial menu
 vector<JSMButton> mappings;           // array enables use of for each loop and other i/f
 
 float os_mouse_speed = 1.0;
@@ -413,8 +416,14 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
         const float liftScale = pipe.liftGuard.update(padPressure, padSpeed, js->getSetting(SettingID::TOUCHPAD_LIFT_SPEED));
         if (liftScale < 1.f) {
             pipe.momentumX = pipe.momentumY = 0.f;
-            // Suppressed release motion must never reappear as queued output.
-            pipe.output.reset();
+            // Partial suppression is already applied to each new displacement
+            // through dampScale below. Clearing the queue on every poll discarded
+            // even that allowed motion -- at 1 kHz a packet could be erased before
+            // its delayed delivery had begun, so a light pressure dip during a
+            // glide dropped the pan entirely instead of quieting it. Only a fully
+            // suppressed lift cancels pending output outright, which still stops a
+            // real release from launching a trackball coast.
+            if (liftScale <= 0.f) pipe.output.reset();
         }
 
 
@@ -688,8 +697,10 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
         };
 		const auto leftSize = js->getSetting<FloatXY>(SettingID::LEFT_GRID_SIZE);
 		const auto rightSize = js->getSetting<FloatXY>(SettingID::RIGHT_GRID_SIZE);
-		if (js->touchGridRouting[0].update(leftMode == TouchpadMode::GRID_AND_STICK, gridChord(SettingID::LEFT_TOUCHPAD_MODE), int(leftSize.x()), int(leftSize.y()))) releaseGrid(left_grid_mappings, FIRST_LEFT_TOUCH_BUTTON, 0);
-		if (js->touchGridRouting[1].update(rightMode == TouchpadMode::GRID_AND_STICK, gridChord(SettingID::RIGHT_TOUCHPAD_MODE), int(rightSize.x()), int(rightSize.y()))) releaseGrid(right_grid_mappings, FIRST_RIGHT_TOUCH_BUTTON, 1);
+		const auto leftShape = js->getSetting<GridShape>(SettingID::LEFT_GRID_SHAPE);
+		const auto rightShape = js->getSetting<GridShape>(SettingID::RIGHT_GRID_SHAPE);
+		if (js->touchGridRouting[0].update(leftMode == TouchpadMode::GRID_AND_STICK, gridChord(SettingID::LEFT_TOUCHPAD_MODE), int(leftSize.x()), int(leftSize.y()), leftShape)) releaseGrid(left_grid_mappings, FIRST_LEFT_TOUCH_BUTTON, 0);
+		if (js->touchGridRouting[1].update(rightMode == TouchpadMode::GRID_AND_STICK, gridChord(SettingID::RIGHT_TOUCHPAD_MODE), int(rightSize.x()), int(rightSize.y()), rightShape)) releaseGrid(right_grid_mappings, FIRST_RIGHT_TOUCH_BUTTON, 1);
 		// NOTE: the pipelines are deliberately NOT reset here on finger-up. Resetting
 		// unconditionally wiped trackball momentum before it could ever be applied.
 		// processTouchMouse owns the lifecycle instead.
@@ -703,7 +714,8 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			// previews it (via the live diagram) without firing it.
 			bool leftGridActive = point0.isDown()
 			  && (js->getSetting<Switch>(SettingID::LEFT_GRID_REQUIRES_CLICK) != Switch::ON || js->isPressed(ButtonID::MISC3));
-			const int index = touchGridCell(leftGridActive, point0.posX, point0.posY, int(grid_size.x()), int(grid_size.y()));
+			const int index = touchGridCell(leftGridActive, point0.posX, point0.posY, int(grid_size.x()), int(grid_size.y()),
+			  leftShape, js->getSetting(SettingID::LEFT_GRID_DEADZONE));
 			for (size_t i = 0; i < left_grid_mappings.size(); ++i)
 			{
 				auto optId = magic_enum::enum_cast<ButtonID>(int(FIRST_LEFT_TOUCH_BUTTON + i));
@@ -729,7 +741,8 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			// click (MISC2), mirroring LEFT_GRID_REQUIRES_CLICK above.
 			bool rightGridActive = point1.isDown()
 			  && (js->getSetting<Switch>(SettingID::RIGHT_GRID_REQUIRES_CLICK) != Switch::ON || js->isPressed(ButtonID::MISC2));
-			const int index = touchGridCell(rightGridActive, point1.posX, point1.posY, int(grid_size.x()), int(grid_size.y()));
+			const int index = touchGridCell(rightGridActive, point1.posX, point1.posY, int(grid_size.x()), int(grid_size.y()),
+			  rightShape, js->getSetting(SettingID::RIGHT_GRID_DEADZONE));
 			for (size_t i = 0; i < right_grid_mappings.size(); ++i)
 			{
 				auto optId = magic_enum::enum_cast<ButtonID>(int(FIRST_RIGHT_TOUCH_BUTTON + i));
@@ -752,7 +765,7 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		// --- Legacy single-pad behavior (DS4, DualSense, etc.) ---
 		if (mode != TouchpadMode::MOUSE) js->touchPipelines[0].reset();
 		const auto size = js->getSetting<FloatXY>(SettingID::GRID_SIZE);
-		if (js->touchGridRouting[0].update(mode == TouchpadMode::GRID_AND_STICK, gridChord(SettingID::TOUCHPAD_MODE), int(size.x()), int(size.y())))
+		if (js->touchGridRouting[0].update(mode == TouchpadMode::GRID_AND_STICK, gridChord(SettingID::TOUCHPAD_MODE), int(size.x()), int(size.y()), js->getSetting<GridShape>(SettingID::GRID_SHAPE)))
 		{
 			for (size_t i = 0; i < grid_mappings.size(); ++i)
 				js->handleButtonChange(*magic_enum::enum_cast<ButtonID>(int(FIRST_TOUCH_BUTTON + i)), false);
@@ -766,25 +779,20 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			// resting over a region previews it without firing it.
 			bool requireClick = js->getSetting<Switch>(SettingID::TOUCHPAD_GRID_REQUIRES_CLICK) == Switch::ON;
 			bool clickHeld = !requireClick || js->isPressed(ButtonID::CAPTURE);
-			int index0 = -1, index1 = -1;
-			if (point0.isDown() && clickHeld)
-			{
-				point0.posY += 1e-6f;
-				float row = std::clamp(floorf(point0.posY * grid_size.y()), 0.f, grid_size.y() - 1.f);
-				float col = std::clamp(floorf(point0.posX * grid_size.x()), 0.f, grid_size.x() - 1.f);
-				index0 = int(row * grid_size.x() + col);
-			}
-			if (point1.isDown() && clickHeld)
-			{
-				float row = std::clamp(floorf(point1.posY * grid_size.y()), 0.f, grid_size.y() - 1.f);
-				float col = std::clamp(floorf(point1.posX * grid_size.x()), 0.f, grid_size.x() - 1.f);
-				index1 = int(row * grid_size.x() + col);
-			}
+			const auto shape = js->getSetting<GridShape>(SettingID::GRID_SHAPE);
+			const float deadzone = js->getSetting(SettingID::GRID_DEADZONE);
+			// The nudge keeps a reading of exactly 0 off the boundary between the
+			// first two rows; it predates this call and is preserved deliberately.
+			if (point0.isDown()) point0.posY += 1e-6f;
+			const int index0 = touchGridCell(point0.isDown() && clickHeld, point0.posX, point0.posY,
+			  int(grid_size.x()), int(grid_size.y()), shape, deadzone);
+			const int index1 = touchGridCell(point1.isDown() && clickHeld, point1.posX, point1.posY,
+			  int(grid_size.x()), int(grid_size.y()), shape, deadzone);
 			for (size_t i = 0; i < grid_mappings.size(); ++i)
 			{
 				auto optId = magic_enum::enum_cast<ButtonID>(int(FIRST_TOUCH_BUTTON + i));
 				if (optId && js->_gridButtons.size() == grid_mappings.size())
-					js->handleButtonChange(*optId, i == index0 || i == index1);
+					js->handleButtonChange(*optId, int(i) == index0 || int(i) == index1);
 			}
 			js->handleTouchStickChange(js->_touchpads[0], point0.isDown(), point0.movX, point0.movY, delta_time);
 			js->handleTouchStickChange(js->_touchpads[1], point1.isDown(), point1.movX, point1.movY, delta_time);
@@ -935,6 +943,17 @@ void calibrateTriggers(shared_ptr<JoyShock> jc)
 	jsl->SetTriggerEffect(jc->_handle, jc->_leftEffect, jc->_rightEffect);
 }
 
+// Defined with CALIBRATE_GYRO below; read here for telemetry.
+namespace GyroCalibrationRun
+{
+extern atomic<int> phase;
+extern atomic<int64_t> phaseEndsMs;
+extern atomic<int> phaseTotalMs;
+extern atomic<int> reachedPct;
+int64_t nowMs();
+void watchForMovement(int handle, const IMU_STATE &imu, float deltaTime);
+}
+
 void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE lastState, IMU_STATE imuState, IMU_STATE lastImuState, float deltaTime)
 {
 
@@ -957,6 +976,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	MotionIf &motion = *jc->_motion;
 
 	IMU_STATE imu = jsl->GetIMUState(jc->_handle);
+	GyroCalibrationRun::watchForMovement(jcHandle, imu, deltaTime);
 
 	if (SettingsManager::getV<Switch>(SettingID::AUTO_CALIBRATE_GYRO)->value() == Switch::ON)
 	{
@@ -1735,6 +1755,10 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	if (Telemetry::IsDue())
 	{
 		telemetrySample.activeProfile = CmdRegistry::activeProfile();
+		telemetrySample.gyroCalPhase = GyroCalibrationRun::phase;
+		telemetrySample.gyroCalTotalMs = GyroCalibrationRun::phaseTotalMs;
+		telemetrySample.gyroCalRemainingMs = int(std::max<int64_t>(0, GyroCalibrationRun::phaseEndsMs - GyroCalibrationRun::nowMs()));
+		telemetrySample.gyroCalReachedPct = GyroCalibrationRun::reachedPct;
 		for (const auto &entry : handle_to_joyshock)
 		{
 			const auto &device = entry.second;
@@ -1746,6 +1770,10 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			dev.vendorId = jsl->GetControllerVendor(device->_handle);
 			dev.productId = jsl->GetControllerProduct(device->_handle);
 			jsl->GetBatteryLevel(device->_handle, dev.batteryPercent, dev.batteryState);
+			// Zero on failure rather than leaving whatever the call wrote, so a
+			// consumer can tell "no touchpad" from "a touchpad of unknown shape".
+			if (!jsl->GetTouchpadDimension(device->_handle, dev.touchpadWidth, dev.touchpadHeight))
+				dev.touchpadWidth = dev.touchpadHeight = 0;
 #ifdef SDL
 			TelemetryDeviceStatus status;
 			status.buttons = jsl->GetButtons(device->_handle);
@@ -2348,6 +2376,8 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
 	SettingsManager::resetAllSettings();
 	ranges::for_each(grid_mappings, callReset);
 	ranges::for_each(left_grid_mappings, callReset);
+	ranges::for_each(left_stick_menu_mappings, callReset);
+	ranges::for_each(right_stick_menu_mappings, callReset);
 	ranges::for_each(right_grid_mappings, callReset);
 
 	os_mouse_speed = 1.0f;
@@ -2363,6 +2393,7 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
 	UpdateIgnoredGyroDevices();
 	if (registry)
 	{
+		registry->loadConfigFile("StudioDefaults.txt");
 		if (!registry->loadConfigFile("OnReset.txt"))
 		{
 			COUT << "There is no ";
@@ -2535,8 +2566,178 @@ bool do_RESTART_GYRO_CALIBRATION()
 	return true;
 }
 
+// CALIBRATE_GYRO in two phases -- a countdown to put the controller down, then
+// the calibration -- published over telemetry so Studio's overlay can show it
+// whatever started it: the Studio button, a chord, or a binding.
+namespace GyroCalibrationRun
+{
+enum Phase
+{
+	IDLE,
+	WAITING,
+	CALIBRATING,
+	// The controller moved while it was being sampled, so the run was thrown
+	// away. Held for a moment so Studio's HUD can say so, then back to IDLE.
+	MOVED
+};
+atomic<int> phase{ IDLE };
+atomic<int64_t> phaseEndsMs{ 0 };
+atomic<int> phaseTotalMs{ 0 };
+atomic<int> generation{ 0 };
+atomic<int> reachedPct{ 0 };
+atomic<bool> moved{ false };
+
+// A controller resting on a desk reads its gyro bias, a few degrees per second
+// at most; being picked up or nudged reads tens. Sustained rather than a single
+// sample, so a tap on the desk does not cancel the run.
+constexpr float kMovedDegreesPerSecond = 10.f;
+constexpr float kMovedForSeconds = 0.05f;
+mutex movementMutex;
+unordered_map<int, float> movingFor;
+
+int64_t nowMs()
+{
+	return chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+void watchForMovement(int handle, const IMU_STATE &imu, float deltaTime)
+{
+	if (phase != CALIBRATING)
+		return;
+	const float speed = sqrtf(imu.gyroX * imu.gyroX + imu.gyroY * imu.gyroY + imu.gyroZ * imu.gyroZ);
+	lock_guard<mutex> lock(movementMutex);
+	float &seconds = movingFor[handle];
+	seconds = speed > kMovedDegreesPerSecond ? seconds + deltaTime : 0.f;
+	if (seconds >= kMovedForSeconds)
+		moved = true;
+}
+
+// Returns false if a newer CALIBRATE_GYRO took over while this one waited, or
+// if the controller moved while it was calibrating.
+bool runPhase(Phase which, float seconds, int owner)
+{
+	const int totalMs = int(seconds * 1000.f);
+	phaseTotalMs = totalMs;
+	phaseEndsMs = nowMs() + totalMs;
+	phase = which;
+	while (nowMs() < phaseEndsMs)
+	{
+		if (generation != owner)
+			return false;
+		if (which == CALIBRATING && moved)
+			return false;
+		this_thread::sleep_for(chrono::milliseconds(20));
+	}
+	return generation == owner;
+}
+} // namespace GyroCalibrationRun
+
+// Packets are sent from the controller poll, so with no controller polling
+// Studio would hear nothing at all -- not the console, not a configuration's
+// errors, not that the mapper is alive. A packet every half second fills that
+// gap, and stays silent whenever the poll is sending its own.
+static void startIdleTelemetry()
+{
+	thread([]()
+	  {
+		while (true)
+		{
+			this_thread::sleep_for(chrono::milliseconds(500));
+			if (Telemetry::SentWithin(chrono::milliseconds(400)))
+				continue;
+			TelemetrySample idle;
+			idle.activeProfile = CmdRegistry::activeProfile();
+			idle.gyroCalPhase = GyroCalibrationRun::phase;
+			idle.gyroCalTotalMs = GyroCalibrationRun::phaseTotalMs;
+			idle.gyroCalRemainingMs = int(std::max<int64_t>(0, GyroCalibrationRun::phaseEndsMs - GyroCalibrationRun::nowMs()));
+			idle.gyroCalReachedPct = GyroCalibrationRun::reachedPct;
+			Telemetry::MaybeSend(idle);
+		}
+	  })
+	  .detach();
+}
+
+bool do_CALIBRATE_GYRO()
+{
+	using namespace GyroCalibrationRun;
+	const float delay = clamp(SettingsManager::get<float>(SettingID::GYRO_CALIBRATION_DELAY)->value(), 0.f, 30.f);
+	const float duration = clamp(SettingsManager::get<float>(SettingID::GYRO_CALIBRATION_TIME)->value(), 0.5f, 60.f);
+	const int owner = ++generation;
+	COUT << "Calibrating the gyro in " << delay << "s, for " << duration << "s. Put the controller down on a still surface.\n";
+	thread([delay, duration, owner]()
+	  {
+		if (delay > 0.f && !runPhase(WAITING, delay, owner))
+			return;
+		// What each controller was calibrated to before this run, to put back
+		// if the run has to be thrown away.
+		unordered_map<int, array<float, 3>> previous;
+		for (auto &[handle, jc] : handle_to_joyshock)
+			jc->_motion->GetCalibrationOffset(previous[handle][0], previous[handle][1], previous[handle][2]);
+		{
+			lock_guard<mutex> lock(movementMutex);
+			movingFor.clear();
+		}
+		moved = false;
+		reachedPct = 0;
+		do_RESTART_GYRO_CALIBRATION();
+		const int64_t started = nowMs();
+		// A newer run that took over mid-calibration restarts it itself, so this
+		// one just gets out of the way rather than finishing someone else's.
+		if (!runPhase(CALIBRATING, duration, owner))
+		{
+			if (!moved || generation != owner)
+				return;
+			// Samples taken while it moved would bake the motion into the offset,
+			// which reads as drift. Keep the calibration it had before.
+			reachedPct = clamp(int((nowMs() - started) * 100 / max<int64_t>(1, int64_t(duration * 1000.f))), 0, 99);
+			for (auto &[handle, jc] : handle_to_joyshock)
+			{
+				jc->_motion->PauseContinuousCalibration();
+				if (auto saved = previous.find(handle); saved != previous.end())
+					jc->_motion->SetCalibrationOffset(saved->second[0], saved->second[1], saved->second[2], 100);
+			}
+			devicesCalibrating = false;
+			CERR << "Gyro calibration cancelled: the controller moved at " << reachedPct << "%. Put it down and calibrate again.\n";
+			if (runPhase(MOVED, 2.5f, owner))
+				phase = IDLE;
+			return;
+		}
+		do_FINISH_GYRO_CALIBRATION();
+		phase = IDLE;
+	  })
+	  .detach();
+	return true;
+}
+
+bool do_PLAY_SOUND(string_view argument)
+{
+	int script = 0;
+	try
+	{
+		script = stoi(string(argument));
+	}
+	catch (...)
+	{
+		CERR << "PLAY_SOUND needs a sound number, 0-13.\n";
+		return false;
+	}
+	for (auto &[handle, jc] : handle_to_joyshock)
+		jsl->PlayHapticScript(handle, script);
+	return true;
+}
+
 bool do_TURN_OFF_CONTROLLER()
 {
+	// The tune has to finish before the power goes: the report would cut it off.
+	if (const int sound = SettingsManager::get<int>(SettingID::SHUTDOWN_SOUND)->value(); sound >= 0)
+	{
+		bool played = false;
+		for (auto &[handle, jc] : handle_to_joyshock)
+			played |= jsl->PlayHapticScript(handle, sound);
+		if (played)
+			this_thread::sleep_for(chrono::milliseconds(1500));
+	}
+
 	int delivered = 0;
 	for (auto iter = handle_to_joyshock.begin(); iter != handle_to_joyshock.end(); ++iter)
 	{
@@ -3014,6 +3215,7 @@ void onNewGridDimensions(CmdRegistry *registry, const FloatXY &)
 {
 	// Register every possible cell once. Layout changes only change dispatch;
 	// shrinking a base grid must not delete bindings used by a larger modeshift.
+	grid_mappings.reserve(MAX_GRID_BUTTONS); // see onNewStickMenuSize: these references must not move
 	while (grid_mappings.size() < MAX_GRID_BUTTONS)
 	{
 		const int id = FIRST_TOUCH_BUTTON + int(grid_mappings.size());
@@ -3033,6 +3235,7 @@ void onNewLeftGridDimensions(CmdRegistry *registry, const FloatXY &)
 {
 	// Register every possible cell once. Layout changes only change dispatch;
 	// shrinking a base grid must not delete bindings used by a larger modeshift.
+	left_grid_mappings.reserve(MAX_GRID_BUTTONS); // see onNewStickMenuSize: these references must not move
 	while (left_grid_mappings.size() < MAX_GRID_BUTTONS)
 	{
 		const int id = FIRST_LEFT_TOUCH_BUTTON + int(left_grid_mappings.size());
@@ -3052,6 +3255,7 @@ void onNewRightGridDimensions(CmdRegistry *registry, const FloatXY &)
 {
 	// Register every possible cell once. Layout changes only change dispatch;
 	// shrinking a base grid must not delete bindings used by a larger modeshift.
+	right_grid_mappings.reserve(MAX_GRID_BUTTONS); // see onNewStickMenuSize: these references must not move
 	while (right_grid_mappings.size() < MAX_GRID_BUTTONS)
 	{
 		const int id = FIRST_RIGHT_TOUCH_BUTTON + int(right_grid_mappings.size());
@@ -3059,6 +3263,32 @@ void onNewRightGridDimensions(CmdRegistry *registry, const FloatXY &)
 		button.setFilter(&filterMapping);
 		right_grid_mappings.push_back(button);
 		registry->add(new JSMAssignment<Mapping>(right_grid_mappings.back()));
+	}
+	for (auto &entry : handle_to_joyshock)
+	{
+		lock_guard guard(entry.second->_context->callback_lock);
+		entry.second->updateGridSize();
+	}
+}
+
+// Stick radial menus register their segments exactly as the grids do: every
+// possible segment once, so shrinking a wheel never deletes bindings a larger
+// modeshifted one still uses.
+void onNewStickMenuSize(CmdRegistry *registry, vector<JSMButton> &maps, int firstId)
+{
+	// Reserve HERE, not in main(): a JSMAssignment holds a reference to the
+	// JSMButton it was registered with, so a reallocation part way through this
+	// loop leaves every assignment already handed to the registry dangling, and
+	// the next "RM1 = 1" in a config then dereferences freed memory. Keeping the
+	// reserve beside the push_back is what stops the two drifting apart again.
+	maps.reserve(MAX_GRID_BUTTONS);
+	while (maps.size() < MAX_GRID_BUTTONS)
+	{
+		const int id = firstId + int(maps.size());
+		JSMButton button(*magic_enum::enum_cast<ButtonID>(id), Mapping::NO_MAPPING);
+		button.setFilter(&filterMapping);
+		maps.push_back(button);
+		registry->add(new JSMAssignment<Mapping>(maps.back()));
 	}
 	for (auto &entry : handle_to_joyshock)
 	{
@@ -3828,6 +4058,56 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<FloatXY>("GRID_SIZE", *grid_size))
 	                       ->setHelp("When TOUCHPAD_MODE is set to GRID_AND_STICK, this variable sets the number of rows and columns in the grid. The product of the two numbers need to be between 1 and 25."));
 
+	auto grid_shape = new JSMSetting<GridShape>(SettingID::GRID_SHAPE, GridShape::RECTANGLE);
+	grid_shape->setFilter(&filterInvalidValue<GridShape, GridShape::INVALID>);
+	SettingsManager::add(SettingID::GRID_SHAPE, grid_shape);
+	commandRegistry->add((new JSMAssignment<GridShape>("GRID_SHAPE", *grid_shape))
+	                       ->setHelp("How the touch grid is divided. RECTANGLE uses GRID_SIZE rows and columns. FOUR_WAY splits the pad into four cardinal wedges about its centre -- T1 up, T2 right, T3 down, T4 left. RADIAL is a weapon wheel of GRID_SIZE rows x columns segments, numbered clockwise from up, with GRID_DEADZONE as the hole in the middle."));
+
+	auto grid_deadzone = new JSMSetting<float>(SettingID::GRID_DEADZONE, 0.1f);
+	grid_deadzone->setFilter([](auto current, auto next)
+	  { return next >= 0.f && next <= 1.f ? next : current; });
+	SettingsManager::add(SettingID::GRID_DEADZONE, grid_deadzone);
+	commandRegistry->add((new JSMAssignment<float>("GRID_DEADZONE", *grid_deadzone))
+	                       ->setHelp("With GRID_SHAPE set to FOUR_WAY, the fraction of the pad's half-width at the centre where no region is pressed, between 0 and 1. Stops a thumb resting at dead centre from flickering between two directions. 0 disables it."));
+
+	// --- Stick radial menus ---------------------------------------------------
+	// A weapon wheel on a stick. The segment count registers LM1../RM1.. the way
+	// a grid size registers T1.., and the deadzone is how far the stick must be
+	// pushed before a segment is selected at all -- so letting go of the stick
+	// dismisses the wheel without choosing anything.
+	auto left_stick_menu_size = new JSMSetting<float>(SettingID::LEFT_STICK_MENU_SIZE, 0.f);
+	left_stick_menu_size->setFilter([](auto current, auto next)
+	  { const float n = floorf(next); return n >= 0 && n <= float(MAX_GRID_BUTTONS) ? n : current; });
+	left_stick_menu_size->addOnChangeListener(
+	  [commandRegistry](float) { onNewStickMenuSize(commandRegistry, left_stick_menu_mappings, FIRST_LEFT_STICK_MENU_BUTTON); }, true);
+	SettingsManager::add(SettingID::LEFT_STICK_MENU_SIZE, left_stick_menu_size);
+	commandRegistry->add((new JSMAssignment<float>("LEFT_STICK_MENU_SIZE", *left_stick_menu_size))
+	                       ->setHelp("Number of segments in the left stick's radial menu, used when LEFT_STICK_MODE is RADIAL_MENU. Segments are LM1..LM25, numbered clockwise from up. 0 or 1 disables the menu."));
+
+	auto right_stick_menu_size = new JSMSetting<float>(SettingID::RIGHT_STICK_MENU_SIZE, 0.f);
+	right_stick_menu_size->setFilter([](auto current, auto next)
+	  { const float n = floorf(next); return n >= 0 && n <= float(MAX_GRID_BUTTONS) ? n : current; });
+	right_stick_menu_size->addOnChangeListener(
+	  [commandRegistry](float) { onNewStickMenuSize(commandRegistry, right_stick_menu_mappings, FIRST_RIGHT_STICK_MENU_BUTTON); }, true);
+	SettingsManager::add(SettingID::RIGHT_STICK_MENU_SIZE, right_stick_menu_size);
+	commandRegistry->add((new JSMAssignment<float>("RIGHT_STICK_MENU_SIZE", *right_stick_menu_size))
+	                       ->setHelp("Number of segments in the right stick's radial menu, used when RIGHT_STICK_MODE is RADIAL_MENU. Segments are RM1..RM25, numbered clockwise from up. 0 or 1 disables the menu."));
+
+	auto left_stick_menu_deadzone = new JSMSetting<float>(SettingID::LEFT_STICK_MENU_DEADZONE, 0.35f);
+	left_stick_menu_deadzone->setFilter([](auto current, auto next)
+	  { return next >= 0.f && next <= 1.f ? next : current; });
+	SettingsManager::add(SettingID::LEFT_STICK_MENU_DEADZONE, left_stick_menu_deadzone);
+	commandRegistry->add((new JSMAssignment<float>("LEFT_STICK_MENU_DEADZONE", *left_stick_menu_deadzone))
+	                       ->setHelp("How far the left stick must be pushed before a radial menu segment is selected, between 0 and 1. Releasing the stick back inside this selects nothing, which is how a wheel is dismissed."));
+
+	auto right_stick_menu_deadzone = new JSMSetting<float>(SettingID::RIGHT_STICK_MENU_DEADZONE, 0.35f);
+	right_stick_menu_deadzone->setFilter([](auto current, auto next)
+	  { return next >= 0.f && next <= 1.f ? next : current; });
+	SettingsManager::add(SettingID::RIGHT_STICK_MENU_DEADZONE, right_stick_menu_deadzone);
+	commandRegistry->add((new JSMAssignment<float>("RIGHT_STICK_MENU_DEADZONE", *right_stick_menu_deadzone))
+	                       ->setHelp("How far the right stick must be pushed before a radial menu segment is selected, between 0 and 1. Releasing the stick back inside this selects nothing."));
+
 	auto touchpad_mode = new JSMSetting<TouchpadMode>(SettingID::TOUCHPAD_MODE, TouchpadMode::GRID_AND_STICK);
 	touchpad_mode->setFilter(&filterInvalidValue<TouchpadMode, TouchpadMode::INVALID>);
 	SettingsManager::add(touchpad_mode);
@@ -4072,6 +4352,48 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<HapticEffect>("GRIP_RELEASE_HAPTIC_EFFECT", *grip_release_haptic_effect))
 	                       ->setHelp("Which effect the grip actuator plays when that grip sensor releases. Same valid values as GRIP_HAPTIC_EFFECT. Defaults to CLICK."));
 
+	auto gyro_calibration_delay = new JSMSetting<float>(SettingID::GYRO_CALIBRATION_DELAY, 0.f);
+	gyro_calibration_delay->setFilter([](auto, auto next) { return clamp(next, 0.f, 30.f); });
+	SettingsManager::add(gyro_calibration_delay);
+	commandRegistry->add((new JSMAssignment<float>("GYRO_CALIBRATION_DELAY", *gyro_calibration_delay))
+	                       ->setHelp("Seconds CALIBRATE_GYRO waits before it starts, so there is time to put the controller down. 0-30, default 0."));
+
+	auto gyro_calibration_time = new JSMSetting<float>(SettingID::GYRO_CALIBRATION_TIME, 5.f);
+	gyro_calibration_time->setFilter([](auto, auto next) { return clamp(next, 0.5f, 60.f); });
+	SettingsManager::add(gyro_calibration_time);
+	commandRegistry->add((new JSMAssignment<float>("GYRO_CALIBRATION_TIME", *gyro_calibration_time))
+	                       ->setHelp("Seconds CALIBRATE_GYRO spends calibrating. 0.5-60, default 5."));
+
+	auto connect_sound = new JSMSetting<int>(SettingID::CONNECT_SOUND, -1);
+	connect_sound->setFilter([](auto, auto next) { return clamp(next, -1, 13); });
+	SettingsManager::add(connect_sound);
+	commandRegistry->add((new JSMAssignment<int>("CONNECT_SOUND", *connect_sound))
+	                       ->setHelp("Built-in Steam Controller tune (0-13) played when the controller connects to JoyShockMapper. -1 (default) plays nothing."));
+
+	auto left_grip_release_delay = new JSMSetting<float>(SettingID::LEFT_GRIP_RELEASE_DELAY, 0.f);
+	left_grip_release_delay->setFilter([](auto, auto next) { return clamp(next, 0.f, 2000.f); });
+	SettingsManager::add(left_grip_release_delay);
+	commandRegistry->add((new JSMAssignment<float>("LEFT_GRIP_RELEASE_DELAY", *left_grip_release_delay))
+	                       ->setHelp("Milliseconds the left grip keeps reading held after your hand leaves it, 0-2000. 0 (default) releases at once. Use it to ride out a grip that drops contact while you are still holding."));
+
+	auto right_grip_release_delay = new JSMSetting<float>(SettingID::RIGHT_GRIP_RELEASE_DELAY, 0.f);
+	right_grip_release_delay->setFilter([](auto, auto next) { return clamp(next, 0.f, 2000.f); });
+	SettingsManager::add(right_grip_release_delay);
+	commandRegistry->add((new JSMAssignment<float>("RIGHT_GRIP_RELEASE_DELAY", *right_grip_release_delay))
+	                       ->setHelp("Milliseconds the right grip keeps reading held after your hand leaves it, 0-2000. 0 (default) releases at once."));
+
+	auto led_brightness = new JSMSetting<int>(SettingID::LED_BRIGHTNESS, -1);
+	led_brightness->setFilter([](auto, auto next) { return clamp(next, -1, 100); });
+	SettingsManager::add(led_brightness);
+	commandRegistry->add((new JSMAssignment<int>("LED_BRIGHTNESS", *led_brightness))
+	                       ->setHelp("Steam Controller light brightness, 0-100. -1 (default) leaves it unchanged. Bind a button to the command \"LED_BRIGHTNESS = n\" to change it from the controller."));
+
+	auto shutdown_sound = new JSMSetting<int>(SettingID::SHUTDOWN_SOUND, -1);
+	shutdown_sound->setFilter([](auto, auto next) { return clamp(next, -1, 13); });
+	SettingsManager::add(shutdown_sound);
+	commandRegistry->add((new JSMAssignment<int>("SHUTDOWN_SOUND", *shutdown_sound))
+	                       ->setHelp("Built-in Steam Controller tune (0-13) played before TURN_OFF_CONTROLLER powers the controller off. -1 (default) plays nothing."));
+
 	// A resting thumb is never actually still, and the pad reports that. Off by
 	// default because the same gate that kills drift also kills a genuinely slow
 	// pan, so how much to trade is the user's call, not a default.
@@ -4215,6 +4537,19 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 		commandRegistry->add((new JSMAssignment<FloatXY>("LEFT_GRID_SIZE", *left_grid_size))
 		                       ->setHelp("When LEFT_TOUCHPAD_MODE is GRID_AND_STICK, sets left pad grid rows and columns."));
 
+		auto left_grid_shape = new JSMSetting<GridShape>(SettingID::LEFT_GRID_SHAPE, GridShape::RECTANGLE);
+		left_grid_shape->setFilter(&filterInvalidValue<GridShape, GridShape::INVALID>);
+		SettingsManager::add(SettingID::LEFT_GRID_SHAPE, left_grid_shape);
+		commandRegistry->add((new JSMAssignment<GridShape>("LEFT_GRID_SHAPE", *left_grid_shape))
+		                       ->setHelp("How the left pad's touch grid is divided. RECTANGLE uses LEFT_GRID_SIZE rows and columns. FOUR_WAY splits the pad into four cardinal wedges -- LT1 up, LT2 right, LT3 down, LT4 left. RADIAL is a weapon wheel of LEFT_GRID_SIZE rows x columns segments, numbered clockwise from up, with LEFT_GRID_DEADZONE as the hole."));
+
+		auto left_grid_deadzone = new JSMSetting<float>(SettingID::LEFT_GRID_DEADZONE, 0.1f);
+		left_grid_deadzone->setFilter([](auto current, auto next)
+		  { return next >= 0.f && next <= 1.f ? next : current; });
+		SettingsManager::add(SettingID::LEFT_GRID_DEADZONE, left_grid_deadzone);
+		commandRegistry->add((new JSMAssignment<float>("LEFT_GRID_DEADZONE", *left_grid_deadzone))
+		                       ->setHelp("With LEFT_GRID_SHAPE set to FOUR_WAY, the fraction of the left pad's half-width at the centre where no region is pressed, between 0 and 1. 0 disables it."));
+
 		auto left_touchpad_sens = new JSMSetting<FloatXY>(SettingID::LEFT_TOUCHPAD_SENS, { 1.f, 1.f });
 		left_touchpad_sens->setFilter(filterFloatPair);
 		SettingsManager::add(left_touchpad_sens);
@@ -4281,6 +4616,19 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 		commandRegistry->add((new JSMAssignment<FloatXY>("RIGHT_GRID_SIZE", *right_grid_size))
 		                       ->setHelp("When RIGHT_TOUCHPAD_MODE is GRID_AND_STICK, sets right pad grid rows and columns."));
 
+		auto right_grid_shape = new JSMSetting<GridShape>(SettingID::RIGHT_GRID_SHAPE, GridShape::RECTANGLE);
+		right_grid_shape->setFilter(&filterInvalidValue<GridShape, GridShape::INVALID>);
+		SettingsManager::add(SettingID::RIGHT_GRID_SHAPE, right_grid_shape);
+		commandRegistry->add((new JSMAssignment<GridShape>("RIGHT_GRID_SHAPE", *right_grid_shape))
+		                       ->setHelp("How the right pad's touch grid is divided. RECTANGLE uses RIGHT_GRID_SIZE rows and columns. FOUR_WAY splits the pad into four cardinal wedges -- RT1 up, RT2 right, RT3 down, RT4 left. RADIAL is a weapon wheel of RIGHT_GRID_SIZE rows x columns segments, numbered clockwise from up, with RIGHT_GRID_DEADZONE as the hole."));
+
+		auto right_grid_deadzone = new JSMSetting<float>(SettingID::RIGHT_GRID_DEADZONE, 0.1f);
+		right_grid_deadzone->setFilter([](auto current, auto next)
+		  { return next >= 0.f && next <= 1.f ? next : current; });
+		SettingsManager::add(SettingID::RIGHT_GRID_DEADZONE, right_grid_deadzone);
+		commandRegistry->add((new JSMAssignment<float>("RIGHT_GRID_DEADZONE", *right_grid_deadzone))
+		                       ->setHelp("With RIGHT_GRID_SHAPE set to FOUR_WAY, the fraction of the right pad's half-width at the centre where no region is pressed, between 0 and 1. 0 disables it."));
+
 		auto right_touchpad_sens = new JSMSetting<FloatXY>(SettingID::RIGHT_TOUCHPAD_SENS, { 1.f, 1.f });
 		right_touchpad_sens->setFilter(filterFloatPair);
 		SettingsManager::add(right_touchpad_sens);
@@ -4341,6 +4689,7 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(SettingID::TELEMETRY_ENABLED, telemetry_enabled);
 	telemetry_enabled->addOnChangeListener([](const Switch &)
 	                                       { RefreshTelemetrySettings(); }, true);
+	startIdleTelemetry();
 	commandRegistry->add((new JSMAssignment<Switch>("TELEMETRY_ENABLED", *telemetry_enabled))
 	                       ->setHelp("Enable or disable the UDP telemetry stream used by the viewer. Valid values are ON and OFF."));
 
@@ -4681,6 +5030,8 @@ int main(int argc, char *argv[])
 	commandRegistry.add((new JSMMacro("SLEEP"))->SetMacro(bind(&do_SLEEP, placeholders::_2))->setHelp("Sleep for the given number of seconds, or one second if no number is given. Can't sleep more than 10 seconds per command."));
 	commandRegistry.add((new JSMMacro("FINISH_GYRO_CALIBRATION"))->SetMacro(bind(&do_FINISH_GYRO_CALIBRATION))->setHelp("Finish calibrating the gyro in all controllers."));
 	commandRegistry.add((new JSMMacro("RESTART_GYRO_CALIBRATION"))->SetMacro(bind(&do_RESTART_GYRO_CALIBRATION))->setHelp("Start calibrating the gyro in all controllers."));
+	commandRegistry.add((new JSMMacro("CALIBRATE_GYRO"))->SetMacro(bind(&do_CALIBRATE_GYRO))->setHelp("Calibrate the gyro in all controllers: wait GYRO_CALIBRATION_DELAY seconds, then calibrate for GYRO_CALIBRATION_TIME seconds. Returns immediately; progress is reported to JSM Studio's overlay."));
+	commandRegistry.add((new JSMMacro("PLAY_SOUND"))->SetMacro(bind(&do_PLAY_SOUND, placeholders::_2))->setHelp("Play one of the Steam Controller's built-in tunes, 0-13, on every connected controller."));
 	commandRegistry.add((new JSMMacro("TURN_OFF_CONTROLLER"))->SetMacro(bind(&do_TURN_OFF_CONTROLLER))->setHelp("Send the Steam Controller power-off report. Bind this to your preferred shutdown shortcut. Only takes effect on hardware that supports it (Steam Controller 2026); bind it to a chord like a face button held together with your Guide or Quick Access Menu button."));
 	commandRegistry.add((new JSMMacro("SET_MOTION_STICK_NEUTRAL"))->SetMacro(bind(&do_SET_MOTION_STICK_NEUTRAL))->setHelp("Set the neutral orientation for motion stick to whatever the orientation of the controller is."));
 	commandRegistry.add((new JSMMacro("README"))->SetMacro(bind(&do_README))->setHelp("Open the latest JoyShockMapper README in your browser."));

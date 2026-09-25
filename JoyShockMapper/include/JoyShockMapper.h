@@ -176,6 +176,62 @@ enum class ButtonID
 	RT23,
 	RT24,
 	RT25,
+
+	// Radial-menu segments for a stick in RADIAL_MENU mode. Appended AFTER
+	// RT25 deliberately: T1/LT1/RT1 are addressed by offset from their own
+	// first element and SIZE sits above T1, so nothing already numbered
+	// moves. Inserting these anywhere earlier would silently retarget every
+	// existing grid binding rather than failing to build.
+	LM1, // FIRST_LEFT_STICK_MENU_BUTTON
+	LM2,
+	LM3,
+	LM4,
+	LM5,
+	LM6,
+	LM7,
+	LM8,
+	LM9,
+	LM10,
+	LM11,
+	LM12,
+	LM13,
+	LM14,
+	LM15,
+	LM16,
+	LM17,
+	LM18,
+	LM19,
+	LM20,
+	LM21,
+	LM22,
+	LM23,
+	LM24,
+	LM25,
+	RM1, // FIRST_RIGHT_STICK_MENU_BUTTON
+	RM2,
+	RM3,
+	RM4,
+	RM5,
+	RM6,
+	RM7,
+	RM8,
+	RM9,
+	RM10,
+	RM11,
+	RM12,
+	RM13,
+	RM14,
+	RM15,
+	RM16,
+	RM17,
+	RM18,
+	RM19,
+	RM20,
+	RM21,
+	RM22,
+	RM23,
+	RM24,
+	RM25,
 };
 
 // help strings for each button
@@ -285,6 +341,8 @@ enum class SettingID
 	SIM_PRESS_WINDOW, // Unchorded setting
 	DBL_PRESS_WINDOW, // Unchorded setting
 	GRID_SIZE,        // Unchorded setting
+	GRID_SHAPE,
+	GRID_DEADZONE,
 	TOUCHPAD_MODE,
 	TOUCH_STICK_MODE,
 	TOUCH_STICK_RADIUS,
@@ -352,6 +410,17 @@ enum class SettingID
 	RIGHT_TOUCHPAD_MODE,
 	LEFT_GRID_SIZE,
 	RIGHT_GRID_SIZE,
+	LEFT_GRID_SHAPE,
+	RIGHT_GRID_SHAPE,
+	LEFT_GRID_DEADZONE,
+	RIGHT_GRID_DEADZONE,
+	// A stick's radial menu: how many segments, and how far the stick has to be
+	// pushed before one is selected. Separate from the stick's own deadzone,
+	// which decides when the stick counts as moved at all.
+	LEFT_STICK_MENU_SIZE,
+	RIGHT_STICK_MENU_SIZE,
+	LEFT_STICK_MENU_DEADZONE,
+	RIGHT_STICK_MENU_DEADZONE,
 	LEFT_TOUCHPAD_SENS,
 	RIGHT_TOUCHPAD_SENS,
 	LEFT_TOUCHPAD_DUAL_STAGE_MODE,
@@ -412,6 +481,27 @@ enum class SettingID
 	// -- or disabled -- separately; 0 intensity = off.
 	GRIP_RELEASE_HAPTIC_INTENSITY,
 	GRIP_RELEASE_HAPTIC_EFFECT,
+	// CALIBRATE_GYRO waits DELAY seconds (time to put the controller down), then
+	// calibrates for TIME seconds. Both phases are reported over telemetry.
+	GYRO_CALIBRATION_DELAY,
+	GYRO_CALIBRATION_TIME,
+	// A built-in controller tune (haptic script 0-13) played when a Steam
+	// Controller 2026 connects to the mapper, and before TURN_OFF_CONTROLLER
+	// powers it off. -1 (default) = none. The firmware's own power-on and
+	// button power-off jingles are not configurable and still play.
+	CONNECT_SOUND,
+	SHUTDOWN_SOUND,
+	// How long, in milliseconds, a grip keeps reading "held" after the hand
+	// leaves it. Per side, unlike range and flicker guard: this is time on the
+	// host, not distance in the firmware, so each grip can have its own -- a
+	// long one for a grip that holds a layer, none for the one that holds gyro.
+	// 0 (default) = released the moment the firmware says so.
+	LEFT_GRIP_RELEASE_DELAY,
+	RIGHT_GRIP_RELEASE_DELAY,
+	// The Steam Controller 2026's light, 0-100 (controller setting 45, the one
+	// Steam's brightness slider writes). -1 (default) leaves it as it is. A
+	// binding that runs "LED_BRIGHTNESS = n" makes it an output.
+	LED_BRIGHTNESS,
 	// A thumb trying to hold still on a capacitive pad never is: the contact patch
 	// breathes and the reported position drifts, which the mouse path faithfully
 	// turns into a crawling cursor. Below this finger speed, in pad pixels per
@@ -462,6 +552,43 @@ constexpr int FIRST_TOUCH_BUTTON = MAPPING_SIZE + 1;
 constexpr int MAX_GRID_BUTTONS = int(ButtonID::T25) - int(ButtonID::T1) + 1;
 constexpr int FIRST_LEFT_TOUCH_BUTTON = int(ButtonID::LT1);
 constexpr int FIRST_RIGHT_TOUCH_BUTTON = int(ButtonID::RT1);
+constexpr int FIRST_LEFT_STICK_MENU_BUTTON = int(ButtonID::LM1);
+constexpr int FIRST_RIGHT_STICK_MENU_BUTTON = int(ButtonID::RM1);
+
+// ---------------------------------------------------------------------------
+// The five virtual ranges -- T, LT, RT, LM, RM -- are each addressed by OFFSET
+// from their own first element. Insert anything in the wrong place and every
+// existing binding in the ranges below it silently retargets: a config that
+// reloaded a weapon starts throwing a grenade, and nothing fails to build.
+//
+// So the layout is pinned here rather than in a test. These run on every build,
+// which a harness someone has to remember to run does not.
+// ---------------------------------------------------------------------------
+
+// SIZE counts the real buttons, so it must stay below the virtual ranges or
+// MAPPING_SIZE -- and with it FIRST_TOUCH_BUTTON -- moves.
+static_assert(int(ButtonID::SIZE) < int(ButtonID::T1),
+  "ButtonID::SIZE must precede the virtual button ranges");
+static_assert(int(ButtonID::T1) == FIRST_TOUCH_BUTTON,
+  "T1 moved: grid bindings are addressed by offset and would silently retarget");
+
+// Order: T -> LT -> RT -> LM -> RM, none overlapping.
+static_assert(int(ButtonID::T25) < int(ButtonID::LT1), "the shared grid must precede the left pad grid");
+static_assert(int(ButtonID::LT25) < int(ButtonID::RT1), "the left pad grid must precede the right pad grid");
+static_assert(int(ButtonID::RT25) < int(ButtonID::LM1), "the pad grids must precede the stick menus");
+static_assert(int(ButtonID::LM25) < int(ButtonID::RM1), "the left stick menu must precede the right one");
+
+// Every range is the same width, so one limit serves all five.
+static_assert(int(ButtonID::T25) - int(ButtonID::T1) + 1 == MAX_GRID_BUTTONS, "shared grid span");
+static_assert(int(ButtonID::LT25) - int(ButtonID::LT1) + 1 == MAX_GRID_BUTTONS, "left pad grid span");
+static_assert(int(ButtonID::RT25) - int(ButtonID::RT1) + 1 == MAX_GRID_BUTTONS, "right pad grid span");
+static_assert(int(ButtonID::LM25) - int(ButtonID::LM1) + 1 == MAX_GRID_BUTTONS, "left stick menu span");
+static_assert(int(ButtonID::RM25) - int(ButtonID::RM1) + 1 == MAX_GRID_BUTTONS, "right stick menu span");
+
+// magic_enum turns an index back into a ButtonID, and past its configured range
+// it silently returns nothing -- a segment that could never fire.
+static_assert(int(ButtonID::RM25) <= MAGIC_ENUM_RANGE_MAX,
+  "ButtonID has outgrown MAGIC_ENUM_RANGE_MAX; enum_cast would start failing silently");
 constexpr int NUM_ANALOG_TRIGGERS = int(LAST_ANALOG_TRIGGER) - int(FIRST_ANALOG_TRIGGER) + 1;
 constexpr float MAGIC_TAP_DURATION = 40.0f;           // in milliseconds.
 constexpr float MAGIC_INSTANT_DURATION = 40.0f;       // in milliseconds
@@ -524,6 +651,13 @@ enum class HapticEffect
 	NOISE,
 	SCRIPT,
 	SWEEP,
+	// Not firmware canned effects, so kept after the firmware's own list (whose
+	// indices are what travel in the command report). PULSE is the single 300 us
+	// pulse Steam's grip calibration plays; TAP is that pulse preceded by a pad
+	// CLICK, as Steam plays it on the right grip. No underscores: a haptic binding
+	// name reads anything after one as the gain.
+	PULSE,
+	TAP,
 	INVALID
 };
 
@@ -556,6 +690,11 @@ enum class StickMode
 	INNER_RING,
 	SCROLL_WHEEL,
 	HYBRID_AIM,
+	// A weapon wheel on the stick: deflection past the deadzone selects one of
+	// LM1..LM25 / RM1..RM25 by angle, numbered clockwise from up exactly as a
+	// RADIAL touch grid is. Deliberately placed ABOVE the virtual-controller
+	// block below, which is range-checked as one contiguous span.
+	RADIAL_MENU,
 	// Following requires virtual controller (keep them contiguous)
 	LEFT_STICK,
 	RIGHT_STICK,

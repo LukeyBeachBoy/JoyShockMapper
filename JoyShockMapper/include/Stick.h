@@ -51,7 +51,10 @@ struct Stick
 		ButtonID upId,
 		ButtonID downId,
 		SettingID stickRadius = SettingID::ZERO,
-		SettingID stickAxis = SettingID::ZERO)
+		SettingID stickAxis = SettingID::ZERO,
+		SettingID menuSize = SettingID::ZERO,
+		SettingID menuDeadzone = SettingID::ZERO,
+		int menuFirstId = -1)
 		: _innerDeadzone(innerDeadzone)
 		, _outerDeadzone(outerDeadzone)
 		, _ringMode(ringMode)
@@ -63,6 +66,9 @@ struct Stick
 		, _rightId(rightId)
 		, _upId(upId)
 		, _downId(downId)
+		, _menuSize(menuSize)
+		, _menuDeadzone(menuDeadzone)
+		, _menuFirstId(menuFirstId)
 	{
 	}
 	SettingID _innerDeadzone;
@@ -76,6 +82,14 @@ struct Stick
 	ButtonID _rightId;
 	ButtonID _upId;
 	ButtonID _downId;
+	// RADIAL_MENU: the settings describing this stick's wheel, and the first of
+	// its 25 segment buttons. -1 means this stick has no menu (the motion stick).
+	SettingID _menuSize;
+	SettingID _menuDeadzone;
+	int _menuFirstId = -1;
+	// Which segment is currently held, so moving to another one releases it
+	// rather than leaving two segments pressed at once.
+	int _menuSelected = -1;
 	int _touchpadIndex = -1;
 
 	// Flick stick

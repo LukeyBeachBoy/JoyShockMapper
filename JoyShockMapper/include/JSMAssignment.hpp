@@ -2,6 +2,7 @@
 
 #include "JoyShockMapper.h"
 #include "CmdRegistry.h" // for JSMCommand
+#include "ConfigErrors.h"
 #include "JSMVariable.hpp"
 #include "PlatformDefinitions.h"
 
@@ -48,6 +49,7 @@ protected:
 			}
 			else if (!_parse(this, assignment, label))
 			{
+				ConfigErrors::report("invalid value " + assignment + " for " + _displayName);
 				CERR << "Error assigning ";
 				COUT_INFO << assignment;
 				CERR << " to " << _displayName << '\n';
@@ -61,6 +63,7 @@ protected:
 		else if (!_help.empty())
 		{
 			// Parsing has failed.
+			ConfigErrors::report("not an assignment");
 			CERR << "Error when processing the assignment. See the ";
 			COUT_INFO << "README";
 			CERR << " for details on valid assignment values\n";

@@ -87,6 +87,9 @@ private:
     vector<string> _restoreLines;
     bool _chordLoading = false;
     vector<string> _loadingFiles;
+    // The line being read in each file of _loadingFiles, so a line that cannot
+    // be used can be reported with where it is.
+    vector<int> _loadingLines;
 
 	static string_view strtrim(string_view str);
 

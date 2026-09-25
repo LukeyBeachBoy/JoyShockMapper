@@ -278,6 +278,23 @@ struct ControllerInfo
 	std::string name;
 };
 
+/// A snapshot of what SDL lists against what JoyShockMapper actually has open.
+///
+/// `failedToOpen` is the part a device count cannot give you: a reconnect that
+/// opens nothing leaves the count where it started, so "how many devices are
+/// there" and "did the last connect attempt work" are different questions.
+///
+/// It is what the last connect attempt recorded, not a live "SDL lists it but
+/// we have not opened it" diff. Those are not equivalent: our own virtual pad
+/// is created by the configuration AFTER the enumeration, so the diff counts
+/// it forever -- and it is a device JoyShockMapper must never open.
+struct DeviceCensus
+{
+	int listed = 0;
+	int opened = 0;
+	int failedToOpen = 0;
+};
+
 class JslWrapper
 {
 protected:
@@ -298,9 +315,21 @@ public:
 		return ConnectDevices();
 	}
 	virtual int GetDeviceCount() = 0;
+	// What AutoConnect needs to know about the device list, from one refresh.
+	// A backend that cannot answer returns an empty census and loses only the
+	// retry, not the device-count trigger.
+	virtual DeviceCensus TakeDeviceCensus()
+	{
+		return DeviceCensus{};
+	}
 	virtual std::vector<ControllerInfo> ListAvailableDevices()
 	{
 		return {};
+	}
+	// Re-enumerate every device from scratch. Only called while nothing is
+	// open, so nothing is closed by it. See AutoConnect::AutoConnectPoll.
+	virtual void RescanDevices()
+	{
 	}
 	virtual int GetConnectedDeviceHandles(int* deviceHandleArray, int size) = 0;
 	virtual void DisconnectAndDisposeAll() = 0;
@@ -363,6 +392,9 @@ public:
 	// power-off that silently does nothing is indistinguishable from a broken
 	// binding.
 	virtual bool TurnOffController(int deviceId) { return false; }
+	// Plays one of the controller's built-in tunes (Steam Controller 2026 haptic
+	// scripts 0-13; Steam's "Identify Controller" ping is 12).
+	virtual bool PlayHapticScript(int deviceId, int script) { return false; }
 	// percent: 0-100, or -1 if the device/driver can't report one. state:
 	// mirrors SDL_PowerState (-1 error, 0 unknown, 1 on battery, 2 no battery,
 	// 3 charging, 4 charged). Defaults leave both at "unknown" for backends

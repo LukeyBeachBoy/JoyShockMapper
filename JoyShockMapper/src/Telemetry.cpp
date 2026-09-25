@@ -1,3 +1,4 @@
+#include "ConfigErrors.h"
 #include "ConsoleFeed.h"
 #include "Telemetry.h"
 
@@ -5,6 +6,7 @@
 #include <chrono>
 #include <cstring>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 #include <string>
 
@@ -65,8 +67,16 @@ public:
 		return _enabled && std::chrono::steady_clock::now() >= _nextSend;
 	}
 
+	bool sentWithin(std::chrono::milliseconds window)
+	{
+		std::lock_guard<std::mutex> lock(_sendMutex);
+		return std::chrono::steady_clock::now() - _lastSent < window;
+	}
+
 	void maybeSend(const TelemetrySample &sample)
 	{
+		// The poll callback and the idle heartbeat can both send.
+		std::lock_guard<std::mutex> lock(_sendMutex);
 		if (!_enabled)
 		{
 			return;
@@ -85,6 +95,7 @@ public:
 		}
 
 		_nextSend = now + minInterval;
+		_lastSent = now;
 
 		std::ostringstream oss;
 		oss.setf(std::ios::fixed, std::ios::floatfield);
@@ -108,7 +119,12 @@ public:
 		    << ",\"curve\":\"" << sample.curve << "\""
 		    << ",\"params\":" << (sample.paramsJson.empty() ? "{}" : sample.paramsJson)
 		    << ",\"console\":" << ConsoleFeed::json()
-            << ",\"sampleHz\":" << sample.sampleRateHz;
+            << ",\"sampleHz\":" << sample.sampleRateHz
+		    << ",\"gyroCal\":{\"phase\":" << sample.gyroCalPhase
+		    << ",\"remainingMs\":" << sample.gyroCalRemainingMs
+		    << ",\"totalMs\":" << sample.gyroCalTotalMs
+		    << ",\"reached\":" << sample.gyroCalReachedPct << "}"
+		    << ",\"configErrors\":" << ConfigErrors::json();
 
 		if (!sample.devices.empty())
 		{
@@ -128,7 +144,9 @@ public:
 				    << ",\"vid\":" << dev.vendorId
 				    << ",\"pid\":" << dev.productId
 				    << ",\"batteryPercent\":" << dev.batteryPercent
-				    << ",\"batteryState\":" << dev.batteryState;
+				    << ",\"batteryState\":" << dev.batteryState
+				    << ",\"touchpadWidth\":" << dev.touchpadWidth
+				    << ",\"touchpadHeight\":" << dev.touchpadHeight;
 				if (dev.status.has_value())
 				{
 					const auto &status = dev.status.value();
@@ -259,6 +277,8 @@ private:
 	SocketHandle _socket = kInvalidSocket;
 	sockaddr_in _target {};
 	std::chrono::steady_clock::time_point _nextSend = std::chrono::steady_clock::time_point::min();
+	std::chrono::steady_clock::time_point _lastSent = std::chrono::steady_clock::time_point::min();
+	std::mutex _sendMutex;
 #ifdef _WIN32
 	bool _wsaStarted = false;
 #endif
@@ -287,6 +307,11 @@ void MaybeSend(const TelemetrySample &sample)
 bool IsDue()
 {
 	return TelemetryEmitter::Instance().isDue();
+}
+
+bool SentWithin(std::chrono::milliseconds window)
+{
+	return TelemetryEmitter::Instance().sentWithin(window);
 }
 
 } // namespace Telemetry
