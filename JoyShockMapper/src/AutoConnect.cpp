@@ -30,6 +30,24 @@ bool AutoConnect::AutoConnectPoll(void* param)
 	// as they always have been.
 	const int realSize = census.listed - int(Gamepad::getCount());
 
+	// A controller we hold open that SDL says is gone: switched off, or out of
+	// range. SDL keeps the gamepad object valid and answering with its last
+	// state, so the poll goes on reporting a pad that is no longer there --
+	// which is what Studio then shows. The device count does notice the loss,
+	// but not inside the settle window: the chord that powers a Steam
+	// Controller off follows a profile load, and a profile load that touches
+	// VIRTUAL_CONTROLLER has just reconnected, so the loss was absorbed as our
+	// own churn and the dead controller stayed open for the rest of the
+	// session. So this is asked before the window, every tick. It cannot loop:
+	// the reconnect closes the dead controller and finds nothing to reopen.
+	if (census.disconnected > 0)
+	{
+		COUT_INFO << "[AUTOCONNECT] " << census.disconnected << " open controller(s) no longer connected.\n";
+		lastSize = realSize;
+		reconnect("A controller disconnected");
+		return true;
+	}
+
 	// Nothing connected: SDL may simply not be able to see a controller that has
 	// come back (a Steam Controller switched on through its dongle), so every few
 	// polls it enumerates from scratch. It closes nothing -- nothing is open --
@@ -59,6 +77,22 @@ bool AutoConnect::AutoConnectPoll(void* param)
 	{
 		--settleTicks;
 		lastSize = realSize;
+		// The window absorbs a controller switched on inside it too: the count
+		// moved, lastSize followed, and the count trigger below never sees it.
+		// So the window ends by asking the one thing our own churn cannot fake
+		// -- are real devices listed that the connect attempt did not try? A
+		// device it tried and could not open is the retry's job, hence
+		// failedToOpen == 0; and it is asked once per count change (caughtUp),
+		// so a device that is listed but never ours to open -- an unselected
+		// controller in manual mode -- cannot reconnect the session at the end
+		// of every window. That would be the loop this file exists to prevent.
+		if (settleTicks == 0 && !caughtUp && census.failedToOpen == 0 && realSize > census.opened)
+		{
+			caughtUp = true;
+			COUT_INFO << "[AUTOCONNECT] " << (realSize - census.opened) << " device(s) arrived during the settle window.\n";
+			retry.arm();
+			reconnect("A controller arrived during the settle window");
+		}
 		return true;
 	}
 
@@ -67,6 +101,7 @@ bool AutoConnect::AutoConnectPoll(void* param)
 	{
 		COUT_INFO << "[AUTOCONNECT] Going from " << lastSize << " devices to " << realSize << ".\n";
 		lastSize = realSize;
+		caughtUp = false;
 		retry.arm();
 		reconnect("Device count changed");
 		return true;
@@ -77,6 +112,10 @@ bool AutoConnect::AutoConnectPoll(void* param)
 	if (census.failedToOpen == 0)
 	{
 		retry.clear();
+		if (realSize <= census.opened)
+		{
+			caughtUp = false;
+		}
 		return true;
 	}
 

@@ -42,6 +42,12 @@ private:
 	/// Studio seeing it.
 	static constexpr int IDLE_RESCAN_TICKS = 3;
 	int idleTicks = 0;
+
+	/// The settle window has already reconnected once for devices that arrived
+	/// inside it, since the last count change. One per change: a device that is
+	/// listed but never ours to open would otherwise reconnect the session at
+	/// the end of every window.
+	bool caughtUp = false;
 };
 
 } //JSM

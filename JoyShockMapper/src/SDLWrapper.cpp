@@ -1039,6 +1039,15 @@ public:
 		census.listed = count;
 		census.opened = int(_controllerMap.size());
 		census.failedToOpen = _failedToOpen;
+		// A pad that switched off after we opened it: SDL removes its joystick
+		// but keeps the gamepad object valid, answering with its last state.
+		for (const auto &entry : _controllerMap)
+		{
+			if (entry.second->isValid() && !SDL_GamepadConnected(entry.second->_sdlController))
+			{
+				++census.disconnected;
+			}
+		}
 		return census;
 	}
 

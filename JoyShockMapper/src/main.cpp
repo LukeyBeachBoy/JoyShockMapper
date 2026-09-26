@@ -11,6 +11,7 @@
 #include "SettingsManager.h"
 #include "JoyShock.h"
 #include "Telemetry.h"
+#include "StudioFeedback.h"
 #include "NaturalCurve.h"
 #include "PowerCurve.h"
 #include "QuadraticCurve.h"
@@ -954,6 +955,43 @@ int64_t nowMs();
 void watchForMovement(int handle, const IMU_STATE &imu, float deltaTime);
 }
 
+// Plays what JSM Studio asked for (StudioFeedback.h) on this controller. The
+// Steam Controller has haptic actuators and plays the effect itself; anything
+// else gets a short rumble pulse, stopped by a later poll. SDL sends the rumble
+// value on every poll, so a pulse is simply "set, then set to zero".
+//
+// Not gated on the RUMBLE setting: that governs rumble a game or binding asks
+// for, and Studio has its own switch for its feedback.
+static void serviceStudioFeedback(shared_ptr<JoyShock> &jc, chrono::steady_clock::time_point now)
+{
+	if (jc->studioFeedbackRumbling && now >= jc->studioFeedbackRumbleUntil)
+	{
+		jsl->SetRumble(jc->_handle, 0, 0);
+		jc->studioFeedbackRumbling = false;
+	}
+	const uint32_t sequence = StudioFeedback::Sequence();
+	if (sequence == jc->studioFeedbackSequence)
+		return;
+	jc->studioFeedbackSequence = sequence;
+	const auto request = StudioFeedback::Latest();
+	// Asked for before this controller was listening (it just connected), or
+	// so long ago it would no longer read as a response to anything.
+	if (now - request.received > chrono::milliseconds(150))
+		return;
+	if (jc->_controllerType == JS_TYPE_STEAM_CONTROLLER_2026)
+	{
+		jc->fireHaptic(request.side, request.effect, hapticGainDb(request.intensity));
+		return;
+	}
+	if (request.rumbleMs <= 0 || request.rumble <= 0.f)
+		return;
+	const int strength = int(request.rumble / 100.f * 65535.f);
+	// Small motor on the right, big on the left, as on every pad that has two.
+	jsl->SetRumble(jc->_handle, (request.side & 2) ? strength : 0, (request.side & 1) ? strength : 0);
+	jc->studioFeedbackRumbling = true;
+	jc->studioFeedbackRumbleUntil = now + chrono::milliseconds(request.rumbleMs);
+}
+
 void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE lastState, IMU_STATE imuState, IMU_STATE lastImuState, float deltaTime)
 {
 
@@ -965,6 +1003,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	auto timeNow = chrono::steady_clock::now();
 	deltaTime = ((float)chrono::duration_cast<chrono::microseconds>(timeNow - jc->_timeNow).count()) / 1000000.0f;
 	jc->_timeNow = timeNow;
+	serviceStudioFeedback(jc, timeNow);
 
 	if (triggerCalibrationStep)
 	{
@@ -2932,6 +2971,7 @@ void beforeShowTrayMenu()
 void cleanUp()
 {
 	Telemetry::Shutdown();
+	StudioFeedback::Stop();
 	if (tray)
 	{
 		tray->Hide();
@@ -5066,6 +5106,7 @@ int main(int argc, char *argv[])
 	}
 	jsl->SetCallback(&joyShockPollCallback);
 	jsl->SetTouchCallback(&touchCallback);
+	StudioFeedback::Start();
 	tray.reset(TrayIcon::getNew(trayIconData, &beforeShowTrayMenu));
 	if (tray)
 	{

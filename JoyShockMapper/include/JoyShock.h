@@ -382,6 +382,13 @@ public:
 	// the time it takes a thumb to actually push the switch down.
 	float padPressLevel = 0.f;
 
+	// JSM Studio's UI feedback (StudioFeedback.h): the last request this
+	// controller has played, and the end of a rumble pulse standing in for
+	// haptics on a controller without actuators. Poll callback only.
+	uint32_t studioFeedbackSequence = 0;
+	bool studioFeedbackRumbling = false;
+	std::chrono::steady_clock::time_point studioFeedbackRumbleUntil{};
+
 	// Plays one of the controller's own effects on this controller's actuators.
 	// Public because the touch path in main.cpp drives the pad haptics directly,
 	// rather than going through a binding the way sendHaptic's other caller does.

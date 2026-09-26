@@ -293,6 +293,11 @@ struct DeviceCensus
 	int listed = 0;
 	int opened = 0;
 	int failedToOpen = 0;
+	/// Of the opened controllers, how many SDL no longer considers connected:
+	/// switched off or out of range since we opened them. SDL keeps such a
+	/// gamepad valid and answering with its last state, so without this count
+	/// nothing notices and the pad is reported for the rest of the session.
+	int disconnected = 0;
 };
 
 class JslWrapper
