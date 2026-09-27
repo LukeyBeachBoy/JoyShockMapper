@@ -24,11 +24,14 @@
 #include <deque>
 #include <unordered_map>
 #include <sstream>
+#include <fstream>
+#include <iomanip>
 #define _USE_MATH_DEFINES
 #include <math.h> // M_PI
 
 #ifdef _WIN32
 #include <shellapi.h>
+#include <io.h>
 #else
 #define UCHAR unsigned char
 #include <algorithm>
@@ -61,6 +64,9 @@ vector<pair<int, int>> g_ignoreGyroVidPid;
 unique_ptr<PollingThread> minimizeThread;
 bool devicesCalibrating = false;
 bool g_manualConnectMode = false;
+// Set by --no-tray: JSM Studio launches the mapper with it and carries the
+// mapper's tray actions in its own icon, so there is one icon rather than two.
+bool g_noTray = false;
 unordered_map<int, shared_ptr<JoyShock>> handle_to_joyshock;
 
 int input_pipe_fd[2];
@@ -647,7 +653,8 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 	{
 		static const function<bool(ButtonID)> IS_TOUCH_BUTTON = [](ButtonID id)
 		{
-			return id >= ButtonID::T1;
+			// Not a "while released" chord, which also sits above T1.
+			return id >= ButtonID::T1 && !isInvertedChord(id);
 		};
 		for (auto currentlyActive = find_if(js->_context->chordStack.begin(), js->_context->chordStack.end(), IS_TOUCH_BUTTON);
 		     currentlyActive != js->_context->chordStack.end();
@@ -980,7 +987,10 @@ static void serviceStudioFeedback(shared_ptr<JoyShock> &jc, chrono::steady_clock
 		return;
 	if (jc->_controllerType == JS_TYPE_STEAM_CONTROLLER_2026)
 	{
-		jc->fireHaptic(request.side, request.effect, hapticGainDb(request.intensity));
+		if (request.grips)
+			jsl->SetGripHaptic(jc->_handle, request.side, request.effect, hapticGainDb(request.intensity));
+		else
+			jc->fireHaptic(request.side, request.effect, hapticGainDb(request.intensity));
 		return;
 	}
 	if (request.rumbleMs <= 0 || request.rumble <= 0.f)
@@ -999,6 +1009,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	if (jc == nullptr)
 		return;
 	jc->_context->callback_lock.lock();
+	jc->_context->syncInvertedChords();
 
 	auto timeNow = chrono::steady_clock::now();
 	deltaTime = ((float)chrono::duration_cast<chrono::microseconds>(timeNow - jc->_timeNow).count()) / 1000000.0f;
@@ -2268,8 +2279,101 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 #endif
 }
 
+// Each controller's last gyro calibration, by JslWrapper::GetControllerKey. A
+// reconnect rebuilds every JoyShock -- and a reconnect follows any controller
+// switching on or off -- so without this one controller dropping out left every
+// controller drifting until it was calibrated again. Kept on disk too: a bias
+// from yesterday is far closer than the zero a fresh start begins at.
+namespace SavedGyroOffsets
+{
+// In JSM_DIRECTORY. Not .txt: it is not a configuration, and Studio lists .txt.
+constexpr const char *FILE_NAME = "GyroCalibration.dat";
+mutex lock; // CALIBRATE_GYRO finishes on its own thread
+map<string, array<float, 3>> offsets;
+bool loaded = false;
+
+// One controller per line: "x y z<TAB>key". The key goes last because a
+// device path can hold anything but a tab or a newline.
+void loadIfNeeded()
+{
+	if (loaded)
+		return;
+	loaded = true;
+	ifstream file(FILE_NAME);
+	string line;
+	while (getline(file, line))
+	{
+		const auto tab = line.find('\t');
+		array<float, 3> offset{};
+		if (tab == string::npos || tab + 1 == line.size() ||
+		    !(istringstream(line.substr(0, tab)) >> offset[0] >> offset[1] >> offset[2]))
+			continue;
+		offsets[line.substr(tab + 1)] = offset;
+	}
+}
+
+// Written beside itself and renamed over: a kill mid-write (Studio ends the
+// mapper that way) must not leave a truncated file that loses every controller.
+void write()
+{
+	const string temp = string(FILE_NAME) + ".tmp";
+	{
+		ofstream file(temp, ios::trunc);
+		file << setprecision(9);
+		for (auto &[key, offset] : offsets)
+			file << offset[0] << ' ' << offset[1] << ' ' << offset[2] << '\t' << key << '\n';
+		if (!file)
+			return;
+	}
+	error_code error;
+	filesystem::rename(temp, FILE_NAME, error);
+	if (error)
+		CERR << "Could not save the gyro calibration: " << error.message() << '\n';
+}
+
+// A zero offset is a controller that was never calibrated: saving it would
+// throw away the value an earlier connection left.
+void save()
+{
+	// Mid-run the offset is half-sampled; keep what it had before the run.
+	if (devicesCalibrating)
+		return;
+	lock_guard guard(lock);
+	loadIfNeeded();
+	bool changed = false;
+	for (auto &[handle, jc] : handle_to_joyshock)
+	{
+		array<float, 3> offset{};
+		jc->_motion->GetCalibrationOffset(offset[0], offset[1], offset[2]);
+		if (jc->_deviceKey.empty() || (offset[0] == 0.f && offset[1] == 0.f && offset[2] == 0.f))
+			continue;
+		auto [entry, added] = offsets.try_emplace(jc->_deviceKey, offset);
+		if (added || entry->second != offset)
+		{
+			entry->second = offset;
+			changed = true;
+		}
+	}
+	if (changed)
+		write();
+}
+
+void restore(JoyShock &jc)
+{
+	lock_guard guard(lock);
+	loadIfNeeded();
+	auto saved = offsets.find(jc._deviceKey);
+	if (jc._deviceKey.empty() || saved == offsets.end())
+		return;
+	// The same weight CALIBRATE_GYRO puts a cancelled run's offset back with.
+	jc._motion->SetCalibrationOffset(saved->second[0], saved->second[1], saved->second[2], 100);
+	COUT_INFO << "Restored gyro calibration for controller " << jc._handle << '\n';
+}
+} // namespace SavedGyroOffsets
+
 void connectDevices(bool mergeJoycons = true, const vector<int>& selectedDeviceIds = {})
 {
+	SavedGyroOffsets::save();
 	handle_to_joyshock.clear();
 	this_thread::sleep_for(100ms);
 	int numConnected = selectedDeviceIds.empty() ? jsl->ConnectDevices() : jsl->ConnectDevices(selectedDeviceIds);
@@ -2303,6 +2407,8 @@ void connectDevices(bool mergeJoycons = true, const vector<int>& selectedDeviceI
 			{
 				handle_to_joyshock[handle] = make_shared<JoyShock>(handle, type);
 			}
+			handle_to_joyshock[handle]->_deviceKey = jsl->GetControllerKey(handle);
+			SavedGyroOffsets::restore(*handle_to_joyshock[handle]);
 		}
 
 		UpdateIgnoredGyroDevices();
@@ -2405,6 +2511,9 @@ bool do_NO_GYRO_BUTTON()
 bool do_RESET_MAPPINGS(CmdRegistry *registry)
 {
 	COUT << "Resetting all mappings to defaults\n";
+	// The next configuration says which "!X" chords it uses; each controller
+	// drops the old ones on its next poll.
+	clearInvertedChords();
 	static constexpr auto callReset = [](JSMButton &map)
 	{
 		map.reset();
@@ -2590,6 +2699,9 @@ bool do_FINISH_GYRO_CALIBRATION()
 		iter->second->_motion->PauseContinuousCalibration();
 	}
 	devicesCalibrating = false;
+	// Saved now rather than at the next reconnect: Studio kills the mapper on
+	// exit, so there is no later moment to count on.
+	SavedGyroOffsets::save();
 	return true;
 }
 
@@ -2750,18 +2862,27 @@ bool do_CALIBRATE_GYRO()
 
 bool do_PLAY_SOUND(string_view argument)
 {
+	// PLAY_SOUND <sound> [gain dB]: without a gain, SOUND_GAIN's. Studio's
+	// preview names the gain so it plays at the level just picked, before that
+	// reaches SOUND_GAIN.
 	int script = 0;
+	int gain = SettingsManager::get<int>(SettingID::SOUND_GAIN)->value();
 	try
 	{
-		script = stoi(string(argument));
+		stringstream words{ string(argument) };
+		string sound, level;
+		words >> sound >> level;
+		script = stoi(sound);
+		if (!level.empty())
+			gain = clamp(stoi(level), -30, 6);
 	}
 	catch (...)
 	{
-		CERR << "PLAY_SOUND needs a sound number, 0-13.\n";
+		CERR << "PLAY_SOUND needs a sound number, 0-13, and optionally a gain in dB.\n";
 		return false;
 	}
 	for (auto &[handle, jc] : handle_to_joyshock)
-		jsl->PlayHapticScript(handle, script);
+		jsl->PlayHapticScript(handle, script, gain);
 	return true;
 }
 
@@ -2772,7 +2893,7 @@ bool do_TURN_OFF_CONTROLLER()
 	{
 		bool played = false;
 		for (auto &[handle, jc] : handle_to_joyshock)
-			played |= jsl->PlayHapticScript(handle, sound);
+			played |= jsl->PlayHapticScript(handle, sound, SettingsManager::get<int>(SettingID::SOUND_GAIN)->value());
 		if (played)
 			this_thread::sleep_for(chrono::milliseconds(1500));
 	}
@@ -4428,11 +4549,23 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<int>("LED_BRIGHTNESS", *led_brightness))
 	                       ->setHelp("Steam Controller light brightness, 0-100. -1 (default) leaves it unchanged. Bind a button to the command \"LED_BRIGHTNESS = n\" to change it from the controller."));
 
+	auto disable_hardware_gyro_calibration = new JSMSetting<Switch>(SettingID::DISABLE_HARDWARE_GYRO_CALIBRATION, Switch::ON);
+	disable_hardware_gyro_calibration->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(disable_hardware_gyro_calibration);
+	commandRegistry->add((new JSMAssignment<Switch>("DISABLE_HARDWARE_GYRO_CALIBRATION", *disable_hardware_gyro_calibration))
+	                       ->setHelp("Switch off the Steam Controller's own gyro auto-calibration. ON (default) or OFF. The firmware re-estimates gyro drift whenever the controller seems still, and a slow, deliberate movement passes that test, so small aim adjustments are cancelled out and the cursor slides back. With it off, drift is corrected by CALIBRATE_GYRO or AUTO_CALIBRATE_GYRO instead."));
+
 	auto shutdown_sound = new JSMSetting<int>(SettingID::SHUTDOWN_SOUND, -1);
 	shutdown_sound->setFilter([](auto, auto next) { return clamp(next, -1, 13); });
 	SettingsManager::add(shutdown_sound);
 	commandRegistry->add((new JSMAssignment<int>("SHUTDOWN_SOUND", *shutdown_sound))
 	                       ->setHelp("Built-in Steam Controller tune (0-13) played before TURN_OFF_CONTROLLER powers the controller off. -1 (default) plays nothing."));
+
+	auto sound_gain = new JSMSetting<int>(SettingID::SOUND_GAIN, 0);
+	sound_gain->setFilter([](auto, auto next) { return clamp(next, -30, 6); });
+	SettingsManager::add(sound_gain);
+	commandRegistry->add((new JSMAssignment<int>("SOUND_GAIN", *sound_gain))
+	                       ->setHelp("How loud CONNECT_SOUND, SHUTDOWN_SOUND and PLAY_SOUND play, as a gain in dB from -30 to 6. 0 (default) plays the tune as the controller does; negative is quieter."));
 
 	// A resting thumb is never actually still, and the pad reports that. Off by
 	// default because the same gate that kills drift also kills a genuinely slow
@@ -4936,6 +5069,66 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 }
 
 #ifdef _WIN32
+// Waits for the next command while handling this thread's window messages.
+//
+// SDL_Init ran on this thread, so the hidden window SDL's HID discovery uses
+// to hear about device arrivals is this thread's -- and SDL only processes it
+// when called on this thread (SDL_hidapi.c, HIDAPI_UpdateDiscovery). The loop
+// used to sit in getline for good, so a Steam Controller switched on through
+// its dongle queued a device arrival nobody read: the controller stayed in
+// Lizard Mode until some command happened to run here (Studio loading a
+// configuration as it lost or gained focus) and let SDL look.
+//
+// So the wait is on both: console input, or a window message. Messages are
+// dispatched at once -- the arrival reaches SDL, and AutoConnect's next
+// census sees the controller -- then the wait resumes. getline is only
+// entered once typed or injected characters are waiting; other console
+// events (focus, mouse, resize) are drained here, or they would wake the
+// wait for ever. Not a console (piped input): getline alone, as before.
+static void waitForConsoleCommand()
+{
+	// The handle cin reads, not GetStdHandle: Studio starts the mapper with a
+	// null stdin, and initConsole reopens the CRT's stdin on the console
+	// without changing the process's standard handle.
+	HANDLE input = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stdin)));
+	DWORD mode = 0;
+	if (input == INVALID_HANDLE_VALUE || !GetConsoleMode(input, &mode))
+		return;
+	// A line already buffered is read without waiting.
+	if (cin.rdbuf()->in_avail() > 0)
+		return;
+	for (;;)
+	{
+		// MWMO_INPUTAVAILABLE: also wake for messages already queued (one that
+		// arrived while a command ran), not only for ones that arrive later.
+		const DWORD woke = MsgWaitForMultipleObjectsEx(1, &input, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+		if (woke == WAIT_OBJECT_0 + 1)
+		{
+			MSG message;
+			while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
+			{
+				TranslateMessage(&message);
+				DispatchMessageW(&message);
+			}
+			continue;
+		}
+		if (woke != WAIT_OBJECT_0)
+			return; // Unexpected: fall back to a plain blocking read.
+		INPUT_RECORD records[64];
+		DWORD count = 0;
+		if (!PeekConsoleInputW(input, records, DWORD(size(records)), &count) || count == 0)
+			continue;
+		for (DWORD index = 0; index < count; ++index)
+		{
+			const auto &record = records[index];
+			if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown && record.Event.KeyEvent.uChar.UnicodeChar != 0)
+				return; // a line is being typed or injected: getline takes it
+		}
+		// Only key releases and non-key events: consume them and wait again.
+		ReadConsoleInputW(input, records, count, &count);
+	}
+}
+
 int __stdcall wWinMain(HINSTANCE hInstance, HINSTANCE prevInstance, LPWSTR cmdLine, int cmdShow)
 {
 	auto trayIconData = hInstance;
@@ -4977,6 +5170,10 @@ int main(int argc, char *argv[])
 		if (arg == "--manual-connect")
 		{
 			g_manualConnectMode = true;
+		}
+		else if (arg == "--no-tray")
+		{
+			g_noTray = true;
 		}
 	}
 
@@ -5107,7 +5304,8 @@ int main(int argc, char *argv[])
 	jsl->SetCallback(&joyShockPollCallback);
 	jsl->SetTouchCallback(&touchCallback);
 	StudioFeedback::Start();
-	tray.reset(TrayIcon::getNew(trayIconData, &beforeShowTrayMenu));
+	if (!g_noTray)
+		tray.reset(TrayIcon::getNew(trayIconData, &beforeShowTrayMenu));
 	if (tray)
 	{
 		tray->Show();
@@ -5143,6 +5341,7 @@ int main(int argc, char *argv[])
 	while (!quit)
 	{
 		#if _WIN32
+			waitForConsoleCommand();
 			getline(cin, enteredCommand);
         #else
 			std::unique_lock<std::mutex> lock(commandQueueMutex);

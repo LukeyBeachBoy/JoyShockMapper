@@ -26,6 +26,10 @@ void SettingsManager::resetAllSettings()
 			SettingID::VIRTUAL_CONTROLLER,
 			SettingID::ADAPTIVE_TRIGGER,
 			SettingID::RUMBLE,
+			// A firmware setting, written to the controller when it changes. A
+			// reset between two profiles would flip it to the default and back,
+			// two round trips on the poll thread for nothing.
+			SettingID::DISABLE_HARDWARE_GYRO_CALIBRATION,
 		};
 		return exceptions.find(kvPair.first) == exceptions.end();
 	};

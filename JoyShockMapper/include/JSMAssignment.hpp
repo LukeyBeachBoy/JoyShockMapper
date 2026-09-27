@@ -138,6 +138,12 @@ protected:
 		stringstream ss(chord.data());
 		ButtonID btn;
 		ss >> btn;
+		// "!X" is only a modeshift condition (while X is released); it has no
+		// meaning as half of a simultaneous or diagonal press.
+		if (isInvertedChord(btn) && op != ',')
+			return JSMCommand::getModifiedCmd(op, chord);
+		if (isInvertedChord(btn))
+			useInvertedChord(invertedChordBase(btn));
 		if (btn > ButtonID::NONE)
 		{
 			stringstream name;

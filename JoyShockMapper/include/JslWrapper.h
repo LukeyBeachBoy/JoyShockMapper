@@ -378,6 +378,10 @@ public:
 	virtual void SetCallback(void (*callback)(int, JOY_SHOCK_STATE, JOY_SHOCK_STATE, IMU_STATE, IMU_STATE, float)) = 0;
 	virtual void SetTouchCallback(void (*callback)(int, TOUCH_STATE, TOUCH_STATE, float)) = 0;
 	virtual int GetControllerType(int deviceId) = 0;
+	// Names the physical controller, stable across a reconnect (device handles
+	// are not). Empty when the backend cannot tell, which opts it out of having
+	// its gyro calibration carried over.
+	virtual std::string GetControllerKey(int deviceId) { return {}; }
 	virtual int GetControllerSplitType(int deviceId) = 0;
 	virtual int GetControllerVendor(int deviceId) = 0;
 	virtual int GetControllerProduct(int deviceId) = 0;
@@ -389,6 +393,10 @@ public:
 	// (0 off, 1 tick, 2 click, 3 tone, 4 rumble, 5 noise, 6 script, 7 sweep), and
 	// gainDb is a signed decibel gain the firmware limits rather than clips.
 	virtual void SetHaptic(int deviceId, int side, int effect, int gainDb) = 0;
+	// The same, played as the grip sensors' own haptic plays it: PULSE and TAP
+	// on the grip actuators rather than the pads. Studio's grip haptic preview.
+	// Backends without grips play it as SetHaptic does.
+	virtual void SetGripHaptic(int deviceId, int side, int effect, int gainDb) { SetHaptic(deviceId, side, effect, gainDb); }
 	// Sends the controller's own turn-off command (Valve's ID_TURN_OFF_CONTROLLER
 	// feature report). Only meaningful for hardware that implements it; devices
 	// that don't stay a no-op, same as SetTriggerEffect/SetMicLight below.
@@ -399,7 +407,8 @@ public:
 	virtual bool TurnOffController(int deviceId) { return false; }
 	// Plays one of the controller's built-in tunes (Steam Controller 2026 haptic
 	// scripts 0-13; Steam's "Identify Controller" ping is 12).
-	virtual bool PlayHapticScript(int deviceId, int script) { return false; }
+	// gainDb: the firmware's gain for the tune, 0 = as recorded, negative = quieter.
+	virtual bool PlayHapticScript(int deviceId, int script, int gainDb = 0) { return false; }
 	// percent: 0-100, or -1 if the device/driver can't report one. state:
 	// mirrors SDL_PowerState (-1 error, 0 unknown, 1 on battery, 2 no battery,
 	// 3 charging, 4 charged). Defaults leave both at "unknown" for backends

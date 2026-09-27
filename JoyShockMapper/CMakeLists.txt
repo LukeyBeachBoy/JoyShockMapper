@@ -43,6 +43,7 @@ add_executable (
     src/JoyShock.cpp
     src/Telemetry.cpp
     src/StudioFeedback.cpp
+    src/InvertedChords.cpp
     include/TriggerEffectGenerator.h
     include/Telemetry.h
     include/StudioFeedback.h

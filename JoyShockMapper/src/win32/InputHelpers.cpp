@@ -228,7 +228,10 @@ BOOL WriteToConsole(string_view command)
 		auto err = GetLastError();
 		CERR << "Error writing to console input: " << err << '\n';
 	}
-	FlushConsoleInputBuffer(hConIn);
+	// No FlushConsoleInputBuffer here: it discards every record not yet read --
+	// including the command just written, whenever the input thread has not got
+	// to it in the microseconds between. A binding like "CALIBRATE_GYRO" then
+	// ran on only some presses.
 	if (hConIn != GetStdHandle(STD_INPUT_HANDLE))
 	{
 		CloseHandle(hConIn);

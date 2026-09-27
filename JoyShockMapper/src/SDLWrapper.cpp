@@ -83,6 +83,13 @@ struct ControllerDevice
 					_vendorId = SDL_GetGamepadVendor(_sdlController);
 					_productId = SDL_GetGamepadProduct(_sdlController);
 					_guid = SDL_GetJoystickGUID(SDL_GetGamepadJoystick(_sdlController));
+					// Serial and path together: behind a wireless dongle the serial
+					// may be the dongle's, shared by every controller on it, and
+					// the path is what tells its slots apart.
+					const char *serial = SDL_GetGamepadSerial(_sdlController);
+					const char *path = SDL_GetGamepadPath(_sdlController);
+					if ((serial && *serial) || (path && *path))
+						_key = to_string(_vendorId) + ':' + to_string(_productId) + ':' + (serial ? serial : "") + ':' + (path ? path : "");
 					_ctrlr_type = JS_TYPE_UNKNOWN;
 
 					switch (_vendorId)
@@ -332,9 +339,13 @@ public:
 	// which also forces a re-apply after a reconnect (the struct is rebuilt).
 	int _appliedGripRange = -1;
 	int _appliedGripRelease = -1;
-	// Whether the firmware's gyro auto-calibration has been switched off on this
-	// connection. The struct is rebuilt on reconnect, so that sends it again.
-	bool _gyroAutoCalOff = false;
+	// The firmware gyro auto-calibration state last written: -1 = never, 0 =
+	// switched off, 1 = on. The struct is rebuilt on reconnect, so that sends it
+	// again.
+	int _appliedHardwareGyroCal = -1;
+	// Who this controller is, stable across a reconnect (unlike its handle),
+	// so its gyro calibration can be put back. Empty when SDL cannot say.
+	std::string _key;
 	// CONNECT_SOUND plays once per connection, a moment after it: at startup the
 	// controller is found before OnStartUp has set the sound at all.
 	chrono::steady_clock::time_point _connectedAt = chrono::steady_clock::now();
@@ -646,11 +657,13 @@ public:
 	// 0x0c is script 12 and target 5 plays it on the whole controller.
 	static constexpr uint8_t TRITON_ID_OUT_REPORT_HAPTIC_SCRIPT = 0x85;
 
-	static bool sendHapticScript(SDL_Gamepad *gamepad, int script)
+	// The last byte is MsgHapticScript's gain_db (signed): 0 plays the tune as
+	// recorded, negative quieter.
+	static bool sendHapticScript(SDL_Gamepad *gamepad, int script, int gainDb)
 	{
 		if (gamepad == nullptr)
 			return false;
-		const uint8_t buffer[4] = { TRITON_ID_OUT_REPORT_HAPTIC_SCRIPT, 0x05, uint8_t(std::clamp(script, 0, 255)), 0x00 };
+		const uint8_t buffer[4] = { TRITON_ID_OUT_REPORT_HAPTIC_SCRIPT, 0x05, uint8_t(std::clamp(script, 0, 255)), uint8_t(int8_t(std::clamp(gainDb, -127, 127))) };
 		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
 	}
 
@@ -816,13 +829,16 @@ public:
 		// off with these two settings (captured from Steam's own traffic): 84 = the
 		// auto-calibration switch, 85 = its speed threshold. Steam writes 84=1 and
 		// 85=<slider> to turn it back on, and restores firmware defaults (84=1,
-		// 85=100) when it quits. Sent once per connection: HidHide keeps Steam
-		// from ever opening the controller under JSM, and each write is a ~3 ms
-		// round trip on this thread that would show up as a gyro hitch.
-		if (!device->_gyroAutoCalOff &&
-		    sendTritonSettings(device->_sdlController, { { uint8_t(84), uint16_t(0) }, { uint8_t(85), uint16_t(0) } }))
+		// 85=100) when it quits. Sent once per connection and when
+		// DISABLE_HARDWARE_GYRO_CALIBRATION changes: HidHide keeps Steam from
+		// ever opening the controller under JSM, and each write is a ~3 ms round
+		// trip on this thread that would show up as a gyro hitch.
+		const int hardwareGyroCal = SettingsManager::get<Switch>(SettingID::DISABLE_HARDWARE_GYRO_CALIBRATION)->value() == Switch::OFF ? 1 : 0;
+		// Back on means the firmware defaults Steam restores: 84=1, 85=100.
+		if (hardwareGyroCal != device->_appliedHardwareGyroCal &&
+		    sendTritonSettings(device->_sdlController, { { uint8_t(84), uint16_t(hardwareGyroCal) }, { uint8_t(85), uint16_t(hardwareGyroCal ? 100 : 0) } }))
 		{
-			device->_gyroAutoCalOff = true;
+			device->_appliedHardwareGyroCal = hardwareGyroCal;
 		}
 
 		if (!device->_connectSoundDone && chrono::steady_clock::now() - device->_connectedAt > chrono::milliseconds(1500))
@@ -830,7 +846,7 @@ public:
 			device->_connectSoundDone = true;
 			const int sound = SettingsManager::get<int>(SettingID::CONNECT_SOUND)->value();
 			if (sound >= 0)
-				sendHapticScript(device->_sdlController, sound);
+				sendHapticScript(device->_sdlController, sound, SettingsManager::get<int>(SettingID::SOUND_GAIN)->value());
 		}
 
 		// The light: only written when LED_BRIGHTNESS changes (or on reconnect).
@@ -1590,6 +1606,12 @@ public:
 		return _controllerMap[deviceId]->_ctrlr_type;
 	}
 
+	std::string GetControllerKey(int deviceId) override
+	{
+		auto device = _controllerMap.find(deviceId);
+		return device != _controllerMap.end() ? device->second->_key : std::string{};
+	}
+
 	int GetControllerSplitType(int deviceId) override
 	{
 		return _controllerMap[deviceId]->_split_type;
@@ -1646,6 +1668,25 @@ public:
 		sendHapticEffect(jc->_sdlController, side, effect, gainDb);
 	}
 
+	// As updateGripHaptics plays it (sendGripHaptic): a canned effect on that
+	// side's pad actuator, PULSE and TAP at the grip itself.
+	void SetGripHaptic(int deviceId, int side, int effect, int gainDb) override
+	{
+		auto *jc = _controllerMap[deviceId];
+		if (jc == nullptr || jc->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
+			return;
+		if (effect != int(HapticEffect::PULSE) && effect != int(HapticEffect::TAP))
+		{
+			sendHapticEffect(jc->_sdlController, side, effect, gainDb);
+			return;
+		}
+		const auto kind = HapticEffect(effect);
+		if (side & 1)
+			sendGripTap(jc->_sdlController, kind, TRITON_HAPTIC_SIDE_LEFT, TRITON_HAPTIC_TARGET_LEFT_GRIP, gainDb);
+		if (side & 2)
+			sendGripTap(jc->_sdlController, kind, TRITON_HAPTIC_SIDE_RIGHT, TRITON_HAPTIC_TARGET_RIGHT_GRIP, gainDb);
+	}
+
 	bool TurnOffController(int deviceId) override
 	{
 		auto *jc = _controllerMap[deviceId];
@@ -1669,14 +1710,14 @@ public:
 		return true;
 	}
 
-	bool PlayHapticScript(int deviceId, int script) override
+	bool PlayHapticScript(int deviceId, int script, int gainDb) override
 	{
 		lock_guard guard(controller_lock);
 		auto iter = _controllerMap.find(deviceId);
 		if (iter == _controllerMap.end() || iter->second == nullptr ||
 		    iter->second->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
 			return false;
-		return sendHapticScript(iter->second->_sdlController, script);
+		return sendHapticScript(iter->second->_sdlController, script, gainDb);
 	}
 
 	void GetBatteryLevel(int deviceId, int &percent, int &state) override

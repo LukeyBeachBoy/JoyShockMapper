@@ -134,6 +134,9 @@ public:
 		int nn = 0;
 
 		void updateChordStack(bool isPressed, ButtonID index);
+		// Brings the "while released" chords in line with what is held and
+		// which of them the loaded configuration uses. Poll callback only.
+		void syncInvertedChords();
 	};
 
 	DigitalButton(shared_ptr<DigitalButton::Context> _context, JSMButton &mapping);

@@ -4,8 +4,16 @@
 #include "SettingsManager.h"
 #include <atomic>
 
+// "While released" chords live in InvertedChords.cpp; the context only asks
+// them to follow its stack.
+void DigitalButton::Context::syncInvertedChords()
+{
+	syncInvertedChordStack(chordStack);
+}
+
 void DigitalButton::Context::updateChordStack(bool isPressed, ButtonID id)
 {
+	updateInvertedChord(chordStack, isPressed, id);
 	if (id < ButtonID::SIZE || id >= ButtonID::T1) // Can't chord touch stick _buttons
 	{
 		if (isPressed)

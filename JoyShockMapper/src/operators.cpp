@@ -26,6 +26,17 @@ istream &operator>>(istream &in, ButtonID &rhv)
 {
 	string s;
 	in >> s;
+	// "!X": while X is released (see INVERTED_CHORD_OFFSET). Only real
+	// buttons, sticks and triggers can be inverted -- not touch or menu cells,
+	// which exist only while a finger or stick is on them.
+	if (s.size() > 1 && s[0] == '!')
+	{
+		stringstream rest(s.substr(1));
+		ButtonID base;
+		rest >> base;
+		rhv = base > ButtonID::NONE && base < ButtonID::SIZE ? invertedChordOf(base) : ButtonID::INVALID;
+		return in;
+	}
 	if (s.compare("-") == 0)
 		rhv = ButtonID::MINUS;
 	else if (s.compare("+") == 0)
@@ -40,6 +51,8 @@ istream &operator>>(istream &in, ButtonID &rhv)
 
 ostream &operator<<(ostream &out, const ButtonID &rhv)
 {
+	if (isInvertedChord(rhv))
+		return out << '!' << invertedChordBase(rhv);
 	if (rhv == ButtonID::PLUS)
 		out << "+";
 	else if (rhv == ButtonID::MINUS)

@@ -331,6 +331,9 @@ public:
 	int _handle;
 	int _controllerType;
 	int _splitType = 0;
+	// JslWrapper::GetControllerKey, kept here because the backend has already
+	// let go of the device by the time a reconnect wants to read it.
+	string _deviceKey;
 	int _vendorId = 0;
 	int _productId = 0;
 	bool _ignoreGyro = false;

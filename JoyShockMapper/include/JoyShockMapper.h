@@ -17,6 +17,7 @@
 #include <string>
 #include <memory>
 #include <array>
+#include <deque>
 
 // This header file is meant to be included among all core JSM source files
 // And as such it should contain only constants, types and functions related to them
@@ -491,6 +492,9 @@ enum class SettingID
 	// button power-off jingles are not configurable and still play.
 	CONNECT_SOUND,
 	SHUTDOWN_SOUND,
+	// How loud those tunes (and PLAY_SOUND) play, as the firmware's gain in dB:
+	// 0 (default) is the tune as the firmware plays it, negative is quieter.
+	SOUND_GAIN,
 	// How long, in milliseconds, a grip keeps reading "held" after the hand
 	// leaves it. Per side, unlike range and flicker guard: this is time on the
 	// host, not distance in the firmware, so each grip can have its own -- a
@@ -540,11 +544,37 @@ enum class SettingID
 	// Its own amount rather than sharing TOUCHPAD_CLICK_DAMPEN, because which of
 	// the two outputs needs quieting depends on what the pad is even doing.
 	GYRO_CLICK_DAMPEN,
+	// Whether the Steam Controller 2026's firmware gyro auto-calibration is
+	// switched off (controller settings 84/85, Steam's "Enable Software
+	// Calibration" switch). The firmware re-estimates bias whenever the
+	// controller looks still, and a slow deliberate tilt passes that test, so
+	// small movements are eaten and the cursor slides back. ON (default).
+	DISABLE_HARDWARE_GYRO_CALIBRATION,
 };
 
 // constexpr are like #define but with respect to typeness
 constexpr size_t MAX_NO_OF_TOUCH = 2; // Could be obtained from JSL?
 constexpr int MAPPING_SIZE = int(ButtonID::SIZE);
+
+// "While released" chords: a modeshift written `!MISC5,W = X` applies while
+// MISC5 is NOT held -- the right grip let go, say. The chord is its own id,
+// far outside every real button, so it is only ever a key (in chorded
+// variables and the chord stack), never an index into a button array.
+constexpr int INVERTED_CHORD_OFFSET = 1 << 12;
+constexpr bool isInvertedChord(ButtonID id) { return int(id) >= INVERTED_CHORD_OFFSET; }
+constexpr ButtonID invertedChordOf(ButtonID base) { return ButtonID(int(base) + INVERTED_CHORD_OFFSET); }
+constexpr ButtonID invertedChordBase(ButtonID id) { return ButtonID(int(id) - INVERTED_CHORD_OFFSET); }
+// The buttons the loaded configuration uses as "!X". Written by the command
+// thread as a configuration loads, read by every controller's poll
+// (DigitalButton.cpp).
+// (InvertedChords.cpp)
+void useInvertedChord(ButtonID base);
+void clearInvertedChords();
+bool invertedChordInUse(ButtonID base);
+// Keep a chord stack's "!X" entries in line with the registry and what is held.
+void syncInvertedChordStack(std::deque<ButtonID> &stack);
+// A button changed: move its "!X" entry, if its configuration uses one.
+void updateInvertedChord(std::deque<ButtonID> &stack, bool isPressed, ButtonID id);
 constexpr int FIRST_ANALOG_TRIGGER = int(ButtonID::ZLF);
 constexpr int LAST_ANALOG_TRIGGER = int(ButtonID::ZRF);
 constexpr int FIRST_TOUCH_BUTTON = MAPPING_SIZE + 1;

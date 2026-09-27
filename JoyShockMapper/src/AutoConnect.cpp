@@ -24,11 +24,11 @@ bool AutoConnect::AutoConnectPoll(void* param)
 {
 	// One refresh per tick feeds both checks below. Asking twice would pay
 	// RefreshDeviceList's 20ms settle twice a second, for the whole session.
-	const DeviceCensus census = jsl->TakeDeviceCensus();
+	DeviceCensus census = jsl->TakeDeviceCensus();
 
 	// Our own virtual pads are SDL devices too, and are discounted here exactly
 	// as they always have been.
-	const int realSize = census.listed - int(Gamepad::getCount());
+	int realSize = census.listed - int(Gamepad::getCount());
 
 	// A controller we hold open that SDL says is gone: switched off, or out of
 	// range. SDL keeps the gamepad object valid and answering with its last
@@ -60,7 +60,14 @@ bool AutoConnect::AutoConnectPoll(void* param)
 		{
 			idleTicks = 0;
 			jsl->RescanDevices();
-			return true;
+			// Look at once rather than a poll later: a controller the rescan
+			// found goes through the count trigger below in this same tick,
+			// which was a second of every switch-on spent waiting.
+			census = jsl->TakeDeviceCensus();
+			realSize = census.listed - int(Gamepad::getCount());
+			if (realSize <= 0)
+				return true;
+			COUT_INFO << "[AUTOCONNECT] Rescan found " << realSize << " device(s).\n";
 		}
 	}
 	else

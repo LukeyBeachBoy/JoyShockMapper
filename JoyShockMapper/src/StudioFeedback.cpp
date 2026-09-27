@@ -69,9 +69,11 @@ namespace StudioFeedback
 
 bool Parse(const char *text, Request &out)
 {
-	int effect = 0, side = 0, rumbleMs = 0;
+	int effect = 0, side = 0, rumbleMs = 0, target = 0;
 	float intensity = 0.f, rumble = 0.f;
-	if (std::sscanf(text, "FEEDBACK %d %f %d %d %f", &effect, &intensity, &side, &rumbleMs, &rumble) != 5)
+	// The target is optional, so a Studio that predates it still parses.
+	const int fields = std::sscanf(text, "FEEDBACK %d %f %d %d %f %d", &effect, &intensity, &side, &rumbleMs, &rumble, &target);
+	if (fields != 5 && fields != 6)
 		return false;
 	// TICK .. TAP: HapticEffect's playable range (OFF is 0, INVALID after TAP).
 	if (effect < 1 || effect > 9 || side < 1 || side > 3)
@@ -81,6 +83,7 @@ bool Parse(const char *text, Request &out)
 	out.side = side;
 	out.rumbleMs = std::clamp(rumbleMs, 0, 250);
 	out.rumble = std::clamp(rumble, 0.f, 100.f);
+	out.grips = fields == 6 && target == 1;
 	return true;
 }
 

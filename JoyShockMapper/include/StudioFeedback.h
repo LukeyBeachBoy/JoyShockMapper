@@ -15,13 +15,17 @@
 // callback, under its lock, so it never races the input thread; it lands
 // within one poll of arriving.
 //
-// Datagram: "FEEDBACK <effect> <intensity> <side> <rumbleMs> <rumble>"
+// Datagram: "FEEDBACK <effect> <intensity> <side> <rumbleMs> <rumble> [<target>]"
 //   effect     HapticEffect ordinal (TICK 1, CLICK 2, ...)
 //   intensity  0-100, the same dial as the other haptic settings
 //   side       1 left, 2 right, 3 both
 //   rumbleMs   pulse length on controllers without haptic actuators (they
 //              get a short rumble instead); 0 plays nothing there
 //   rumble     0-100 motor strength for that pulse
+//   target     optional: 0 (or absent) plays where a binding would, 1 plays
+//              where the grip sensors' own haptic would -- PULSE and TAP on
+//              the grip actuators rather than the pads. Studio's grip haptic
+//              preview sends 1, so a chosen effect feels as it will in play.
 namespace StudioFeedback
 {
 
@@ -35,6 +39,7 @@ struct Request
 	int side = 3;
 	int rumbleMs = 0;
 	float rumble = 0.f;
+	bool grips = false;
 	std::chrono::steady_clock::time_point received{};
 };
 
