@@ -5,6 +5,7 @@
 #include <cctype>
 #include <iostream>
 #include <memory>
+#include "ConfigLine.h"
 #include <regex>
 #include <string>
 #include <fstream>
@@ -191,26 +192,10 @@ bool CmdRegistry::isCommandValid(string_view line) const
 		file.close();
 		return true;
 	}
-	smatch results;
-	string combo, name, arguments, label;
-	char op = '\0';
-	const string lineStr(line);
-	if (regex_match(lineStr, results, regex(R"(^\s*([+-]?\w*)\s*([,+]\s*([+-]?\w*))?\s*([^#\n]*)(#\s*(.*))?$)")))
-	{
-		if (results[2].length() > 0)
-		{
-			combo = results[1];
-			op = results[2].str()[0];
-			name = results[3];
-		}
-		else
-		{
-			name = results[1];
-		}
-
-		arguments = results[4];
-		label = results[6];
-	}
+	ConfigLine parts;
+	splitConfigLine(string(line), parts, false);
+	const string &combo = parts.combo, &name = parts.name, &arguments = parts.arguments, &label = parts.label;
+	const char op = parts.op;
 
 	bool hasProcessed = false;
 	CmdMap::const_iterator cmd = find_if(_registry.cbegin(), _registry.cend(), bind(&CmdRegistry::findCommandWithName, name, placeholders::_1));
@@ -298,29 +283,11 @@ void CmdRegistry::processLine(const string& line)
         // Assignments include bindings, mode shifts, and settings. Do not replay
         // one-shot console macros (power off, calibration, reconnect, etc.).
         if (trimmedLine.find('=') != string::npos) _profileLines.push_back(trimmedLine);
-		smatch results;
-		string combo, name, arguments, label;
-		char op = '\0';
-		// Break up the line of text in its relevant parts.
-		// Pro tip: use regex101.com to develop these beautiful monstrosities. :P
-		// Also, use raw strings R"(...)" to avoid the need to escape characters
-		// I dislike having to code in exception for + and - _buttons not being \w characters
-		if (regex_match(trimmedLine, results, regex(R"(^\s*([+-]?\w*)\s*([,+\*]\s*([+-]?\w*))?\s*([^#\n]*)(#\s*(.*))?$)")))
-		{
-			if (results[2].length() > 0)
-			{
-				combo = results[1];
-				op = results[2].str()[0];
-				name = results[3];
-			}
-			else
-			{
-				name = results[1];
-			}
-
-			arguments = results[4];
-			label = results[6];
-		}
+		// Break up the line of text in its relevant parts (ConfigLine.h).
+		ConfigLine parts;
+		splitConfigLine(trimmedLine, parts);
+		const string &combo = parts.combo, &name = parts.name, &arguments = parts.arguments, &label = parts.label;
+		const char op = parts.op;
 
 		bool hasProcessed = false;
 		CmdMap::iterator cmd = find_if(_registry.begin(), _registry.end(), bind(&CmdRegistry::findCommandWithName, name, placeholders::_1));
