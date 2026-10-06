@@ -268,6 +268,8 @@ enum class SettingID
 		MOTION_STICK_MODE,
 		GYRO_OFF,
 		GYRO_ON,
+		TILT_OFF,
+		TILT_ON,
 		LEFT_STICK_AXIS,
 		RIGHT_STICK_AXIS,
 		MOTION_STICK_AXIS,
@@ -288,8 +290,13 @@ enum class SettingID
 		GYRO_SMOOTHING_DECAY,
 		GYRO_CUTOFF_SPEED,
 		GYRO_CUTOFF_RECOVERY,
+		GYRO_STEADYING_FLOOR,
 		ONE_EURO_MIN_CUTOFF,
 		ONE_EURO_SPEED_COEFF,
+		GYRO_HAPTIC_INTENSITY,
+		GYRO_HAPTIC_INTERVAL,
+		GYRO_HAPTIC_EFFECT,
+		GYRO_HAPTIC_SIDE,
 		GYRO_ANGLE_SNAP,
 		GYRO_ANGLE_SNAP_EASE,
 		DECEL_BRAKE_STRENGTH,
@@ -388,12 +395,17 @@ enum class SettingID
 	RIGHT_STICK_UNDEADZONE_INNER,
 	RIGHT_STICK_UNDEADZONE_OUTER,
 	RIGHT_STICK_UNPOWER,
+	LEFT_STICK_DEADZONE_PROBE,
+	RIGHT_STICK_DEADZONE_PROBE,
 	LEFT_STICK_VIRTUAL_SCALE,
 	RIGHT_STICK_VIRTUAL_SCALE,
 	WIND_STICK_RANGE,
 	WIND_STICK_POWER,
 	UNWIND_RATE,
 	GYRO_OUTPUT,
+	GYRO_STICK_DEFLECTION,
+	GYRO_DEFLECTION_RANGE,
+	GYRO_DEFLECTION_LOCK_EXTENTS,
 	FLICK_STICK_OUTPUT,
 	HIDE_MINIMIZED,
 	AUTO_CALIBRATE_GYRO,
@@ -438,6 +450,12 @@ enum class SettingID
 	RIGHT_TOUCH_RING_MODE,
 	LEFT_TOUCH_STICK_AXIS,
 	RIGHT_TOUCH_STICK_AXIS,
+	// Turns each pad's reading about its centre, in degrees, positive =
+	// clockwise as the user sees it. Undoes the physical cant of the Steam
+	// Controller 2026's pads. Applied where the pad is read (SDLWrapper), so
+	// grids, menus, the touch stick, the mouse and telemetry all see one frame.
+	LEFT_TOUCHPAD_ROTATION,
+	RIGHT_TOUCHPAD_ROTATION,
 	// Touchpad mouse output shaping. The One Euro filter runs on pad POSITION and
 	// adapts its cutoff to finger speed: heavy smoothing while panning slowly,
 	// almost none during a flick.
@@ -495,6 +513,14 @@ enum class SettingID
 	// How loud those tunes (and PLAY_SOUND) play, as the firmware's gain in dB:
 	// 0 (default) is the tune as the firmware plays it, negative is quieter.
 	SOUND_GAIN,
+	// A tone sequence file (ToneSequence.h) that replaces the built-in
+	// CONNECT_SOUND / SHUTDOWN_SOUND tune when set and readable: a path relative
+	// to JSM_DIRECTORY, as a configuration name is. Empty or NONE = none.
+	CONNECT_SOUND_FILE,
+	SHUTDOWN_SOUND_FILE,
+	// Which actuators those tone sequences (and a PLAY_SOUND file) play on:
+	// GRIPS (default, where the firmware's own tunes play), PADS or BOTH.
+	SOUND_ACTUATORS,
 	// How long, in milliseconds, a grip keeps reading "held" after the hand
 	// leaves it. Per side, unlike range and flicker guard: this is time on the
 	// host, not distance in the firmware, so each grip can have its own -- a
@@ -504,8 +530,13 @@ enum class SettingID
 	RIGHT_GRIP_RELEASE_DELAY,
 	// The Steam Controller 2026's light, 0-100 (controller setting 45, the one
 	// Steam's brightness slider writes). -1 (default) leaves it as it is. A
-	// binding that runs "LED_BRIGHTNESS = n" makes it an output.
+	// binding that runs "LED_BRIGHTNESS = n" makes it an output; a chorded
+	// setting such as "S,LED_BRIGHTNESS = n" applies only while S is held.
 	LED_BRIGHTNESS,
+	// How loud the Steam Controller plays its own power-on / power-off jingle:
+	// 2 normal, 1 quiet, 0 off; -1 leaves the controller's stored value alone.
+	// Stored in the controller itself, so it holds with JoyShockMapper closed.
+	BOOT_SOUND_LEVEL,
 	// A thumb trying to hold still on a capacitive pad never is: the contact patch
 	// breathes and the reported position drifts, which the mouse path faithfully
 	// turns into a crawling cursor. Below this finger speed, in pad pixels per
@@ -527,6 +558,24 @@ enum class SettingID
 	// press pulse so the two can feel different, or either can run alone.
 	TOUCHPAD_RELEASE_HAPTIC_INTENSITY,
 	TOUCHPAD_RELEASE_HAPTIC_EFFECT,
+	// Side feedback is opt-in; OFF preserves the existing shared profile policy.
+	LEFT_TOUCHPAD_HAPTICS,
+	LEFT_TOUCHPAD_HAPTIC_INTENSITY,
+	LEFT_TOUCHPAD_HAPTIC_EFFECT,
+	LEFT_TOUCHPAD_HAPTIC_INTERVAL,
+	LEFT_TOUCHPAD_CLICK_HAPTIC_INTENSITY,
+	LEFT_TOUCHPAD_CLICK_HAPTIC_EFFECT,
+	LEFT_TOUCHPAD_RELEASE_HAPTIC_INTENSITY,
+	LEFT_TOUCHPAD_RELEASE_HAPTIC_EFFECT,
+	RIGHT_TOUCHPAD_HAPTICS,
+	RIGHT_TOUCHPAD_HAPTIC_INTENSITY,
+	RIGHT_TOUCHPAD_HAPTIC_EFFECT,
+	RIGHT_TOUCHPAD_HAPTIC_INTERVAL,
+	RIGHT_TOUCHPAD_CLICK_HAPTIC_INTENSITY,
+	RIGHT_TOUCHPAD_CLICK_HAPTIC_EFFECT,
+	RIGHT_TOUCHPAD_RELEASE_HAPTIC_INTENSITY,
+	RIGHT_TOUCHPAD_RELEASE_HAPTIC_EFFECT,
+
 	// Pressing a pad hard enough to click it rolls the finger, and in MOUSE mode
 	// that roll is a camera movement you did not ask for. This scales mouse output
 	// down as the press comes on: 0 (default) off, 1 stops output entirely while
@@ -550,6 +599,16 @@ enum class SettingID
 	// controller looks still, and a slow deliberate tilt passes that test, so
 	// small movements are eaten and the cursor slides back. ON (default).
 	DISABLE_HARDWARE_GYRO_CALIBRATION,
+	// TOUCHPAD_MODE = MOUSE_AREA: the rectangle of the screen the pad maps to,
+	// as fractions "x y w h" (default the whole screen), and how a pad of a
+	// different shape is laid over it (STRETCH or UNIFORM). Per-pad variants
+	// for two-pad controllers follow the LEFT_/RIGHT_ convention above.
+	TOUCHPAD_AREA,
+	TOUCHPAD_AREA_FIT,
+	LEFT_TOUCHPAD_AREA,
+	LEFT_TOUCHPAD_AREA_FIT,
+	RIGHT_TOUCHPAD_AREA,
+	RIGHT_TOUCHPAD_AREA_FIT,
 };
 
 // constexpr are like #define but with respect to typeness
@@ -620,6 +679,14 @@ static_assert(int(ButtonID::RM25) - int(ButtonID::RM1) + 1 == MAX_GRID_BUTTONS, 
 static_assert(int(ButtonID::RM25) <= MAGIC_ENUM_RANGE_MAX,
   "ButtonID has outgrown MAGIC_ENUM_RANGE_MAX; enum_cast would start failing silently");
 constexpr int NUM_ANALOG_TRIGGERS = int(LAST_ANALOG_TRIGGER) - int(FIRST_ANALOG_TRIGGER) + 1;
+// Steam pads share the dual-stage FSM, with independent state slots. Keep
+// physical ButtonID numbering unchanged: these slots are processing state only.
+constexpr int NUM_DUAL_STAGE_SOURCES = NUM_ANALOG_TRIGGERS + 2;
+constexpr int dualStageSourceIndex(ButtonID full) {
+  return full == ButtonID::MISC3 ? NUM_ANALOG_TRIGGERS :
+         full == ButtonID::MISC2 ? NUM_ANALOG_TRIGGERS + 1 :
+         full >= ButtonID::ZLF && full <= ButtonID::ZRF ? int(full) - FIRST_ANALOG_TRIGGER : -1;
+}
 constexpr float MAGIC_TAP_DURATION = 40.0f;           // in milliseconds.
 constexpr float MAGIC_INSTANT_DURATION = 40.0f;       // in milliseconds
 constexpr float MAGIC_EXTENDED_TAP_DURATION = 500.0f; // in milliseconds
@@ -771,7 +838,11 @@ enum class GyroAxisMask
 	NONE = 0,
 	X = 1,
 	Y = 2,
+	XY = 3,
 	Z = 4,
+	XZ = 5,
+	YZ = 6,
+	XYZ = 7,
 	INVALID = 8
 };
 enum class JoyconMask
@@ -842,7 +913,32 @@ enum class TouchpadMode
 	GRID_AND_STICK, // Grid and Stick
 	MOUSE,          // gestures to be added as part of this mode
 	PS_TOUCHPAD,
+	// The pad is a map of one rectangle of the screen (TOUCHPAD_AREA): the
+	// cursor goes where the finger is, and cannot leave the rectangle. Steam
+	// Input's "mouse region". See TouchAreaMapping.h.
+	MOUSE_AREA,
 	INVALID
+};
+
+// How a MOUSE_AREA pad whose shape differs from its area's is laid over it.
+// STRETCH: the whole pad is the whole area. UNIFORM: the same travel per
+// millimetre both ways, the pad scaled to cover the area and centred on it.
+enum class MouseAreaFit
+{
+	STRETCH,
+	UNIFORM,
+	INVALID
+};
+
+// A rectangle of the screen as fractions 0..1: left, top, width, height. The
+// value of TOUCHPAD_AREA. Fractions rather than pixels so one profile lands on
+// the same part of the screen whatever monitor the game is on.
+struct MouseArea
+{
+	float x = 0.f;
+	float y = 0.f;
+	float w = 1.f;
+	float h = 1.f;
 };
 
 // Workaround default string streaming operator
@@ -911,6 +1007,19 @@ struct GyroSettings
 	bool always_off = false;
 	ButtonID button = ButtonID::NONE; // Ignore on button none means no GYRO_OFF button (or Always On);
 	GyroIgnoreMode ignore_mode = GyroIgnoreMode::BUTTON;
+	vector<pair<ButtonID, bool>> conditions; // true = active while released
+	bool require_all = false;
+	template<class IsPressed> bool active(IsPressed pressed) const
+	{
+		if (conditions.empty()) return pressed(button);
+		for (const auto &condition : conditions)
+		{
+			const bool matched = pressed(condition.first) != condition.second;
+			if (require_all && !matched) return false;
+			if (!require_all && matched) return true;
+		}
+		return require_all;
+	}
 };
 
 class Mapping;
@@ -958,6 +1067,14 @@ ostream &operator<<(ostream &out, const FloatXY &fxy);
 istream &operator>>(istream &in, FloatXY &fxy);
 bool operator==(const FloatXY &lhs, const FloatXY &rhs);
 inline bool operator!=(const FloatXY &lhs, const FloatXY &rhs)
+{
+	return !(lhs == rhs);
+}
+
+ostream &operator<<(ostream &out, const MouseArea &area);
+istream &operator>>(istream &in, MouseArea &area);
+bool operator==(const MouseArea &lhs, const MouseArea &rhs);
+inline bool operator!=(const MouseArea &lhs, const MouseArea &rhs)
 {
 	return !(lhs == rhs);
 }

@@ -1,9 +1,13 @@
 #pragma once
 
 #include "InputGuards.h"
+#include "GyroAngularHaptics.h"
+#include "GyroDeflection.h"
+#include <atomic>
 #include "JoyShockMapper.h"
 #include "TouchMouseResampler.h"
 #include "TouchGridRouting.h"
+#include "VirtualMenuCatalog.h"
 #include "MotionIf.h"
 #include "DigitalButton.h"
 #include "Stick.h"
@@ -274,10 +278,16 @@ public:
 	FloatXY getSetting<FloatXY>(SettingID index);
 
 	template<>
+	MouseArea getSetting<MouseArea>(SettingID index);
+
+	template<>
 	GyroSettings getSetting<GyroSettings>(SettingID index);
 
 	template<>
 	Color getSetting<Color>(SettingID index);
+
+	template<>
+	int getSetting<int>(SettingID index);
 
 	template<>
 	AdaptiveTriggerSetting getSetting<AdaptiveTriggerSetting>(SettingID index);
@@ -285,11 +295,13 @@ public:
 	template<>
 	AxisSignPair getSetting<AxisSignPair>(SettingID index);
 
+	static constexpr int MAX_GYRO_SAMPLES = 256;
 	void getSmoothedGyro(float x, float y, float length, float bottomThreshold, float topThreshold, int maxSamples, float &outX, float &outY);
 	void applyGyroDecaySmoothing(float rawX, float rawY, float deltaTime, float smoothingTime, float threshold, float &outX, float &outY);
 	void disableGyroDecaySmoothing();
 	void applyOneEuroFilter(float rawX, float rawY, float deltaTime, float &outX, float &outY);
 	void resetOneEuroFilter();
+	void updateGyroHaptics(float x, float y, float deltaTime, bool active);
 
 	void handleButtonChange(ButtonID id, bool pressed, int touchpadID = -1);
 
@@ -301,6 +313,31 @@ public:
 	bool processDeadZones(float &x, float &y, float innerDeadzone, float outerDeadzone);
 
 	void updateGridSize();
+
+  bool virtualMenuConsumes(VirtualMenuSource source);
+  void refreshVirtualMenuCatalog();
+  bool virtualMenuIsPressed(ButtonID id);
+  std::array<std::optional<bool>, int(ButtonID::SIZE)> _virtualMenuInputs;
+  VirtualMenuOwners virtualMenuOwners();
+  ButtonID virtualMenuConfirm(const VirtualMenuAttachment &attachment) const;
+  bool virtualMenuConsumesButton(ButtonID id);
+  void processVirtualMenus();
+  struct MenuRuntime {
+    MenuRuntime() = default;
+    MenuRuntime(const MenuRuntime &) = delete;
+    MenuRuntime &operator=(const MenuRuntime &) = delete;
+    MenuRuntime(MenuRuntime &&) = default;
+    MenuRuntime &operator=(MenuRuntime &&) = default;
+    VirtualMenuAttachment attachment;
+    VirtualMenuDefinition definition;
+    VirtualMenuRouting routing;
+    VirtualMenuResult result;
+    unsigned cancellation = 0;
+    std::vector<std::unique_ptr<JSMButton>> mappings;
+    std::vector<std::unique_ptr<DigitalButton>> buttons;
+  };
+  std::shared_ptr<const VirtualMenuCatalog> _menuCatalog;
+  std::vector<MenuRuntime> _virtualMenus;
 
 	// A grid button lives in one of three parallel arrays: the shared grid, or
 	// one per pad on a two-pad controller. Every site that indexes them has to
@@ -315,7 +352,8 @@ public:
 	bool processGyroStick(float stickX, float stickY, float stickLength, StickMode stickMode, bool forceOutput);
 
 	shared_ptr<DigitalButton::Context> _context;
-	vector<DigitalButton> _buttons;
+	bool _keyboardCaptured = false;
+    vector<DigitalButton> _buttons;
 	vector<DigitalButton> _gridButtons;
 	vector<DigitalButton> _leftGridButtons;
 	vector<DigitalButton> _rightGridButtons;
@@ -354,6 +392,9 @@ public:
 	Stick _leftStick;
 	Stick _rightStick;
 	Stick _motionStick;
+	bool _tiltWasActive = false;
+	StickMode _tiltOutputMode = StickMode::INVALID;
+	void stopTilt();
 
 	bool processed_gyro_stick = false;
 	static constexpr int NUM_LAST_GYRO_SAMPLES = 100;
@@ -366,6 +407,10 @@ public:
 
 	float gyroXVelocity = 0.f;
 	float gyroYVelocity = 0.f;
+	GyroAngularHaptics gyroAngularHaptics;
+	GyroDeflection gyroDeflection;
+	std::atomic<bool> gyroDeflectionRecenterRequested { false };
+	FloatXY updateGyroDeflection(float x, float y, float seconds, bool enabled, int target);
 
 	// Trackball state is owned by each pad's pipeline.
 
@@ -373,6 +418,12 @@ public:
 	// must not influence the next right-pad sample.
 	TouchMousePipeline touchPipelines[2];
 	TouchGridRouting touchGridRouting[2];
+
+	// A finger is on a MOUSE_AREA pad, so the cursor is parked where it points.
+	// Gyro mouse output is held off while this is set (as MOUSE_RING does with
+	// lockMouse), or aiming would drag the cursor out of the area between two
+	// placements. Written by touchCallback, read by the poll callback.
+	bool touchAreaHold = false;
 
 	// Previous pad-click state, indexed the same way as touchPipelines (0 = left,
 	// 1 = right). The click haptic is edge-triggered off this: a level-triggered
@@ -422,7 +473,6 @@ private:
 
 	float getSmoothedStickRotation(float value, float bottomThreshold, float topThreshold, int maxSamples);
 
-	static constexpr int MAX_GYRO_SAMPLES = 256;
 	static constexpr int NUM_SAMPLES = 256;
 
 	array<float, NUM_SAMPLES> _flickSamples;
@@ -446,8 +496,9 @@ private:
 	ScrollAxis _touchScrollX;
 	ScrollAxis _touchScrollY;
 
-	bool _softPullDown[NUM_ANALOG_TRIGGERS] = {};
-	bool _fullPullDown[NUM_ANALOG_TRIGGERS] = {};
+	bool _softPullDown[NUM_DUAL_STAGE_SOURCES] = {};
+	bool _fullPullDown[NUM_DUAL_STAGE_SOURCES] = {};
+	std::array<std::optional<TriggerMode>, NUM_DUAL_STAGE_SOURCES> _lastTriggerMode{};
 	vector<DstState> _triggerState; // State of analog triggers when skip mode is active
 	vector<deque<float>> _prevTriggerPosition;
 };

@@ -11,8 +11,29 @@ void DigitalButton::Context::syncInvertedChords()
 	syncInvertedChordStack(chordStack);
 }
 
+namespace
+{
+constexpr std::array<ButtonID, 8> steamConditionInputs = {
+	ButtonID::MISC4, ButtonID::TOUCH, ButtonID::MISC3, ButtonID::MISC2,
+	ButtonID::MISC6, ButtonID::MISC5, ButtonID::LTOUCH, ButtonID::RTOUCH
+};
+}
+
+void DigitalButton::Context::syncSteamConditions(const std::array<bool, 8>& states)
+{
+	steamConditions = states;
+	for (size_t index = 0; index < states.size(); ++index)
+		updateChordStack(states[index], steamConditionInputs[index]);
+}
+
 void DigitalButton::Context::updateChordStack(bool isPressed, ButtonID id)
 {
+	if (steamConditions)
+	{
+		const auto input = find(steamConditionInputs.begin(), steamConditionInputs.end(), id);
+		if (input != steamConditionInputs.end())
+			isPressed = (*steamConditions)[size_t(input - steamConditionInputs.begin())];
+	}
 	updateInvertedChord(chordStack, isPressed, id);
 	if (id < ButtonID::SIZE || id >= ButtonID::T1) // Can't chord touch stick _buttons
 	{
@@ -64,6 +85,13 @@ public:
 	multimap<BtnEvent, Callback> _instantReleaseQueue;
 	unsigned int _turboApplies = 0;
 	unsigned int _turboReleases = 0;
+	struct BindingTurbo { float next = 0; float releaseAt = 0; vector<Callback> pending; };
+	map<size_t, BindingTurbo> _bindingTurbos;
+	BindingTurbo *_capturingTurbo = nullptr;
+	map<string, size_t> _cyclePositions;
+	map<string, deque<Mapping>> _cycleReleases;
+	map<string, pair<KeyCode, Callback>> _toggleReleases;
+    map<string, KeyCode> _heldOutputs;
 	DigitalButtonImpl(JSMButton &mapping, shared_ptr<DigitalButton::Context> context)
 	  : _id(mapping._id)
 	  , _context(context)
@@ -105,6 +133,7 @@ public:
 		_nameToRelease.clear();
 		_turboApplies = 0;
 		_turboReleases = 0;
+		_bindingTurbos.clear();
 	}
 
 	bool ReleaseInstant(BtnEvent instantEvent)
@@ -144,9 +173,62 @@ public:
 	{
 		if (cb)
 		{
+			if (_capturingTurbo) { _capturingTurbo->pending.push_back(cb); return; }
 			// DEBUG_LOG << "Button " << _id << " registers instant " << evt << '\n';
 			_instantReleaseQueue.emplace(evt, cb);
 		}
+	}
+
+	void TickBindingTurbo(size_t index, float elapsed, float period, Callback apply) override
+	{
+		auto &timer = _bindingTurbos[index];
+		if (!timer.pending.empty() && elapsed >= timer.releaseAt)
+		{
+			auto pending = std::move(timer.pending);
+			timer.pending.clear();
+			for (auto &release : pending) release(this);
+		}
+		if (elapsed >= timer.next && timer.pending.empty())
+		{
+			_capturingTurbo = &timer;
+			apply(this);
+			_capturingTurbo = nullptr;
+			// At most one repeat per controller tick; missed ticks never burst.
+			timer.next = (floorf(elapsed / period) + 1.0f) * period;
+			timer.releaseAt = elapsed + std::min(float(MAGIC_INSTANT_DURATION), period * 0.5f);
+		}
+	}
+
+	void FinishBindingTurbo() override
+	{
+		for (auto &entry : _bindingTurbos)
+			for (auto &release : entry.second.pending) release(this);
+		_bindingTurbos.clear();
+	}
+
+	void ApplyCycle(const string &identity, const vector<Mapping> &choices) override
+	{
+		auto &position = _cyclePositions[identity];
+		const Mapping selected = choices[position % choices.size()];
+		position = (position + 1) % choices.size();
+		_cycleReleases[identity].push_back(selected);
+		selected.ProcessEvent(BtnEvent::OnPress, *this);
+	}
+
+	void StudioCommand(const string &command) override { if (_context->_studioCommand) _context->_studioCommand(command); }
+	void MenuCommand(const string &id, const string &verb, bool release) override
+	{
+		_context->menuCommands[id].apply(verb, int(_id), release);
+	}
+
+	void ReleaseCycle(const string &identity) override
+	{
+		auto found = _cycleReleases.find(identity);
+		if (found == _cycleReleases.end() || found->second.empty()) return;
+		const Mapping selected = found->second.front();
+		found->second.pop_front();
+		selected.ProcessEvent(BtnEvent::OnRelease, *this);
+		if (found->second.empty()) _cycleReleases.erase(found);
 	}
 
 	void ApplyGyroAction(KeyCode gyroAction) override
@@ -166,35 +248,29 @@ public:
 		_context->gyroActionQueue.push_back({ _id, gyroAction });
 	}
 
-	void RemoveGyroAction() override
+	void RemoveGyroAction(KeyCode key, bool allOwners, bool toggle) override
 	{
-		auto gyroAction = find_if(_context->gyroActionQueue.begin(), _context->gyroActionQueue.end(),
-		  [this](auto pair)
-		  {
-			  // On a sim press, release the master button (the one who triggered the press)
-			  return pair.first == (_masterPress ? _masterPress->_id : _id);
-		  });
-		if (gyroAction != _context->gyroActionQueue.end())
+		const auto owner = _masterPress ? _masterPress->_id : _id;
+		// A release must identify both its output and the input that applied it.
+		// Otherwise releasing one grip removes a still-held action on the other.
+		for (auto active = _context->gyroActionQueue.begin(); active != _context->gyroActionQueue.end();)
 		{
-			KeyCode key(gyroAction->second);
-			ClearAllActiveToggle(key);
-			for (auto currentlyActive = find_if(_context->gyroActionQueue.begin(), _context->gyroActionQueue.end(), bind(isSameKey, key, placeholders::_1));
-			     currentlyActive != _context->gyroActionQueue.end();
-			     currentlyActive = find_if(currentlyActive, _context->gyroActionQueue.end(), bind(isSameKey, key, placeholders::_1)))
+			if (active->second == key && (allOwners || active->first == owner))
 			{
 				extern std::atomic<int> g_gyroGlobalOffCount;
 				extern std::atomic<int> g_gyroGlobalOnCount;
-				if (currentlyActive->second.code == GYRO_OFF_ALL_BIND)
-				{
-					g_gyroGlobalOffCount.fetch_sub(1);
-				}
-				else if (currentlyActive->second.code == GYRO_ON_ALL_BIND)
-				{
-					g_gyroGlobalOnCount.fetch_sub(1);
-				}
-				// DEBUG_LOG << "Removing active gyro action for " << key.name << endl;
-				currentlyActive = _context->gyroActionQueue.erase(currentlyActive);
+				if (key.code == GYRO_OFF_ALL_BIND) g_gyroGlobalOffCount.fetch_sub(1);
+				else if (key.code == GYRO_ON_ALL_BIND) g_gyroGlobalOnCount.fetch_sub(1);
+				active = _context->gyroActionQueue.erase(active);
+				if (!allOwners) break; // One apply has one release, including repeated taps.
 			}
+			else ++active;
+		}
+		if (allOwners) ClearAllActiveToggle(key);
+		else if (toggle)
+		{
+			_context->activeTogglesQueue.erase(remove_if(_context->activeTogglesQueue.begin(), _context->activeTogglesQueue.end(),
+			  [&](const auto &active) { return active.first == owner && active.second == key; }), _context->activeTogglesQueue.end());
 		}
 	}
 
@@ -212,6 +288,7 @@ public:
 
 	void ApplyBtnPress(KeyCode key) override
 	{
+        _heldOutputs[key.name] = key;
 		if (key.code >= X_UP && key.code <= X_START || key.code == PS_HOME || 
 			key.code == PS_PAD_CLICK || key.code == X_LT || key.code == X_RT)
 		{
@@ -232,6 +309,7 @@ public:
 
 	void ApplyBtnRelease(KeyCode key) override
 	{
+        _heldOutputs.erase(key.name);
 		if (key.code >= X_UP && key.code <= X_START || key.code == PS_HOME ||
 			key.code == PS_PAD_CLICK || key.code == X_LT || key.code == X_RT)
 		{
@@ -258,14 +336,32 @@ public:
 		  });
 		if (currentlyActive == _context->activeTogglesQueue.end())
 		{
+			_toggleReleases[key.name] = { key, release };
 			DEBUG_LOG << "Adding active toggle for " << key.name << '\n';
 			apply(this);
 			_context->activeTogglesQueue.push_front({ _id, key });
 		}
 		else
 		{
+			_toggleReleases.erase(key.name);
 			release(this); // The bound action here should always erase the active toggle from the queue
 		}
+	}
+
+	void ReleaseOwnedToggles()
+	{
+		// Keep the original release callback: gyro, calibration, rumble and
+		// keyboard/gamepad actions have different cleanup semantics.
+		const auto pending = _toggleReleases;
+		for (const auto &entry : pending) {
+			const auto &key = entry.second.first;
+			const bool active = any_of(_context->activeTogglesQueue.begin(), _context->activeTogglesQueue.end(),
+			  [&](const auto &toggle) { return toggle.first == _id && toggle.second == key; });
+			if (active && entry.second.second) entry.second.second(this);
+		}
+		_context->activeTogglesQueue.erase(remove_if(_context->activeTogglesQueue.begin(), _context->activeTogglesQueue.end(),
+		  [&](const auto &toggle) { return toggle.first == _id; }), _context->activeTogglesQueue.end());
+		_toggleReleases.clear();
 	}
 
 	void ClearAllActiveToggle(KeyCode key)
@@ -339,6 +435,11 @@ void DigitalButtonState::react(OnEntry &e)
 }
 
 // Basic Press reaction should be called in every concrete Press reaction
+void DigitalButtonState::releaseOwnedToggles()
+{
+	pimpl()->ReleaseOwnedToggles();
+}
+
 void DigitalButtonState::react(Pressed &e)
 {
 	pimpl()->_context->updateChordStack(true, pimpl()->_id);
@@ -472,6 +573,7 @@ class ActiveHoldPress : public ActiveMappingState
 	{
 		DigitalButtonState::react(e);
 		pimpl()->_keyToRelease->ProcessEvent(BtnEvent::OnHold, *pimpl());
+		pimpl()->_keyToRelease->ProcessBindingTurbos(0, *pimpl());
 		pimpl()->_keyToRelease->ProcessEvent(BtnEvent::OnTurbo, *pimpl());
 		pimpl()->_turboApplies++;
 	}
@@ -480,6 +582,7 @@ class ActiveHoldPress : public ActiveMappingState
 	override
 	{
 		auto elapsed_time = pimpl()->GetPressDurationMS(e.time_now);
+		pimpl()->_keyToRelease->ProcessBindingTurbos(std::max(0.0f, elapsed_time - e.holdTime), *pimpl());
 		if (elapsed_time > e.holdTime + MAGIC_INSTANT_DURATION)
 		{
 			pimpl()->ReleaseInstant(BtnEvent::OnHold);
@@ -1071,6 +1174,23 @@ class InstRelease : public DigitalButtonState
 		}
 	}
 };
+
+// Keyboard ownership must cancel held/turbo outputs without generating a tap.
+// Replacing the FSM bypasses ordinary Released, which could execute OnTap.
+DigitalButtonState *DigitalButtonState::neutralForKeyboard() {
+    auto *impl = pimpl();
+    impl->ReleaseOwnedToggles();
+    const auto held = impl->_heldOutputs;
+    for (const auto &entry : held) impl->ApplyBtnRelease(entry.second);
+    impl->_context->updateChordStack(false, impl->_id);
+    return new NoPress(new DigitalButtonImpl(const_cast<JSMButton &>(impl->_mapping), impl->_context));
+}
+void DigitalButton::cancelForKeyboard() {
+    lock();
+    auto *neutral = _currentState->neutralForKeyboard();
+    _currentState.reset(neutral);
+    unlock();
+}
 
 // Top level interface
 

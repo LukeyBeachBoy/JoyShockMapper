@@ -115,13 +115,23 @@ def main() -> int:
         tmp = Path(tmp)
         shutil.copyfile(ROOT / 'JoyShockMapper/include/InputGuards.h', tmp / 'InputGuards.h')
         shutil.copyfile(ROOT / 'JoyShockMapper/include/TouchMouseResampler.h', tmp / 'TouchMouseResampler.h')
+        shutil.copyfile(ROOT / 'JoyShockMapper/include/TouchGridRouting.h', tmp / 'TouchGridRouting.h')
         (tmp / 'lifted.inc').write_text(lifted, encoding='utf-8')
         filter_src = source(ROOT / 'JoyShockMapper/src/JoyShock.cpp')
         start = filter_src.index('float OneEuroFilter::filter(float x, float dt, float minCutoff, float beta)')
         end = filter_src.index('\n}', start) + 2
         (tmp / 'lifted_one_euro.inc').write_text(filter_src[start:end], encoding='utf-8')
         main = source(MAIN)
-        process = main[main.index('static void processTouchMouse('):main.index('void touchCallback(')]
+        start = main.index('static void processTouchMouse(')
+        opening = main.index('{', start)
+        depth = 1
+        end = opening + 1
+        while depth:
+            depth += (main[end] == '{') - (main[end] == '}')
+            end += 1
+        # Lift only this function. Adjacent functions may use other hardware
+        # services, and must not accidentally become dependencies of the harness.
+        process = main[start:end]
         (tmp / 'lifted_process.inc').write_text(process, encoding='utf-8')
         (tmp / 'MouseMotionAccumulator.h').write_text((ROOT / 'JoyShockMapper/include/MouseMotionAccumulator.h').read_text(encoding='utf-8'), encoding='utf-8')
         for harness in selected:

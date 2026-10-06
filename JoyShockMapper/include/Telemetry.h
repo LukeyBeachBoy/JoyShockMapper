@@ -32,6 +32,11 @@ struct TelemetryPadState
 	bool touched = false;  // finger on pad
 	float speed = 0.0f;   // mouse-pipeline speed before acceleration
 	float pressure = 0.0f; // raw driver pressure (diagnostic for threshold tuning)
+	// Degrees the reading was turned (LEFT_/RIGHT_TOUCHPAD_ROTATION as applied),
+	// so a drawing of the pad as mounted can turn the point back.
+	float rotation = 0.0f;
+	// Unrotated, unclipped sensor position for absolute keyboard cursors.
+	std::optional<TelemetryStickState> raw;
 };
 
 struct TelemetryGripState
@@ -56,10 +61,16 @@ struct TelemetryDeviceStatus
 	// Capacitive thumbstick contact, the same kind of signal as the pads and grips.
 	bool leftStickTouch = false;
 	bool rightStickTouch = false;
+  // Optional for older mappers, absent when the device did not accept a report.
+  struct VirtualSticks { TelemetryStickState left, right; };
+  std::optional<VirtualSticks> virtualSticks;
+  struct VirtualMenu { std::string id; int source = 0; bool open = false; int selected = -1; bool cursor = false; float x = .5f, y = .5f; bool navigating = false; };
+  std::vector<VirtualMenu> virtualMenus;
 };
 
 struct TelemetryDevice
 {
+    std::string activeProfile;
 	int handle = 0;
 	int controllerType = 0;
 	uint64_t supportedButtons = (1ULL << 33) - 1;
@@ -117,7 +128,16 @@ namespace Telemetry
 constexpr int kProtoVersion = 3;
 constexpr int kDefaultPort = 8974;
 constexpr int kMaxRateHz = 120;
+// Leave normal editor telemetry at 120 Hz; keyboard capture needs fresh
+// positions above a 240 Hz display's cadence, without a second rate limiter.
+constexpr int kKeyboardRateHz = 500;
+inline int RateHzForProfile(const std::string &profile) {
+    const auto start = profile.find_last_of("/\\");
+    return profile.substr(start == std::string::npos ? 0 : start + 1) == "virtual-keyboard.txt"
+        ? kKeyboardRateHz : kMaxRateHz;
+}
 
+void StudioCommand(const std::string &command, int handle);
 void Configure(bool enabled, uint16_t port);
 void Shutdown();
 // Check before gathering device snapshots; discarded polls need no allocation

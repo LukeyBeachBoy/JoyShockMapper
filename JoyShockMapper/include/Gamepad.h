@@ -9,6 +9,13 @@ struct Indicator
 	uint8_t rgb[3];
 };
 
+// Last report submitted successfully to the virtual device. Diagnostics read
+// this snapshot; they never recalculate the input-processing pipeline.
+struct VirtualStickReport
+{
+  float leftX = 0.f, leftY = 0.f, rightX = 0.f, rightY = 0.f;
+};
+
 class Gamepad
 {
 
@@ -43,6 +50,7 @@ public:
 	virtual void setGyro(TimePoint now, float accelX, float accelY, float accelZ, float gyroX, float gyroY, float gyroZ) = 0;
 	virtual void setTouchState(optional<FloatXY> press1, optional<FloatXY> press2) = 0;
 	virtual void update() = 0;
+  virtual optional<VirtualStickReport> submittedSticks() const { return nullopt; }
 
 	virtual ControllerScheme getType() const = 0;
 

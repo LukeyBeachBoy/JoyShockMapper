@@ -2,6 +2,9 @@
 #include "JslWrapper.h"
 #include "SteamController2026.h"
 #include "TritonGripSettings.h"
+#include "TritonLed.h"
+#include "TritonBootSound.h"
+#include "TouchpadRotation.h"
 #include "JSMVariable.hpp"
  #include "TriggerEffectGenerator.h"
 #include "SettingsManager.h"
@@ -10,6 +13,8 @@
 #include <map>
 #include <mutex>
 #include <atomic>
+#include <condition_variable>
+#include <thread>
 #define _USE_MATH_DEFINES
 #include <math.h> // M_PI
 #include <algorithm>
@@ -239,12 +244,22 @@ struct ControllerDevice
 
 	virtual ~ControllerDevice()
 	{
+		// The tone player sends to _sdlController from its own thread; it has to
+		// be gone before the gamepad is, and before the reports below go out.
+		stopTonePlayer();
 		_micLight = 0;
 		memset(&_leftTriggerEffect, 0, sizeof(_leftTriggerEffect));
 		memset(&_rightTriggerEffect, 0, sizeof(_rightTriggerEffect));
 		_big_rumble = 0;
 		_small_rumble = 0;
 		SendEffect();
+		// Hand the light back to the controller's own patterns, or it would show
+		// the configuration's colour until its next power cycle.
+		if (_appliedLedColorSwitch == 1 && _sdlController != nullptr)
+		{
+			uint8_t report[triton_led::kReportBytes] = { 1, 0x87, 3, triton_led::kUserColorSetting, 0, 0 };
+			SDL_SendGamepadEffect(_sdlController, report, int(sizeof(report)));
+		}
 		SDL_CloseGamepad(_sdlController);
 	}
 
@@ -357,6 +372,49 @@ public:
 	chrono::steady_clock::time_point _gripLastHeld[2] {};
 	// Last LED_BRIGHTNESS written; -1 = never, so a reconnect writes it again.
 	int _appliedLedBrightness = -1;
+	std::atomic<int> _wantedLedBrightness { -1 };
+	// The LIGHT_BAR colour the mapper last asked for, as the raw Color bits: an
+	// alpha of 0 is the untouched default, meaning "leave the controller's own
+	// light alone". Set from whichever thread resolves the colour, read on the
+	// poll thread by applyTritonSettings.
+	std::atomic<uint32_t> _wantedLightBar { 0x00FFFFFF };
+	// What the controller was last told: its user-colour switch (setting 37;
+	// -1 = never written, so a reconnect writes it) and the RGBW percentages.
+	int _appliedLedColorSwitch = -1;
+	triton_led::Payload _appliedLedColor;
+	// BOOT_SOUND_LEVEL last written. The controller stores it, so once per
+	// connection and change is enough; -1 = never.
+	int _appliedBootSoundLevel = -1;
+
+	// A tone sequence (ToneSequence.h) plays from its own thread: each note is a
+	// report followed by a sleep of the note's length, up to 8 s in all, which
+	// no caller can afford -- the poll loop least of all. The thread is started
+	// on the first sequence and lives until the device does. It never takes
+	// controller_lock (the device is deleted under it, and that delete joins
+	// this thread); everything it shares is under _toneMutex. A newer sequence
+	// bumps _toneGeneration, and the player drops the old one at the next note.
+	std::mutex _toneMutex;
+	std::condition_variable _toneWake;
+	std::thread _toneThread;
+	std::vector<Tone> _toneQueue; // the sequence to play next / being played
+	int _toneGainDb = 0;
+	SoundActuators _toneActuators = SoundActuators::GRIPS;
+	unsigned _toneGeneration = 0;
+	bool _toneQuit = false;
+
+	// Called under controller_lock (from the destructor) or never: after this
+	// the thread is joined and no report of its will be sent.
+	void stopTonePlayer()
+	{
+		{
+			std::lock_guard guard(_toneMutex);
+			_toneQuit = true;
+			++_toneGeneration;
+		}
+		_toneWake.notify_all();
+		if (_toneThread.joinable())
+			_toneThread.join();
+	}
 };
 
 struct SdlInstance : public JslWrapper
@@ -541,7 +599,7 @@ public:
 	// audible tap instead of a faint tick:
 	//
 	//   [0] report id 0x82
-	//   [1] side, 0x01 = left, 0x02 = right, 0x03 = both
+	//   [1] target: 0 = left pad, 1 = right pad (captured from Steam keyboard).
 	//   [2] effect, 0 = off, 1 = tick, 2 = click, 3 = tone, 4 = rumble ...
 	//   [3] gain in dB, signed, and allowed to be positive
 	static constexpr uint8_t TRITON_ID_OUT_REPORT_HAPTIC_COMMAND = 0x82;
@@ -614,12 +672,16 @@ public:
 		if (gamepad == nullptr)
 			return false;
 
-		uint8_t buffer[TRITON_HAPTIC_COMMAND_BYTES] = { 0 };
-		buffer[0] = TRITON_ID_OUT_REPORT_HAPTIC_COMMAND;
-		buffer[1] = uint8_t(std::clamp(side, 1, 3));
-		buffer[2] = uint8_t(std::clamp(effect, 0, 7));
-		buffer[3] = uint8_t(int8_t(std::clamp(gainDb, -128, 127)));
-		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
+        bool sent = false;
+        for (const bool right : { false, true }) {
+            if ((side & (right ? 2 : 1)) == 0) continue;
+            const uint8_t buffer[TRITON_HAPTIC_COMMAND_BYTES] = {
+                TRITON_ID_OUT_REPORT_HAPTIC_COMMAND, uint8_t(right ? 1 : 0),
+                uint8_t(std::clamp(effect, 0, 7)), uint8_t(int8_t(std::clamp(gainDb, -128, 127)))
+            };
+            sent |= SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
+        }
+        return sent;
 	}
 
 	// The command report above only carries side, effect and gain, which is all
@@ -631,12 +693,21 @@ public:
 	static constexpr uint8_t TRITON_ID_OUT_REPORT_HAPTIC_LFO_TONE = 0x83;
 	static constexpr uint8_t TRITON_ID_OUT_REPORT_HAPTIC_LOG_SWEEP = 0x84;
 
+	// SDL's MsgHapticLfoTone: side, gain, frequency, duration, lfo_freq,
+	// lfo_depth. The firmware turns it into the same tone request its own
+	// haptic scripts build for the power-on jingle -- type 3, frequency as a
+	// float, the LFO fields zero -- so the two are the same instrument, and
+	// only the channels the side byte selects decide how a note sounds.
+	// The LFO fields are sent as explicit zeros rather than left to the HID
+	// layer's padding.
 	static bool sendToneBurst(SDL_Gamepad *gamepad, uint8_t target, int gainDb, uint16_t frequency, uint16_t durationMs)
 	{
-		const uint8_t buffer[7] = {
+		const uint8_t buffer[10] = {
 			TRITON_ID_OUT_REPORT_HAPTIC_LFO_TONE, target, uint8_t(int8_t(std::clamp(gainDb, -127, 127))),
 			uint8_t(frequency & 0xFF), uint8_t(frequency >> 8),
 			uint8_t(durationMs & 0xFF), uint8_t(durationMs >> 8),
+			0, 0, // lfo_freq
+			0,    // lfo_depth
 		};
 		return SDL_SendGamepadEffect(gamepad, buffer, int(sizeof(buffer)));
 	}
@@ -694,10 +765,114 @@ public:
 		return sent;
 	}
 
+	// The tone player thread (ControllerDevice::_toneThread): waits for a
+	// sequence, plays it note by note -- one report per note on the actuator
+	// pair SOUND_ACTUATORS names, the way the firmware's own scripts issue one
+	// tone request per step -- and waits for the next. Between notes it checks
+	// for a newer sequence or the device's end, and either also cuts a note's
+	// wait short. It runs unlocked while a report is on its way out so a caller
+	// queuing the next sequence (under controller_lock) is not held up by the
+	// driver.
+	//
+	// Notes are timed against the moment the sequence started rather than the
+	// end of the previous wait: a report that took a few milliseconds to leave
+	// shortens the wait for the next note instead of pushing every later note
+	// that much later, so the tune keeps the file's rhythm to the resolution
+	// of the clock (SetMaxTimerResolution) and the transport.
+	static void runTonePlayer(ControllerDevice *device)
+	{
+		std::unique_lock guard(device->_toneMutex);
+		// Generation 0 is "nothing queued yet"; the thread is only created once a
+		// sequence has been queued, so the first wait falls straight through.
+		unsigned played = 0;
+		const auto newerOrQuit = [&] { return device->_toneQuit || device->_toneGeneration != played; };
+		while (!device->_toneQuit)
+		{
+			device->_toneWake.wait(guard, newerOrQuit);
+			if (device->_toneQuit)
+				break;
+			played = device->_toneGeneration;
+			const std::vector<Tone> tones = device->_toneQueue;
+			const int gainDb = device->_toneGainDb;
+			const auto routes = tone_sequence::toneRoutes(device->_toneActuators);
+			auto due = chrono::steady_clock::now();
+			for (const auto &tone : tones)
+			{
+				if (newerOrQuit())
+					break;
+				if (tone.frequencyHz > 0)
+				{
+					guard.unlock();
+					for (const auto &route : routes)
+					{
+						const int gain = tone_sequence::playbackGainDb(tone.gainDb, gainDb + route.gainOffsetDb);
+						sendToneBurst(device->_sdlController, route.side, gain, tone.frequencyHz, tone.durationMs);
+					}
+					guard.lock();
+				}
+				// A rest only waits. The controller plays the note for its whole
+				// duration on its own, so the report is sent and the time waited out.
+				due += chrono::milliseconds(tone.durationMs);
+				device->_toneWake.wait_until(guard, due, newerOrQuit);
+			}
+		}
+	}
+
+	// Queues a sequence on a device, starting its player thread the first time.
+	// Called under controller_lock, which is what keeps the device alive here:
+	// its destructor (also under that lock) joins the thread before freeing
+	// anything the thread touches. Returns the sequence's length in ms.
+	static int startToneSequence(ControllerDevice *device, const std::vector<Tone> &tones, int gainDb)
+	{
+		if (device == nullptr || device->_sdlController == nullptr ||
+		    device->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026 || tones.empty())
+		{
+			return 0;
+		}
+		{
+			std::lock_guard guard(device->_toneMutex);
+			if (device->_toneQuit)
+				return 0;
+			device->_toneQueue = tones;
+			device->_toneGainDb = gainDb;
+			device->_toneActuators = SettingsManager::get<SoundActuators>(SettingID::SOUND_ACTUATORS)->value();
+			++device->_toneGeneration;
+			if (!device->_toneThread.joinable())
+				device->_toneThread = std::thread(&SdlInstance::runTonePlayer, device);
+		}
+		device->_toneWake.notify_all();
+		return tone_sequence::totalLengthMs(tones);
+	}
+
+	// CONNECT_SOUND_FILE, when it names a tune that can be read. The file is
+	// read here on the poll thread, once per connection, next to the 1.5 s the
+	// connect sound already waits; it is a few hundred bytes. A failure is
+	// logged once per file name rather than per connection: nothing but the
+	// user changes it, and the built-in tune plays in its place.
+	static bool playConnectSoundFile(ControllerDevice *device, int gainDb)
+	{
+		const auto setting = SettingsManager::get<PathString>(SettingID::CONNECT_SOUND_FILE);
+		if (setting == nullptr || tone_sequence::isNoToneFile(setting->value()))
+			return false;
+		const std::string path = tone_sequence::trimmed(setting->value());
+		const auto file = readToneFile(path, BASE_JSM_CONFIG_FOLDER());
+		if (!file.error.empty())
+		{
+			static std::string logged; // under controller_lock, like the rest of this
+			if (logged != path)
+			{
+				logged = path;
+				CERR << "CONNECT_SOUND_FILE " << path << ' ' << file.error << "; playing CONNECT_SOUND instead.\n";
+			}
+			return false;
+		}
+		return startToneSequence(device, file.tones, gainDb) > 0;
+	}
+
 	// The tap Steam's grip calibration plays, copied byte for byte from its USB
 	// traffic: a pulse report (0x81) with 300 us on, 300 us off, one repeat, and
 	// no gain field. Steam addresses the grips as targets 3 (left) and 4 (right),
-	// beyond the 1/2 the pad effects use -- which is why it feels unlike any pad
+	// beyond the 1/0 pad pulse targets -- which is why it feels unlike any pad
 	// effect.
 	static constexpr uint8_t TRITON_ID_OUT_REPORT_HAPTIC_PULSE = 0x81;
 	static constexpr uint8_t TRITON_HAPTIC_TARGET_LEFT_GRIP = 0x03;
@@ -844,17 +1019,80 @@ public:
 		if (!device->_connectSoundDone && chrono::steady_clock::now() - device->_connectedAt > chrono::milliseconds(1500))
 		{
 			device->_connectSoundDone = true;
-			const int sound = SettingsManager::get<int>(SettingID::CONNECT_SOUND)->value();
-			if (sound >= 0)
-				sendHapticScript(device->_sdlController, sound, SettingsManager::get<int>(SettingID::SOUND_GAIN)->value());
+			const int gainDb = SettingsManager::get<int>(SettingID::SOUND_GAIN)->value();
+			// The user's own tune first; the built-in one is the fallback, so a
+			// file that went missing still announces the connection.
+			if (!playConnectSoundFile(device, gainDb))
+			{
+				const int sound = SettingsManager::get<int>(SettingID::CONNECT_SOUND)->value();
+				if (sound >= 0)
+					sendHapticScript(device->_sdlController, sound, gainDb);
+			}
 		}
 
 		// The light: only written when LED_BRIGHTNESS changes (or on reconnect).
-		if (const int led = SettingsManager::get<int>(SettingID::LED_BRIGHTNESS)->value();
+		if (const int led = device->_wantedLedBrightness.load();
 		    led >= 0 && led != device->_appliedLedBrightness &&
 		    sendTritonSettings(device->_sdlController, { { uint8_t(45), uint16_t(led) } }))
 		{
 			device->_appliedLedBrightness = led;
+		}
+
+		// The colour. LIGHT_BAR's untouched default (alpha 0) means the firmware
+		// keeps its own light: white when connected, orange while charging, green
+		// when full, a red blink when low. A colour a configuration set writes the
+		// RGBW percentages and turns the firmware's user-colour switch (setting 37)
+		// on. Both are RAM in the controller, so a reconnect writes them again; the
+		// switch is also written off once per connection in case an earlier run left
+		// it on.
+		{
+			const Color wanted { device->_wantedLightBar.load() };
+			if (wanted.rgb.a != 0)
+			{
+				const auto payload = triton_led::payload(wanted.raw & 0x00FFFFFF);
+				if (payload != device->_appliedLedColor || device->_appliedLedColorSwitch != 1)
+				{
+					const auto report = triton_led::colorReport(payload);
+					if (SDL_SendGamepadEffect(device->_sdlController, report.data(), int(report.size())))
+					{
+						device->_appliedLedColor = payload;
+						if (device->_appliedLedColorSwitch == 1 ||
+						    sendTritonSettings(device->_sdlController, { { triton_led::kUserColorSetting, uint16_t(1) } }))
+							device->_appliedLedColorSwitch = 1;
+					}
+				}
+			}
+			else if (device->_appliedLedColorSwitch != 0 &&
+			         sendTritonSettings(device->_sdlController, { { triton_led::kUserColorSetting, uint16_t(0) } }))
+			{
+				device->_appliedLedColorSwitch = 0;
+			}
+		}
+
+		// The controller's own jingle volume, kept in its flash: written when
+		// BOOT_SOUND_LEVEL asks for a level it was not already given, left alone
+		// at -1. A reconnect rebuilds ControllerDevice, so what was written is
+		// remembered per controller (by its key) for the life of the process;
+		// the controller itself never forgets it.
+		if (const int level = SettingsManager::get<int>(SettingID::BOOT_SOUND_LEVEL)->value();
+		    triton_boot_sound::isLevel(level) && level != device->_appliedBootSoundLevel)
+		{
+			static std::map<std::string, int> writtenLevels; // under controller_lock, like the rest of this
+			const auto remembered = device->_key.empty() ? writtenLevels.end() : writtenLevels.find(device->_key);
+			if (remembered != writtenLevels.end() && remembered->second == level)
+			{
+				device->_appliedBootSoundLevel = level;
+			}
+			else
+			{
+				const auto report = triton_boot_sound::levelReport(level);
+				if (SDL_SendGamepadEffect(device->_sdlController, report.data(), int(report.size())))
+				{
+					device->_appliedBootSoundLevel = level;
+					if (!device->_key.empty())
+						writtenLevels[device->_key] = level;
+				}
+			}
 		}
 
 		// Negative means "leave the firmware's own value alone" -- the settings
@@ -1188,6 +1426,20 @@ public:
 
 	TOUCH_STATE GetTouchState(int deviceId, bool previous) override
 	{
+		return ReadTouchState(deviceId, true);
+	}
+
+	bool GetRawTouchState(int deviceId, TOUCH_STATE &state) override
+	{
+		const auto it = _controllerMap.find(deviceId);
+		if (it == _controllerMap.end() || !it->second ||
+			it->second->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026) return false;
+		state = ReadTouchState(deviceId, false);
+		return true;
+	}
+
+	TOUCH_STATE ReadTouchState(int deviceId, bool orientPads)
+	{
 		TOUCH_STATE state;
 		memset(&state, 0, sizeof(TOUCH_STATE));
 
@@ -1210,6 +1462,14 @@ public:
 			SDL_GetGamepadTouchpadFinger(_controllerMap[deviceId]->_sdlController, 1, 0, &state.t1Down, &state.t1X, &state.t1Y, &pressure1);
 			state.t0Pressure = pressure0;
 			state.t1Pressure = pressure1;
+			// Undo the pads' cant (or turn them however the user likes) here, at the
+			// one place the pads are read, so the mapper's grids, menus and mouse, the
+			// telemetry Studio draws and the overlay all see the same frame. Global
+			// values on purpose: the pads' mounting angle is not per configuration.
+			if (orientPads && state.t0Down)
+				touchpad_rotation::rotate(state.t0X, state.t0Y, SettingsManager::get<float>(SettingID::LEFT_TOUCHPAD_ROTATION)->value());
+			if (orientPads && state.t1Down)
+				touchpad_rotation::rotate(state.t1X, state.t1Y, SettingsManager::get<float>(SettingID::RIGHT_TOUCHPAD_ROTATION)->value());
 			// SDL uses the firmware's capacitive contact bit. Pressure is a readout,
 			// not a second way to keep contact alive after the finger lifts.
 
@@ -1333,7 +1593,10 @@ public:
 			// Right pad click (raw index 16), Left pad click (raw index 17)
 			buttons |= (supported ? SDL_GetNumJoystickButtons(joy) > 16 : SDL_GetJoystickButton(joy, 16)) ? 1ULL << JSOFFSET_MISC2 : 0;
 			buttons |= (supported ? SDL_GetNumJoystickButtons(joy) > 17 : SDL_GetJoystickButton(joy, 17)) ? 1ULL << JSOFFSET_MISC3 : 0;
-			// Stick capacitive touch (LTOUCH/RTOUCH already exposed via cap-sense)
+			// Stick capacitive contacts occupy their own bindable bits, independent
+			// of grip sensing and pad contact. Include them in the hardware census.
+			buttons |= (supported || SDL_GetGamepadCapSense(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_CAPSENSE_LEFT_STICK)) ? 1ULL << JSOFFSET_LTOUCH : 0;
+			buttons |= (supported || SDL_GetGamepadCapSense(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_CAPSENSE_RIGHT_STICK)) ? 1ULL << JSOFFSET_RTOUCH : 0;
 			// Grip sensors are capacitive contact bits, not an analog channel: the
 			// Triton report carries them as TRITON_LEFT/RIGHT_GRIP_TOUCH inside
 			// the button field, which SDL surfaces through the capacitive-sense
@@ -1634,6 +1897,17 @@ public:
 
 	void SetLightColour(int deviceId, int colour) override
 	{
+		auto *jc = _controllerMap[deviceId];
+		if (jc == nullptr || jc->_sdlController == nullptr)
+			return;
+		if (jc->_ctrlr_type == JS_TYPE_STEAM_CONTROLLER_2026)
+		{
+			// SDL has no LED path for this controller. The poll thread pushes the
+			// colour with the other firmware settings (applyTritonSettings), which
+			// also knows what the controller already shows.
+			jc->_wantedLightBar.store(uint32_t(colour));
+			return;
+		}
 		auto prop = SDL_GetGamepadProperties(_controllerMap[deviceId]->_sdlController);
 		
 		if (SDL_GetStringProperty(prop, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, nullptr) != nullptr)
@@ -1646,6 +1920,13 @@ public:
 			uColour.raw = colour;
 			SDL_SetGamepadLED(_controllerMap[deviceId]->_sdlController, uColour.argb[2], uColour.argb[1], uColour.argb[0]);
 		}
+	}
+
+	void SetLightBrightness(int deviceId, int brightness) override
+	{
+		auto *jc = _controllerMap[deviceId];
+		if (jc != nullptr && jc->_ctrlr_type == JS_TYPE_STEAM_CONTROLLER_2026)
+			jc->_wantedLedBrightness.store(brightness);
 	}
 
 	void SetHaptic(int deviceId, int side, int effect, int gainDb) override
@@ -1662,11 +1943,25 @@ public:
 			if (side & 1)
 				sendGripTap(jc->_sdlController, kind, TRITON_HAPTIC_SIDE_LEFT, TRITON_HAPTIC_SIDE_LEFT, gainDb);
 			if (side & 2)
-				sendGripTap(jc->_sdlController, kind, TRITON_HAPTIC_SIDE_RIGHT, TRITON_HAPTIC_SIDE_RIGHT, gainDb);
+				sendGripTap(jc->_sdlController, kind, TRITON_HAPTIC_SIDE_RIGHT, 0, gainDb);
 			return;
 		}
 		sendHapticEffect(jc->_sdlController, side, effect, gainDb);
 	}
+
+    // Exact Steam keyboard packets from the 2026-10-04 puck capture.
+    void SetSteamKeyboardHaptic(int deviceId, int side, int effect, int gainDb) override {
+        auto *jc = _controllerMap[deviceId];
+        if (jc == nullptr || jc->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026) return;
+        if (effect == 1) { sendHapticCommand(jc->_sdlController, side, 1, gainDb); return; }
+        if (effect != 8) return;
+        for (const bool right : { false, true }) {
+            if ((side & (right ? 2 : 1)) == 0) continue;
+            // Pulse uses reversed numbering and an eight-byte report, with no gain.
+            const uint8_t report[8] = { 0x81, uint8_t(right ? 0 : 1), 0x90, 0x01, 0, 0, 1, 0 };
+            SDL_SendGamepadEffect(jc->_sdlController, report, int(sizeof(report)));
+        }
+    }
 
 	// As updateGripHaptics plays it (sendGripHaptic): a canned effect on that
 	// side's pad actuator, PULSE and TAP at the grip itself.
@@ -1718,6 +2013,15 @@ public:
 		    iter->second->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
 			return false;
 		return sendHapticScript(iter->second->_sdlController, script, gainDb);
+	}
+
+	int PlayToneSequence(int deviceId, const std::vector<Tone> &tones, int gainDb) override
+	{
+		lock_guard guard(controller_lock);
+		auto iter = _controllerMap.find(deviceId);
+		if (iter == _controllerMap.end())
+			return 0;
+		return startToneSequence(iter->second, tones, gainDb);
 	}
 
 	void GetBatteryLevel(int deviceId, int &percent, int &state) override

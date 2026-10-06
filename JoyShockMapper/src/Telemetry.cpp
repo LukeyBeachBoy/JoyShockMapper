@@ -3,12 +3,14 @@
 #include "Telemetry.h"
 
 #include <algorithm>
+#include <deque>
 #include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <utility>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -32,6 +34,24 @@ using SocketHandle = int;
 constexpr SocketHandle kInvalidSocket = -1;
 #endif
 
+struct StudioAction { uint64_t id; std::string command; int handle; };
+std::mutex actionMutex;
+std::deque<StudioAction> studioActions;
+uint64_t actionSequence = 0;
+const uint64_t actionSession = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+std::string actionsJson() {
+    std::lock_guard<std::mutex> guard(actionMutex);
+    std::ostringstream out;
+    out << "{\"session\":" << actionSession << ",\"events\":[";
+    bool first = true;
+    for (const auto &event : studioActions) {
+        if (!first) out << ',';
+        first = false;
+        out << "{\"id\":" << event.id << ",\"handle\":" << event.handle << ",\"command\":" << std::quoted(event.command) << '}';
+    }
+    out << "]}";
+    return out.str();
+}
 constexpr const char *kLoopback = "127.0.0.1";
 
 class TelemetryEmitter
@@ -83,7 +103,7 @@ public:
 		}
 
 		const auto now = std::chrono::steady_clock::now();
-		const auto minInterval = std::chrono::microseconds(1000000 / Telemetry::kMaxRateHz);
+        const auto minInterval = std::chrono::microseconds(1000000 / Telemetry::RateHzForProfile(sample.activeProfile));
 		if (now < _nextSend)
 		{
 			return;
@@ -105,6 +125,7 @@ public:
 		    << ",\"ts\":" << (sample.timestampMs != 0 ? sample.timestampMs :
 		      std::chrono::duration_cast<std::chrono::milliseconds>(
 		        std::chrono::system_clock::now().time_since_epoch()).count())
+		    << ",\"studioActions\":" << actionsJson()
 		    << ",\"activeProfile\":" << std::quoted(sample.activeProfile)
 		    << ",\"omega\":" << sample.omega
 		    << ",\"t\":" << sample.normalized
@@ -139,6 +160,7 @@ public:
 				oss << "{"
 				    << "\"handle\":" << dev.handle
 				    << ",\"type\":" << dev.controllerType
+                    << ",\"activeProfile\":" << std::quoted(dev.activeProfile)
 				    << ",\"supportedButtons\":" << dev.supportedButtons
 				    << ",\"split\":" << dev.splitType
 				    << ",\"vid\":" << dev.vendorId
@@ -156,12 +178,37 @@ public:
 					    << ",\"rightStick\":{\"x\":" << status.rightStick.x << ",\"y\":" << status.rightStick.y << "}"
 					    << ",\"triggers\":{\"left\":" << status.triggers.left << ",\"right\":" << status.triggers.right << "}"
 					    << ",\"gyro\":{\"x\":" << status.gyro.x << ",\"y\":" << status.gyro.y << ",\"z\":" << status.gyro.z << "}"
-					    << ",\"leftPad\":{\"x\":" << status.leftPad.x << ",\"y\":" << status.leftPad.y << ",\"touched\":" << (status.leftPad.touched ? "true" : "false") << ",\"pressure\":" << status.leftPad.pressure << ",\"speed\":" << status.leftPad.speed << "}"
-					    << ",\"rightPad\":{\"x\":" << status.rightPad.x << ",\"y\":" << status.rightPad.y << ",\"touched\":" << (status.rightPad.touched ? "true" : "false") << ",\"pressure\":" << status.rightPad.pressure << ",\"speed\":" << status.rightPad.speed << "}"
+					    << ",\"leftPad\":{\"x\":" << status.leftPad.x << ",\"y\":" << status.leftPad.y << ",\"touched\":" << (status.leftPad.touched ? "true" : "false") << ",\"pressure\":" << status.leftPad.pressure << ",\"speed\":" << status.leftPad.speed << ",\"rotation\":" << status.leftPad.rotation << "}"
+					    << ",\"rightPad\":{\"x\":" << status.rightPad.x << ",\"y\":" << status.rightPad.y << ",\"touched\":" << (status.rightPad.touched ? "true" : "false") << ",\"pressure\":" << status.rightPad.pressure << ",\"speed\":" << status.rightPad.speed << ",\"rotation\":" << status.rightPad.rotation << "}"
 					    << ",\"leftGrip\":{\"pressed\":" << (status.leftGrip.pressed ? "true" : "false") << "}"
 					    << ",\"rightGrip\":{\"pressed\":" << (status.rightGrip.pressed ? "true" : "false") << "}"
 				    << ",\"leftStickTouch\":" << (status.leftStickTouch ? "true" : "false")
 				    << ",\"rightStickTouch\":" << (status.rightStickTouch ? "true" : "false")
+          ;
+          for (const auto &pad : {std::pair<const char *, const TelemetryPadState *>{"leftPadRaw", &status.leftPad},
+                                 std::pair<const char *, const TelemetryPadState *>{"rightPadRaw", &status.rightPad}}) {
+            if (pad.second->raw) {
+              const auto &raw = *pad.second->raw;
+              oss << ",\"" << pad.first << "\":{\"x\":" << raw.x << ",\"y\":" << raw.y << "}";
+            }
+          }
+          if (status.virtualSticks) {
+            const auto &output = *status.virtualSticks;
+            oss << ",\"virtualSticks\":{\"left\":{\"x\":" << output.left.x << ",\"y\":" << output.left.y
+                << "},\"right\":{\"x\":" << output.right.x << ",\"y\":" << output.right.y << "}}";
+          }
+          oss << ",\"virtualMenus\":[";
+          for (size_t i = 0; i < status.virtualMenus.size(); ++i) {
+            if (i) oss << ',';
+            const auto &menu = status.virtualMenus[i];
+            oss << "{\"id\":\"" << menu.id << "\",\"source\":" << menu.source
+              << ",\"open\":" << (menu.open ? "true" : "false") << ",\"selected\":" << menu.selected
+              << ",\"navigating\":" << (menu.navigating ? "true" : "false");
+            if (menu.cursor) oss << ",\"cursor\":{\"x\":" << menu.x << ",\"y\":" << menu.y << '}';
+            oss << '}';
+          }
+          oss << ']';
+          oss
 					    << "}";
 				}
 				oss << "}";
@@ -289,6 +336,11 @@ private:
 namespace Telemetry
 {
 
+void StudioCommand(const std::string &command, int handle) {
+    std::lock_guard<std::mutex> guard(actionMutex);
+    studioActions.push_back({++actionSequence, command, handle});
+    if (studioActions.size() > 32) studioActions.pop_front();
+}
 void Configure(bool enabled, uint16_t port)
 {
 	TelemetryEmitter::Instance().configure(enabled, port);

@@ -113,7 +113,7 @@ unsigned long GetCurrentProcessId()
 }
 
 /// Valid inputs:
-/// 0-9, N0-N9, F1-F29, A-Z, (L, R, )CONTROL, (L, R, )ALT, (L, R, )SHIFT, TAB, ENTER
+/// 0-9, N0-N9, F1-F24, A-Z, (L, R, )CONTROL, (L, R, )ALT, (L, R, )SHIFT, TAB, ENTER
 /// (L, M, R)MOUSE, SCROLL(UP, DOWN)
 /// NONE
 /// And characters: ; ' , . / \ [ ] + - `
@@ -134,7 +134,7 @@ WORD nameToKey(string_view name)
 		{
 			return character - 'A' + 0x41;
 		}
-		if (character == '+')
+		if (character == '+' || character == '=')
 		{
 			return VK_OEM_PLUS;
 		}
@@ -207,9 +207,9 @@ WORD nameToKey(string_view name)
 		char character3 = name.at(2);
 		if (character == 'F')
 		{
-			if (character2 == '1' || character2 <= '2')
+			if (character2 == '1' || character2 == '2')
 			{
-				if (character3 >= '0' && character3 <= '9')
+				if (character3 >= '0' && character3 <= '9' && (character2 != '2' || character3 <= '4'))
 				{
 					return (character2 - '1') * 10 + VK_F10 + (character3 - '0');
 				}

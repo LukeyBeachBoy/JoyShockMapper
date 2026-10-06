@@ -1,4 +1,5 @@
 #include "JoyShock.h"
+#include "Telemetry.h"
 #include "InputHelpers.h"
 #include <algorithm>
 #define _USE_MATH_DEFINES
@@ -37,8 +38,8 @@ JoyShock::JoyShock(int uniqueHandle, int controllerSplitType, shared_ptr<Digital
   : _handle(uniqueHandle)
   , _splitType(controllerSplitType)
   , _controllerType(jsl->GetControllerType(uniqueHandle))
-  , _triggerState(NUM_ANALOG_TRIGGERS, DstState::NoPress)
-  , _prevTriggerPosition(NUM_ANALOG_TRIGGERS, deque<float>(MAGIC_TRIGGER_SMOOTHING, 0.f))
+  , _triggerState(NUM_DUAL_STAGE_SOURCES, DstState::NoPress)
+  , _prevTriggerPosition(NUM_DUAL_STAGE_SOURCES, deque<float>(MAGIC_TRIGGER_SMOOTHING, 0.f))
   , _light_bar(SettingsManager::get<Color>(SettingID::LIGHT_BAR)->value())
   , _context(sharedButtonCommon)
   , _motion(MotionIf::getNew())
@@ -55,6 +56,7 @@ JoyShock::JoyShock(int uniqueHandle, int controllerSplitType, shared_ptr<Digital
 {
 	_vendorId = jsl->GetControllerVendor(uniqueHandle);
 	_productId = jsl->GetControllerProduct(uniqueHandle);
+    ControllerContext::Guard controllerScope(ControllerContext::modelKey(_controllerType, _vendorId, _productId), uniqueHandle);
 	if (!sharedButtonCommon)
 	{
 		_context = make_shared<DigitalButton::Context>(bind(&JoyShock::onVirtualControllerNotification, this, placeholders::_1, placeholders::_2, placeholders::_3), _motion);
@@ -64,6 +66,7 @@ JoyShock::JoyShock(int uniqueHandle, int controllerSplitType, shared_ptr<Digital
 	_context->_getMatchingSimBtn = bind(&JoyShock::getMatchingSimBtn, this, placeholders::_1);
 	_context->_getMatchingDiagBtn = bind(&JoyShock::getMatchingDiagBtn, this, placeholders::_1, placeholders::_2);
 	_context->_rumble = bind(&JoyShock::sendRumble, this, placeholders::_1, placeholders::_2);
+	_context->_studioCommand = [uniqueHandle](const string &command) { Telemetry::StudioCommand(command, uniqueHandle); };
 	_context->_haptic = bind(&JoyShock::sendHaptic, this, placeholders::_1, placeholders::_2, placeholders::_3);
 
 	_buttons.reserve(LAST_ANALOG_TRIGGER); // Don't include touch stick _buttons
@@ -115,6 +118,16 @@ JoyShock ::~JoyShock()
 	{
 		_context->rightMainMotion = nullptr;
 	}
+}
+
+FloatXY JoyShock::updateGyroDeflection(float x, float y, float seconds, bool enabled, int target)
+{
+	if (gyroDeflectionRecenterRequested.exchange(false)) gyroDeflection.reset();
+	if (!enabled) { gyroDeflection.reset(); return {}; }
+	const auto range = getSetting<FloatXY>(SettingID::GYRO_DEFLECTION_RANGE);
+	const auto position = gyroDeflection.step(x, y, seconds, range.first, range.second,
+	  getSetting<Switch>(SettingID::GYRO_DEFLECTION_LOCK_EXTENTS) == Switch::ON, enabled, target);
+	return { position.first, position.second };
 }
 
 void JoyShock::sendHaptic(int side, int effect, int gainDb)
@@ -232,9 +245,24 @@ FloatXY JoyShock::getSetting<FloatXY>(SettingID index)
 }
 
 template<>
+MouseArea JoyShock::getSetting<MouseArea>(SettingID index)
+{
+	for (auto activeChord = _context->chordStack.begin(); activeChord != _context->chordStack.end(); activeChord++)
+	{
+		optional<MouseArea> opt = getSettingAtChord<MouseArea>(index, *activeChord);
+		if (opt)
+			return *opt;
+	}
+
+	stringstream ss;
+	ss << "Index " << index << " is not a valid MouseArea setting";
+	throw invalid_argument(ss.str().c_str());
+}
+
+template<>
 GyroSettings JoyShock::getSetting<GyroSettings>(SettingID index)
 {
-	if (index == SettingID::GYRO_ON || index == SettingID::GYRO_OFF)
+	if (index == SettingID::GYRO_ON || index == SettingID::GYRO_OFF || index == SettingID::TILT_ON || index == SettingID::TILT_OFF)
 	{
 		// Look at active chord mappings starting with the latest activates chord
 		for (auto activeChord = _context->chordStack.begin(); activeChord != _context->chordStack.end(); activeChord++)
@@ -265,6 +293,20 @@ Color JoyShock::getSetting<Color>(SettingID index)
 	stringstream ss;
 	ss << "Index " << index << " is not a valid Color";
 	throw invalid_argument(ss.str().c_str());
+}
+
+template<>
+int JoyShock::getSetting<int>(SettingID index)
+{
+	if (index == SettingID::LED_BRIGHTNESS)
+	{
+		for (auto activeChord = _context->chordStack.begin(); activeChord != _context->chordStack.end(); ++activeChord)
+		{
+			if (auto value = getSettingAtChord<int>(index, *activeChord))
+				return *value;
+		}
+	}
+	throw invalid_argument("Index is not a valid int setting");
 }
 
 template<>
@@ -424,6 +466,9 @@ float JoyShock::getSmoothedStickRotation(float value, float bottomThreshold, flo
 
 void JoyShock::getSmoothedGyro(float x, float y, float length, float bottomThreshold, float topThreshold, int maxSamples, float &outX, float &outY)
 {
+	// The history owns a fixed number of distinct samples. A longer configured
+	// window must not re-read the ring repeatedly or grow poll work unboundedly.
+	maxSamples = std::clamp(maxSamples, 1, MAX_GYRO_SAMPLES);
 	// this is basically the same as we use for smoothing flick-stick rotations, but because this deals in vectors, it's a slightly different function. Not worth abstracting until it'll be used in more ways
 	// which item in the circular smoothing buffer will we write over?
 	_frontGyroSample--;
@@ -542,8 +587,12 @@ float OneEuroFilter::filter(float x, float dt)
 
 void JoyShock::applyOneEuroFilter(float rawX, float rawY, float deltaTime, float &outX, float &outY)
 {
-	outX = _oneEuroX.filter(rawX, deltaTime);
-	outY = _oneEuroY.filter(rawY, deltaTime);
+	// Resolve tuning through this controller's active chords, like the other
+	// gyro filters. Keep filter history continuous when a held setting changes.
+	const float minCutoff = getSetting(SettingID::ONE_EURO_MIN_CUTOFF);
+	const float speedCoeff = getSetting(SettingID::ONE_EURO_SPEED_COEFF);
+	outX = _oneEuroX.filter(rawX, deltaTime, minCutoff, speedCoeff);
+	outY = _oneEuroY.filter(rawY, deltaTime, minCutoff, speedCoeff);
 }
 
 void JoyShock::resetOneEuroFilter()
@@ -552,8 +601,30 @@ void JoyShock::resetOneEuroFilter()
 	_oneEuroY.reset();
 }
 
+void JoyShock::updateGyroHaptics(float x, float y, float deltaTime, bool active)
+{
+	if (_controllerType != JS_TYPE_STEAM_CONTROLLER_2026 || !active)
+	{
+		gyroAngularHaptics.reset();
+		return;
+	}
+	const float intensity = getSetting(SettingID::GYRO_HAPTIC_INTENSITY);
+	if (!(intensity > 0))
+	{
+		gyroAngularHaptics.reset();
+		return;
+	}
+	const HapticEffect effect = getSetting<HapticEffect>(SettingID::GYRO_HAPTIC_EFFECT);
+	const float interval = getSetting(SettingID::GYRO_HAPTIC_INTERVAL);
+	if (gyroAngularHaptics.advance(x, y, deltaTime, interval, effect != HapticEffect::OFF))
+		fireHaptic(getSetting<int>(SettingID::GYRO_HAPTIC_SIDE), int(effect), hapticGainDb(intensity));
+}
+
 void JoyShock::handleButtonChange(ButtonID id, bool pressed, int touchpadID)
 {
+  const bool menuDirection = virtualMenuConsumesButton(id);
+  const bool physicalPressed = pressed;
+  if (menuDirection) pressed = false;
 	DigitalButton *button = int(id) <= LAST_ANALOG_TRIGGER ? &_buttons[int(id)] :
 	  touchpadID >= 0 && touchpadID < _touchpads.size()    ? &_touchpads[touchpadID].buttons.find(id)->second :
 	                                                         findGridSlot(id).button;
@@ -581,6 +652,7 @@ void JoyShock::handleButtonChange(ButtonID id, bool pressed, int touchpadID)
 		evt.dblPressWindow = getSetting(SettingID::DBL_PRESS_WINDOW);
 		button->sendEvent(evt);
 	}
+  if (menuDirection) _context->updateChordStack(physicalPressed, id);
 }
 
 float JoyShock::getTriggerEffectStartPos()
@@ -593,9 +665,15 @@ float JoyShock::getTriggerEffectStartPos()
 
 void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, TriggerMode mode, float position, AdaptiveTriggerSetting &trigger_rumble)
 {
-	uint8_t offset = SettingsManager::getV<int>(softIndex == ButtonID::ZL ? SettingID::LEFT_TRIGGER_OFFSET : SettingID::RIGHT_TRIGGER_OFFSET)->value();
-	uint8_t range = SettingsManager::getV<int>(softIndex == ButtonID::ZL ? SettingID::LEFT_TRIGGER_RANGE : SettingID::RIGHT_TRIGGER_RANGE)->value();
-	auto idxState = int(fullIndex) - FIRST_ANALOG_TRIGGER; // Get analog trigger index
+	const bool padStages = fullIndex == ButtonID::CAPTURE || fullIndex == ButtonID::MISC2 || fullIndex == ButtonID::MISC3;
+	uint8_t offset = padStages ? 0 : SettingsManager::getV<int>(softIndex == ButtonID::ZL ? SettingID::LEFT_TRIGGER_OFFSET : SettingID::RIGHT_TRIGGER_OFFSET)->value();
+	uint8_t range = padStages ? 255 : SettingsManager::getV<int>(softIndex == ButtonID::ZL ? SettingID::LEFT_TRIGGER_RANGE : SettingID::RIGHT_TRIGGER_RANGE)->value();
+	auto idxState = dualStageSourceIndex(fullIndex);
+	const auto fullPressed = [&](bool wasPressed) {
+		// Contact is represented as .99, click as 1. Physical-trigger noise
+		// hysteresis must never turn pad contact into a click.
+		return padStages ? std::isfinite(position) && position == 1.f : fullPullPressed(wasPressed, position);
+	};
 	if (idxState < 0 || idxState >= (int)_triggerState.size())
 	{
 		COUT << "Error: Trigger " << fullIndex << " does not exist in state map. Dual Stage Trigger not possible.\n";
@@ -608,6 +686,23 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		mode = TriggerMode::NO_FULL;
 	}
 
+	if (_lastTriggerMode[idxState] && *_lastTriggerMode[idxState] != mode)
+	{
+		// A held setting modeshift starts the new stage policy cleanly. Each
+		// pad has its own slot; changing one must not release another source.
+		handleButtonChange(softIndex, false);
+		handleButtonChange(fullIndex, false);
+		if (_context->_vigemController)
+		{
+			if (*_lastTriggerMode[idxState] == TriggerMode::X_LT) _context->_vigemController->setLeftTrigger(0);
+			if (*_lastTriggerMode[idxState] == TriggerMode::X_RT) _context->_vigemController->setRightTrigger(0);
+		}
+		_triggerState[idxState] = DstState::NoPress;
+		_softPullDown[idxState] = _fullPullDown[idxState] = false;
+		std::fill(_prevTriggerPosition[idxState].begin(), _prevTriggerPosition[idxState].end(), 0.f);
+	}
+	_lastTriggerMode[idxState] = mode;
+
 	if (mode == TriggerMode::X_LT)
 	{
 		if (_context->_vigemController)
@@ -616,7 +711,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		trigger_rumble.force = 0;
 		trigger_rumble.start = offset + 0.05 * range;
 		_context->updateChordStack(position > 0, softIndex);
-		_fullPullDown[idxState] = fullPullPressed(_fullPullDown[idxState], position);
+		_fullPullDown[idxState] = fullPressed(_fullPullDown[idxState]);
 		_context->updateChordStack(_fullPullDown[idxState], fullIndex);
 		return;
 	}
@@ -628,7 +723,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		trigger_rumble.force = 0;
 		trigger_rumble.start = offset + 0.05 * range;
 		_context->updateChordStack(position > 0, softIndex);
-		_fullPullDown[idxState] = fullPullPressed(_fullPullDown[idxState], position);
+		_fullPullDown[idxState] = fullPressed(_fullPullDown[idxState]);
 		_context->updateChordStack(_fullPullDown[idxState], fullIndex);
 		return;
 	}
@@ -664,7 +759,14 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		}
 		if (isSoftPullPressed(idxState, position))
 		{
-			if (mode == TriggerMode::MAY_SKIP || mode == TriggerMode::MUST_SKIP)
+			const bool skipMode = mode == TriggerMode::MAY_SKIP || mode == TriggerMode::MUST_SKIP ||
+			  mode == TriggerMode::MAY_SKIP_R || mode == TriggerMode::MUST_SKIP_R;
+			if (skipMode && fullPressed(false))
+			{
+				_triggerState[idxState] = DstState::QuickFullPress;
+				handleButtonChange(fullIndex, true);
+			}
+			else if (mode == TriggerMode::MAY_SKIP || mode == TriggerMode::MUST_SKIP)
 			{
 				// Start counting press time to see if soft binding should be skipped
 				_triggerState[idxState] = DstState::PressStart;
@@ -678,8 +780,11 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 			}
 			else // mode == NO_FULL or NO_SKIP, NO_SKIP_EXCLUSIVE
 			{
-				_triggerState[idxState] = DstState::SoftPress;
-				handleButtonChange(softIndex, true);
+				const bool clicked = fullPressed(false) && mode != TriggerMode::NO_FULL;
+				_triggerState[idxState] = !clicked ? DstState::SoftPress :
+				  mode == TriggerMode::NO_SKIP_EXCLUSIVE ? DstState::ExclFullPress : DstState::DelayFullPress;
+				handleButtonChange(softIndex, !(clicked && mode == TriggerMode::NO_SKIP_EXCLUSIVE));
+				if (clicked) handleButtonChange(fullIndex, true);
 			}
 		}
 		else
@@ -695,7 +800,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 			_triggerState[idxState] = DstState::QuickSoftTap;
 			handleButtonChange(softIndex, true);
 		}
-		else if (fullPullPressed(false, position))
+		else if (fullPressed(false))
 		{
 			// Trigger has been full pressed quickly
 			_triggerState[idxState] = DstState::QuickFullPress;
@@ -726,7 +831,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 			_triggerState[idxState] = DstState::NoPress;
 			handleButtonChange(softIndex, false);
 		}
-		else if (fullPullPressed(false, position))
+		else if (fullPressed(false))
 		{
 			// Trigger has been full pressed quickly
 			_triggerState[idxState] = DstState::QuickFullPress;
@@ -758,7 +863,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		trigger_rumble.force = UINT16_MAX;
 		trigger_rumble.start = offset + 0.89 * range;
 		trigger_rumble.end = offset + 0.99 * range;
-		if (!fullPullPressed(true, position))
+		if (!fullPressed(true))
 		{
 			// Full press is being release
 			_triggerState[idxState] = DstState::QuickFullRelease;
@@ -779,7 +884,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		{
 			_triggerState[idxState] = DstState::NoPress;
 		}
-		else if (fullPullPressed(false, position))
+		else if (fullPressed(false))
 		{
 			// Trigger is being full pressed again
 			_triggerState[idxState] = DstState::QuickFullPress;
@@ -803,7 +908,7 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 				trigger_rumble.start = min(offset + 0.89 * range, trigger_rumble.start + 1 / 150. * tick_time * range);
 				trigger_rumble.end = trigger_rumble.start + 0.1 * range;
 				handleButtonChange(softIndex, true);
-				if (fullPullPressed(false, position))
+				if (fullPressed(false))
 				{
 					// Full press is allowed in addition to soft press
 					_triggerState[idxState] = DstState::DelayFullPress;
@@ -815,8 +920,8 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 				trigger_rumble.force = min(int(UINT16_MAX), trigger_rumble.force + int(1 / 30.f * tick_time * UINT16_MAX));
 				trigger_rumble.start = min(offset + 0.89 * range, trigger_rumble.start + 1 / 150. * tick_time * range);
 				trigger_rumble.end = trigger_rumble.start + 0.1 * range;
-				handleButtonChange(softIndex, false);
-				if (fullPullPressed(false, position))
+				handleButtonChange(softIndex, !fullPressed(false));
+				if (fullPressed(false))
 				{
 					_triggerState[idxState] = DstState::ExclFullPress;
 					handleButtonChange(fullIndex, true);
@@ -836,10 +941,10 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 		trigger_rumble.force = UINT16_MAX;
 		trigger_rumble.start = offset + 0.8 * range;
 		trigger_rumble.end = offset + 0.99 * range;
-		if (!fullPullPressed(true, position))
+		if (!fullPressed(true))
 		{
 			// Full Press is being released
-			_triggerState[idxState] = DstState::SoftPress;
+			_triggerState[idxState] = isSoftPullPressed(idxState, position) ? DstState::SoftPress : DstState::NoPress;
 			handleButtonChange(fullIndex, false);
 		}
 		else // Full press is being held
@@ -847,19 +952,19 @@ void JoyShock::handleTriggerChange(ButtonID softIndex, ButtonID fullIndex, Trigg
 			handleButtonChange(fullIndex, true);
 		}
 		// Soft press is always held regardless
-		handleButtonChange(softIndex, true);
+		handleButtonChange(softIndex, isSoftPullPressed(idxState, position));
 		break;
 	case DstState::ExclFullPress:
 		trigger_rumble.mode = AdaptiveTriggerMode::SEGMENT;
 		trigger_rumble.force = UINT16_MAX;
 		trigger_rumble.start = offset + 0.89 * range;
 		trigger_rumble.end = offset + 0.99 * range;
-		if (!fullPullPressed(true, position))
+		if (!fullPressed(true))
 		{
 			// Full press is being release
-			_triggerState[idxState] = DstState::SoftPress;
+			_triggerState[idxState] = isSoftPullPressed(idxState, position) ? DstState::SoftPress : DstState::NoPress;
 			handleButtonChange(fullIndex, false);
-			handleButtonChange(softIndex, true);
+			handleButtonChange(softIndex, isSoftPullPressed(idxState, position));
 		}
 		else
 		{
@@ -933,6 +1038,169 @@ void JoyShock::updateGridSize()
 	resizeGridButtons(_rightStickMenuButtons, right_stick_menu_mappings, _context);
 }
 
+bool JoyShock::virtualMenuConsumes(VirtualMenuSource source)
+{
+  if (_virtualMenus.empty()) return false;
+  return virtualMenuOwners()[int(source)] >= 0;
+}
+
+VirtualMenuOwners JoyShock::virtualMenuOwners()
+{
+  VirtualMenuOwners owners; owners.fill(-1);
+  VirtualMenuOwners priorities{};
+  for (int i = 0; i < int(_virtualMenus.size()); ++i) {
+    const auto &runtime = _virtualMenus[i]; const auto &attachment = runtime.attachment;
+    const int source = int(attachment.source);
+    const bool commanded = attachment.activation == VirtualMenuActivation::COMMAND;
+    const int priority = runtime.routing.ownershipPriority(commanded ? VirtualMenuActivation::HOLD : attachment.activation,
+      commanded ? _context->menuCommands[attachment.menu].active() : virtualMenuIsPressed(attachment.input));
+    if (priority > 0 && priority >= priorities[source]) { owners[source] = i; priorities[source] = priority; }
+  }
+  return owners;
+}
+
+ButtonID JoyShock::virtualMenuConfirm(const VirtualMenuAttachment &attachment) const
+{
+  if (attachment.confirm != ButtonID::NONE) return attachment.confirm;
+  switch (attachment.source) {
+  case VirtualMenuSource::LEFT: return _controllerType == JS_TYPE_STEAM_CONTROLLER_2026 ? ButtonID::MISC3 : ButtonID::CAPTURE;
+  case VirtualMenuSource::RIGHT: return _controllerType == JS_TYPE_STEAM_CONTROLLER_2026 ? ButtonID::MISC2 : ButtonID::CAPTURE;
+  case VirtualMenuSource::LSTICK: return ButtonID::L3;
+  case VirtualMenuSource::RSTICK: return ButtonID::R3;
+  case VirtualMenuSource::ABXY: return ButtonID::N;
+  default: return ButtonID::UP;
+  }
+}
+
+bool JoyShock::virtualMenuConsumesButton(ButtonID id)
+{
+  if (_virtualMenus.empty()) return false;
+  for (int index : virtualMenuOwners()) {
+    if (index < 0) continue;
+    const auto &attachment = _virtualMenus[index].attachment;
+    if (attachment.source == VirtualMenuSource::DPAD &&
+      (id == ButtonID::UP || id == ButtonID::DOWN || id == ButtonID::LEFT || id == ButtonID::RIGHT)) return true;
+    if (attachment.source == VirtualMenuSource::ABXY &&
+      (id == ButtonID::N || id == ButtonID::S || id == ButtonID::W || id == ButtonID::E)) return true;
+    if (id == attachment.cancel && id != ButtonID::NONE) return true;
+    if (attachment.selection == VirtualMenuSelection::CLICK && id == virtualMenuConfirm(attachment)) return true;
+  }
+  return false;
+}
+
+void JoyShock::refreshVirtualMenuCatalog()
+{
+  const auto catalog = VirtualMenus::snapshot();
+  auto release = [&](DigitalButton &button, std::chrono::steady_clock::time_point time) {
+    Released event{ time, getSetting(SettingID::TURBO_PERIOD), getSetting(SettingID::HOLD_PRESS_TIME), getSetting(SettingID::DBL_PRESS_WINDOW) };
+    button.sendEvent(event);
+  };
+  if (_menuCatalog != catalog) {
+    // Finish pending native tap/instant releases before replacing their Mapping
+    // references. No menu-owned output is abandoned when a profile is reloaded.
+    for (auto &runtime : _virtualMenus) for (auto &button : runtime.buttons) {
+      release(*button, _timeNow);
+      release(*button, _timeNow + std::chrono::seconds(60));
+      button->releaseOwnedToggles();
+    }
+    _virtualMenus.clear(); _context->menuCommands.clear(); _menuCatalog = catalog;
+    for (const auto &attachment : catalog->attachments) {
+      auto found = catalog->definitions.find(attachment.menu);
+      if (found == catalog->definitions.end()) continue;
+      MenuRuntime runtime; runtime.attachment = attachment; runtime.definition = found->second;
+      for (int i = 0; i < runtime.definition.count + (runtime.definition.centerAction.has_value() ? 1 : 0); ++i) {
+        // Reserved runtime IDs stay below the inverted-chord range and cannot
+        // alias physical/pad/stick button IDs. They are not config inputs.
+        auto id = ButtonID(1024 + int(_virtualMenus.size()) * 26 + i);
+        runtime.mappings.push_back(std::make_unique<JSMButton>(id, i == runtime.definition.count ? *runtime.definition.centerAction : runtime.definition.actions[i]));
+        runtime.buttons.push_back(std::make_unique<DigitalButton>(_context, *runtime.mappings.back()));
+      }
+      _virtualMenus.push_back(std::move(runtime));
+    }
+  }
+}
+
+bool JoyShock::virtualMenuIsPressed(ButtonID id)
+{
+  // Released conditions read the same fresh census as held conditions. They
+  // must not depend on an unrelated setting registering an inverted chord.
+  if (isInvertedChord(id)) return !virtualMenuIsPressed(invertedChordBase(id));
+  const auto index = int(id);
+  if (index >= 0 && index < int(_virtualMenuInputs.size()) && _virtualMenuInputs[index].has_value())
+    return *_virtualMenuInputs[index];
+  return isPressed(id);
+}
+
+void JoyShock::processVirtualMenus()
+{
+  refreshVirtualMenuCatalog();
+  auto release = [&](DigitalButton &button, std::chrono::steady_clock::time_point time) {
+    Released event{ time, getSetting(SettingID::TURBO_PERIOD), getSetting(SettingID::HOLD_PRESS_TIME), getSetting(SettingID::DBL_PRESS_WINDOW) };
+    button.sendEvent(event);
+  };
+  if (_virtualMenus.empty()) return;
+  const auto touch = jsl->GetTouchState(_handle);
+  const auto owners = virtualMenuOwners();
+  for (int menuIndex = 0; menuIndex < int(_virtualMenus.size()); ++menuIndex) {
+    auto &runtime = _virtualMenus[menuIndex];
+    const auto &attachment = runtime.attachment;
+    VirtualMenuInput input;
+    const bool commanded = attachment.activation == VirtualMenuActivation::COMMAND;
+    auto &command = _context->menuCommands[attachment.menu];
+    input.activation = commanded ? command.active() : virtualMenuIsPressed(attachment.input);
+    input.confirm = virtualMenuIsPressed(virtualMenuConfirm(attachment));
+    input.cancel = (attachment.cancel != ButtonID::NONE && virtualMenuIsPressed(attachment.cancel)) ||
+      (owners[int(attachment.source)] >= 0 && owners[int(attachment.source)] != menuIndex);
+    if (commanded && command.cancellation != runtime.cancellation) input.cancel = true;
+    if (commanded && input.cancel) command.apply("CLOSE", 0);
+    runtime.cancellation = command.cancellation;
+    if (attachment.source == VirtualMenuSource::LEFT || attachment.source == VirtualMenuSource::RIGHT) {
+      const bool left = attachment.source == VirtualMenuSource::LEFT;
+      const bool dual = _controllerType == JS_TYPE_STEAM_CONTROLLER_2026;
+      const bool second = dual && !left;
+      input.contact = (!left || dual) && (second ? touch.t1Down : touch.t0Down);
+      input.x = second ? touch.t1X : touch.t0X; input.y = second ? touch.t1Y : touch.t0Y;
+      if (attachment.confirm == ButtonID::NONE) input.confirm = virtualMenuIsPressed(dual ? left ? ButtonID::MISC3 : ButtonID::MISC2 : ButtonID::CAPTURE);
+      input.previous = input.contact && input.x < .3f; input.next = input.contact && input.x > .7f;
+    } else if (attachment.source == VirtualMenuSource::LSTICK || attachment.source == VirtualMenuSource::RSTICK) {
+      const bool left = attachment.source == VirtualMenuSource::LSTICK;
+      const float x = left ? jsl->GetLeftX(_handle) : jsl->GetRightX(_handle);
+      const float y = left ? jsl->GetLeftY(_handle) : jsl->GetRightY(_handle);
+      input.contact = std::hypot(x, y) > runtime.definition.deadzone;
+      input.atRest = !input.contact;
+      input.x = .5f + x * .5f; input.y = .5f - y * .5f;
+      input.joystickCursor = attachment.joystickCursor;
+      if (input.joystickCursor) {
+        // Absolute deflection, matching pad coordinates. Neutral noise stays
+        // at the hub; diagonals stay inside the menu's circular boundary.
+        const float length = std::hypot(x, y);
+        const float scale = std::max(1.f, length);
+        input.x = input.atRest || !std::isfinite(length) ? .5f : .5f + x / scale * .5f;
+        input.y = input.atRest || !std::isfinite(length) ? .5f : .5f - y / scale * .5f;
+      }
+      input.previous = x < -.5f; input.next = x > .5f;
+      if (attachment.confirm == ButtonID::NONE) input.confirm = virtualMenuIsPressed(left ? ButtonID::L3 : ButtonID::R3);
+    } else if (attachment.source == VirtualMenuSource::ABXY) {
+      input.digitalNavigation = true;
+      // Spatial controls: west/east move the hotbar, north confirms. The
+      // activation input is independent; south may be chosen to toggle it.
+      input.contact = true; input.previous = virtualMenuIsPressed(ButtonID::W); input.next = virtualMenuIsPressed(ButtonID::E);
+    } else {
+      input.digitalNavigation = true;
+      input.contact = true; input.previous = virtualMenuIsPressed(ButtonID::LEFT); input.next = virtualMenuIsPressed(ButtonID::RIGHT);
+      if (attachment.confirm == ButtonID::NONE) input.confirm = virtualMenuIsPressed(ButtonID::UP);
+    }
+    runtime.result = runtime.routing.update(runtime.definition.type, commanded ? VirtualMenuActivation::HOLD : attachment.activation, attachment.selection,
+      runtime.definition.count, runtime.definition.columns, runtime.definition.deadzone, input, runtime.definition.centerAction.has_value());
+    for (int i = 0; i < int(runtime.buttons.size()); ++i) {
+      if (runtime.result.held == i || runtime.result.pulse == i) {
+        Pressed event{ _timeNow, getSetting(SettingID::TURBO_PERIOD), getSetting(SettingID::HOLD_PRESS_TIME), getSetting(SettingID::DBL_PRESS_WINDOW) };
+        runtime.buttons[i]->sendEvent(event);
+      } else release(*runtime.buttons[i], _timeNow);
+    }
+  }
+}
+
 JoyShock::GridSlot JoyShock::findGridSlot(ButtonID id)
 {
 	const int index = int(id);
@@ -988,6 +1256,10 @@ JoyShock::GridSlot JoyShock::findGridSlot(ButtonID id)
 
 bool JoyShock::isSoftPullPressed(int triggerIndex, float triggerPosition)
 {
+	// Pad contact is digital and must not inherit analog hair-trigger or
+	// travel thresholds from the physical triggers.
+	if (triggerIndex == dualStageSourceIndex(ButtonID::CAPTURE) || triggerIndex >= NUM_ANALOG_TRIGGERS)
+		return std::isfinite(triggerPosition) && triggerPosition > 0.f;
 	float threshold = getSetting(SettingID::TRIGGER_THRESHOLD);
 	if (_controllerType == JS_TYPE_DS && getSetting<Switch>(SettingID::ADAPTIVE_TRIGGER) != Switch::OFF)
 		threshold = max(0.f, threshold); // hair trigger disabled on dual sense when adaptive triggers are active
@@ -1309,7 +1581,7 @@ void JoyShock::processStick(float stickX, float stickY, Stick &stick, float mous
 			float normY = stickY / stickLength;
 			// use screen resolution
 			float mouseX = getSetting(SettingID::SCREEN_RESOLUTION_X) * 0.5f + 0.5f + normX * mouse_ring_radius;
-			float mouseY = getSetting(SettingID::SCREEN_RESOLUTION_X) * 0.5f + 0.5f - normY * mouse_ring_radius;
+			float mouseY = getSetting(SettingID::SCREEN_RESOLUTION_Y) * 0.5f + 0.5f - normY * mouse_ring_radius;
 			// normalize
 			mouseX = mouseX / getSetting(SettingID::SCREEN_RESOLUTION_X);
 			mouseY = mouseY / getSetting(SettingID::SCREEN_RESOLUTION_Y);
@@ -1796,8 +2068,9 @@ bool JoyShock::processGyroStick(float stickX, float stickY, float stickLength, S
 		{
 			if (gyroInStickStrength == 0.f)
 			{
-				// hack to help with finding deadzones more quickly
-				_context->_vigemController->setStick(undeadzoneInner, 0.f, isLeft);
+				// Explicit calibration signal; legacy profiles keep their behavior.
+				const auto probe = getSetting<Switch>(isLeft ? SettingID::LEFT_STICK_DEADZONE_PROBE : SettingID::RIGHT_STICK_DEADZONE_PROBE);
+				_context->_vigemController->setStick(probe == Switch::ON ? undeadzoneInner : 0.f, 0.f, isLeft);
 			}
 			else
 			{
@@ -1813,4 +2086,22 @@ bool JoyShock::processGyroStick(float stickX, float stickY, float stickLength, S
 	processed_gyro_stick |= gyroMatchesStickMode;
 
 	return stickLength > undeadzoneInner;
+}
+
+// Release tilt-owned actions without changing gyro activation or its queues.
+void JoyShock::stopTilt()
+{
+  for (auto button : { ButtonID::MUP, ButtonID::MDOWN, ButtonID::MLEFT, ButtonID::MRIGHT,
+      ButtonID::MRING, ButtonID::LEAN_LEFT, ButtonID::LEAN_RIGHT })
+    handleButtonChange(button, false);
+  _motionStick.scroll.reset(_timeNow);
+  // Keep the source's setting/button IDs, but discard flick, hybrid and scroll history.
+  _motionStick = Stick(_motionStick._innerDeadzone, _motionStick._outerDeadzone,
+    _motionStick._ringMode, _motionStick._stickMode, _motionStick._ringId,
+    _motionStick._leftId, _motionStick._rightId, _motionStick._upId, _motionStick._downId);
+  _motionStick.scroll.init(_buttons[int(ButtonID::MLEFT)], _buttons[int(ButtonID::MRIGHT)]);
+  _motionStick.flick_percent_done = 1.f;
+  if (_tiltOutputMode == StickMode::LEFT_WIND_X) _windingAngleLeft = 0.f;
+  if (_tiltOutputMode == StickMode::RIGHT_WIND_X) _windingAngleRight = 0.f;
+  _tiltWasActive = false;
 }

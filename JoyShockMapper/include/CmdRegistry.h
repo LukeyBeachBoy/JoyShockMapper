@@ -86,6 +86,8 @@ private:
     vector<string> _profileLines;
     vector<string> _restoreLines;
     bool _chordLoading = false;
+    bool _controllerLoading = false;
+    void applyControllerVariants();
     vector<string> _loadingFiles;
     // The line being read in each file of _loadingFiles, so a line that cannot
     // be used can be reported with where it is.
@@ -98,6 +100,7 @@ private:
 public:
 	CmdRegistry();
     static string activeProfile();
+    static string activeProfile(int handle);
 
 	// Not string_view because the string is modified inside
 	bool loadConfigFile(string fileName);

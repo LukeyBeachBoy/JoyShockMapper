@@ -255,7 +255,9 @@ public:
 
 	void SetLightColour(int deviceId, int colour) override
 	{
-		JslSetLightColour(deviceId, colour);
+		// The top byte marks a colour a configuration chose (see Color); the
+		// library wants plain 0x00RRGGBB.
+		JslSetLightColour(deviceId, colour & 0x00FFFFFF);
 	}
 
 	void SetHaptic(int deviceId, int side, int effect, int gainDb) override

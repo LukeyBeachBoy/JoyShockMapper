@@ -579,6 +579,18 @@ void flushMouseMotion()
 	// printf("%0.4f %0.4f\n", accumulatedX, accumulatedY);
 }
 
+// No per-monitor information on this path: the uinput absolute axis spans the
+// whole desktop, so the fractions are taken as fractions of that.
+void setMouseOnActiveScreen(float x, float y)
+{
+	setMouseNorm(x, y);
+}
+
+bool getActiveScreenSize(int &, int &)
+{
+	return false;
+}
+
 void setMouseNorm(float x, float y)
 {
 	mouse.mouse_move_absolute(std::roundf(65535.0f * x), std::roundf(65535.0f * y));

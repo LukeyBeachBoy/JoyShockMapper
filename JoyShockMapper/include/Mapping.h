@@ -3,6 +3,8 @@
 #include "JoyShockMapper.h"
 #include "PlatformDefinitions.h"
 
+class Mapping;
+
 // The list of different function that can be bound in the mapping
 class EventActionIf
 {
@@ -10,13 +12,21 @@ public:
 	typedef function<void(EventActionIf *)> Callback;
 
 	virtual void RegisterInstant(BtnEvent evt, Callback cb) = 0;
+	virtual void TickBindingTurbo(size_t index, float elapsed, float period, Callback apply) {}
+	virtual void FinishBindingTurbo() {}
 	virtual void ApplyGyroAction(KeyCode gyroAction) = 0;
-	virtual void RemoveGyroAction() = 0;
+	// Normal releases belong to their input; explicit release may clear all owners.
+	virtual void RemoveGyroAction(KeyCode gyroAction, bool allOwners, bool toggle) = 0;
 	virtual void SetRumble(int smallRumble, int bigRumble) = 0;
 	// One-shot: a haptic effect has its own duration, so there is nothing to release.
 	virtual void FireHaptic(int side, int effect, int gainDb) = 0;
 	virtual void ApplyBtnPress(KeyCode key) = 0;
 	virtual void ApplyBtnRelease(KeyCode key) = 0;
+	// Cycle state belongs to the physical input instance, not a shared Mapping.
+	virtual void ApplyCycle(const string &identity, const vector<Mapping> &choices) = 0;
+	virtual void ReleaseCycle(const string &identity) = 0;
+	virtual void StudioCommand(const string &command) {}
+	virtual void MenuCommand(const string &id, const string &verb, bool release) {}
 	virtual void ApplyButtonToggle(KeyCode key, Callback apply, Callback release) = 0;
 	virtual void StartCalibration() = 0;
 	virtual void FinishCalibration() = 0;
@@ -62,6 +72,7 @@ private:
 	string _command;
 
 	map<BtnEvent, EventActionIf::Callback> _eventMapping;
+	vector<pair<float, EventActionIf::Callback>> _bindingTurbos;
 	float _tapDurationMs = MAGIC_TAP_DURATION;
 	bool _hasViGEmBtn = false;
 
@@ -88,8 +99,9 @@ public:
 		return _command;
 	}
 	void ProcessEvent(BtnEvent evt, EventActionIf &button) const;
+	void ProcessBindingTurbos(float elapsed, EventActionIf &button) const;
 
-	bool AddMapping(KeyCode key, EventModifier evtMod, ActionModifier actMod = ActionModifier::None);
+	bool AddMapping(KeyCode key, EventModifier evtMod, ActionModifier actMod = ActionModifier::None, float turboInterval = 0);
 
 	bool AppendToCommand(KeyCode key, EventModifier evtMod, ActionModifier actMod = ActionModifier::None);
 
@@ -105,7 +117,9 @@ public:
 
 	inline void clear()
 	{
+		_command.clear();
 		_eventMapping.clear();
+		_bindingTurbos.clear();
 		_description.clear();
 		_tapDurationMs = MAGIC_TAP_DURATION;
 		_hasViGEmBtn = false;

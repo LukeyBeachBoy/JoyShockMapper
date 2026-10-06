@@ -26,6 +26,8 @@
 //              where the grip sensors' own haptic would -- PULSE and TAP on
 //              the grip actuators rather than the pads. Studio's grip haptic
 //              preview sends 1, so a chosen effect feels as it will in play.
+//              2 plus a seventh signed gainDb field selects captured Steam keyboard
+//              Tick (1) / 400 us Pulse (8) packets; other effects are rejected.
 namespace StudioFeedback
 {
 
@@ -40,6 +42,8 @@ struct Request
 	int rumbleMs = 0;
 	float rumble = 0.f;
 	bool grips = false;
+    bool steamKeyboard = false;
+    int gainDb = 0;
 	std::chrono::steady_clock::time_point received{};
 };
 

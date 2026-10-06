@@ -34,7 +34,17 @@ int main()
 	assert(StudioFeedback::Parse("FEEDBACK 8 66 3 0 0 0", request));
 	assert(!request.grips);
 
-	// Still rejected: OFF, a fourth side, anything else.
+	// Captured Steam keyboard mode: signed gain, Tick and exact short Pulse only.
+    assert(StudioFeedback::Parse("FEEDBACK 1 35 1 12 8 2 5", request));
+    assert(request.steamKeyboard && request.gainDb == 5 && !request.grips);
+    assert(StudioFeedback::Parse("FEEDBACK 8 35 2 12 8 2 0", request));
+    assert(request.steamKeyboard && request.effect == 8);
+    assert(!StudioFeedback::Parse("FEEDBACK 2 35 1 12 8 2 5", request));
+    assert(!StudioFeedback::Parse("FEEDBACK 1 35 1 12 8 2 128", request));
+    assert(StudioFeedback::Parse("FEEDBACK 1 35 1 12 8", request));
+    assert(!request.steamKeyboard);
+
+    // Still rejected: OFF, a fourth side, anything else.
 	assert(!StudioFeedback::Parse("FEEDBACK 0 50 1 0 0 1", request));
 	assert(!StudioFeedback::Parse("FEEDBACK 2 50 4 0 0 1", request));
 	assert(!StudioFeedback::Parse("FEEDBACK 2 50", request));

@@ -10,9 +10,46 @@
 #include <string>
 #include <fstream>
 #include <mutex>
+#include "ControllerContext.h"
+#include "ControllerCompatibility.h"
+#include "JSMVariable.hpp"
+#include "VirtualMenuCatalog.h"
 
-namespace { std::mutex profileMutex; string liveProfile; }
+namespace { std::mutex profileMutex; string liveProfile; std::map<int, string> deviceProfiles, deviceBaseProfiles; }
 string CmdRegistry::activeProfile() { std::lock_guard<std::mutex> lock(profileMutex); return liveProfile; }
+string CmdRegistry::activeProfile(int handle) { std::lock_guard<std::mutex> lock(profileMutex); auto it = deviceProfiles.find(handle); if (it != deviceProfiles.end()) return it->second; auto base = deviceBaseProfiles.find(handle); return base == deviceBaseProfiles.end() ? liveProfile : base->second; }
+extern string controllerModelForHandle(int handle);
+extern void refreshControllerOutput(int handle);
+extern void prepareControllerProfile(int handle);
+
+void CmdRegistry::applyControllerVariants() {
+    if (_controllerLoading) return;
+    _controllerLoading = true;
+    const auto lines = _profileLines;
+    for (const string model : {string("type-4"), string("type-5"), string("type-5-edge")}) {
+        if (!ControllerContext::writeScope.empty() && model != ControllerContext::model) continue;
+        bool left = false, forcePad = false;
+        for (const auto &line : lines) { const auto text = ControllerCompatibility::trim(line); if (text == "# @controller-pad " + model + " left") { left = true; forcePad = true; } else if (text == "# @controller-pad " + model + " right") { left = false; forcePad = true; } }
+        ControllerContext::Guard scope(model, ControllerContext::handle, ControllerContext::writeScope.empty() ? model : ControllerContext::writeScope);
+        for (const auto &line : ControllerCompatibility::fallback(lines, left, forcePad)) processLine(line);
+        VirtualMenus::adaptSinglePad(left);
+    }
+    for (int phase = 0; phase < 2; ++phase) for (const auto &line : lines) {
+        const auto text = ControllerCompatibility::trim(line);
+        const string prefix = "# @controller ";
+        if (text.rfind(prefix, 0) != 0) continue;
+        const auto split = text.find(' ', prefix.size());
+        if (split == string::npos) continue;
+        const auto model = text.substr(prefix.size(), split - prefix.size());
+        if (!ControllerContext::writeScope.empty() && model != ControllerContext::model) continue;
+        ControllerContext::Guard scope(model, ControllerContext::handle, ControllerContext::writeScope.empty() ? model : ControllerContext::writeScope);
+        const auto assignment = text.substr(split + 1);
+        // Controller variants carry assignments and metadata, never one-shot macros.
+        if (assignment.find('=') != string::npos && (ControllerCompatibility::key(assignment) == "VIRTUAL_CONTROLLER") == (phase == 0)) processLine(assignment);
+    }
+    _profileLines = lines;
+    _controllerLoading = false;
+}
 
 JSMCommand::JSMCommand(string_view name)
   : _parse()
@@ -68,7 +105,14 @@ CmdRegistry::CmdRegistry()
 
 bool CmdRegistry::loadConfigFile(string fileName)
 {
+    std::lock_guard<std::recursive_mutex> configurationLock(ControllerContext::mutex);
     if (fileName.empty()) return false;
+    const int bindingHandle = (!_chordLoading && _loadingFiles.empty() && ControllerContext::handle) ? ControllerContext::handle : 0;
+    const auto bindingLines = bindingHandle ? _profileLines : std::vector<string>{};
+    const auto bindingLive = bindingHandle ? activeProfile() : string{};
+    std::unique_ptr<ControllerContext::Guard> bindingScope;
+
+
 	// https://stackoverflow.com/questions/2602013/read-whole-ascii-file-into-c-stdstring
 	auto comment = fileName.find_first_of('#');
 	if (comment != string::npos)
@@ -85,7 +129,22 @@ bool CmdRegistry::loadConfigFile(string fileName)
 		file.open(string{ BASE_JSM_CONFIG_FOLDER() } + fileName);
 	}
 	if (file)
-	{
+    {
+    if (bindingHandle) {
+        prepareControllerProfile(bindingHandle);
+        JSMVariableBase::clearScope(ControllerContext::deviceKey(bindingHandle));
+        VirtualMenus::clearScope(ControllerContext::deviceKey(bindingHandle));
+        ControllerContext::isolatedScopes.erase(ControllerContext::deviceKey(bindingHandle));
+        deviceProfiles.erase(bindingHandle);
+        bindingScope = std::make_unique<ControllerContext::Guard>(ControllerContext::model, bindingHandle, ControllerContext::baseKey(bindingHandle));
+        ControllerContext::isolatedScopes.insert(ControllerContext::baseKey(bindingHandle));
+    }
+        if (_loadingFiles.empty() && !_chordLoading && ControllerContext::writeScope.empty()) {
+            std::lock_guard<std::mutex> lock(profileMutex);
+            for (const auto &[id, path] : deviceProfiles) { prepareControllerProfile(id); JSMVariableBase::clearScope(ControllerContext::deviceKey(id)); VirtualMenus::clearScope(ControllerContext::deviceKey(id)); }
+            for (const auto &[id, path] : deviceBaseProfiles) { JSMVariableBase::clearScope(ControllerContext::baseKey(id)); VirtualMenus::clearScope(ControllerContext::baseKey(id)); }
+            deviceProfiles.clear(); deviceBaseProfiles.clear(); ControllerContext::isolatedScopes.clear();
+        }
         // A configuration the player loaded on purpose replaces one being held
         // by a chord or a layer. There is nothing left to restore, and leaving
         // the held state set makes STUDIO_CHORD_BEGIN refuse every later chord
@@ -124,6 +183,9 @@ bool CmdRegistry::loadConfigFile(string fileName)
 		file.close();
         _loadingFiles.pop_back();
         _loadingLines.pop_back();
+        if (_loadingFiles.empty()) applyControllerVariants();
+        if (bindingHandle) { std::lock_guard<std::mutex> lock(profileMutex); deviceBaseProfiles[bindingHandle] = fileName; liveProfile = bindingLive; _profileLines = bindingLines; }
+
 		return true;
 	}
 	return false;
@@ -204,7 +266,60 @@ bool CmdRegistry::isCommandValid(string_view line) const
 
 void CmdRegistry::processLine(const string& line)
 {
+    std::lock_guard<std::recursive_mutex> configurationLock(ControllerContext::mutex);
 	auto trimmedLine = string{ strtrim(line) };
+    if (trimmedLine.rfind("# @controller", 0) == 0) {
+        if (!_controllerLoading) _profileLines.push_back(trimmedLine);
+        return;
+    }
+    if (!ControllerContext::writeScope.empty() && trimmedLine.find('=') != string::npos && trimmedLine.rfind('#', 0) != 0) {
+        const auto key = ControllerCompatibility::key(trimmedLine);
+        if (key == "TELEMETRY_ENABLED" || key == "TELEMETRY_PORT" || key == "AUTOLOAD" || key == "AUTOCONNECT" || key == "JSM_DIRECTORY" || key == "HIDE_MINIMIZED") return;
+    }
+    const string deviceCommand = "STUDIO_DEVICE_COMMAND ";
+    if (trimmedLine.rfind(deviceCommand, 0) == 0) {
+        std::istringstream args(trimmedLine.substr(deviceCommand.size())); int id = 0; args >> id;
+        string command; std::getline(args, command); const auto model = controllerModelForHandle(id);
+        if (model.empty()) return;
+        ControllerContext::Guard scope(model, id, deviceProfiles.count(id) ? ControllerContext::deviceKey(id) : ControllerContext::baseKey(id)); processLine(command); return;
+    }
+    const string deviceBegin = "STUDIO_DEVICE_CHORD_BEGIN ";
+    const string deviceEnd = "STUDIO_DEVICE_CHORD_END ";
+    if (trimmedLine.rfind(deviceEnd, 0) == 0) {
+        int id = 0; std::istringstream(trimmedLine.substr(deviceEnd.size())) >> id;
+        if (id <= 0) return;
+        prepareControllerProfile(id);
+        JSMVariableBase::clearScope(ControllerContext::deviceKey(id));
+        ControllerContext::isolatedScopes.erase(ControllerContext::deviceKey(id));
+        VirtualMenus::clearScope(ControllerContext::deviceKey(id));
+        { std::lock_guard<std::mutex> lock(profileMutex); deviceProfiles.erase(id); }
+        refreshControllerOutput(id);
+        return;
+    }
+    if (trimmedLine.rfind(deviceBegin, 0) == 0) {
+        std::istringstream args(trimmedLine.substr(deviceBegin.size()));
+        int id = 0; args >> id; string path; std::getline(args, path); path = ControllerCompatibility::trim(path);
+        const auto model = controllerModelForHandle(id);
+        if (model.empty() || path.empty()) return;
+        ifstream check(path); if (!check) check.open(string{BASE_JSM_CONFIG_FOLDER()} + path);
+        if (!check) return;
+        prepareControllerProfile(id);
+        const auto savedLines = _profileLines;
+        const auto savedLive = activeProfile();
+        const auto savedChordLoading = _chordLoading;
+        _chordLoading = true;
+        {
+            ControllerContext::Guard scope(model, id, ControllerContext::deviceKey(id));
+            ControllerContext::isolatedScopes.insert(ControllerContext::deviceKey(id));
+            processLine("RESET_MAPPINGS");
+            loadConfigFile(path);
+        }
+        _chordLoading = savedChordLoading;
+        _profileLines = savedLines;
+        { std::lock_guard<std::mutex> lock(profileMutex); liveProfile = savedLive; deviceProfiles[id] = path; }
+        refreshControllerOutput(id);
+        return;
+    }
     // A configuration switch nobody asked for -- Autoload reacting to the
     // focused window -- must not replace a configuration being held by a chord
     // or a layer. One the player asked for, by pressing a binding that loads a
@@ -212,7 +327,7 @@ void CmdRegistry::processLine(const string& line)
     // exactly like a dead binding.
     const string autoload = "STUDIO_AUTOLOAD ";
     if (trimmedLine.compare(0, autoload.size(), autoload) == 0) {
-        if (!_chordRestore.empty()) return;
+        if (!_chordRestore.empty() || !deviceProfiles.empty()) return;
         loadConfigFile(trimmedLine.substr(autoload.size()));
         return;
     }
@@ -251,6 +366,7 @@ void CmdRegistry::processLine(const string& line)
         // and saved (without applying) while the temporary config was held.
         const auto lines = _restoreLines;
         for (const auto &savedLine : lines) processLine(savedLine);
+        applyControllerVariants();
         { std::lock_guard<std::mutex> lock(profileMutex); liveProfile = restore; }
         _restoreLines.clear();
         processLine("TELEMETRY_ENABLED = ON");

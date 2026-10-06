@@ -3,6 +3,8 @@
 #include "JoyShockMapper.h"
 #include "Mapping.h"
 #include <sstream>
+#include "ControllerContext.h"
+#include <set>
 
 // Global ID generator
 static unsigned int _delegateID = 1;
@@ -10,16 +12,24 @@ static unsigned int _delegateID = 1;
 class JSMVariableBase
 {
 public:
-	virtual ~JSMVariableBase() = default;
+    inline static std::set<JSMVariableBase*> variables;
+    map<string, string> scopedLabels;
+    JSMVariableBase() { variables.insert(this); }
+    JSMVariableBase(const JSMVariableBase &other) : _label(other._label) { variables.insert(this); }
+	virtual ~JSMVariableBase() { variables.erase(this); }
+    virtual void eraseScope(const string &scope) = 0;
+    static void clearScope(const string &scope) { for (auto *variable : variables) variable->eraseScope(scope); }
 
 	string_view label() const
 	{
-		return _label;
+		for (const auto &scope : ControllerContext::readScopes()) { auto found = scopedLabels.find(scope); if (found != scopedLabels.end()) return found->second; }
+        return _label;
 	}
 
 	void updateLabel(string_view label)
 	{
-		_label = label;
+		if (ControllerContext::writeScope.empty()) _label = label;
+        else scopedLabels[ControllerContext::writeScope] = label;
 	}
 
 	virtual JSMVariableBase *reset() = 0;
@@ -46,6 +56,8 @@ public:
 	typedef function<T(T current, T next)> FilterDelegate;
 
 protected:
+    map<string, T> _scopedValues;
+    bool _baseAssigned = true;
 	// The variable value itself
 	T _value;
 
@@ -122,6 +134,7 @@ public:
 	// reset the variable by assigning it its default value.
 	JSMVariable *reset() override
 	{
+		if (ControllerContext::writeScope.empty()) { _scopedValues.clear(); scopedLabels.clear(); }
 		// Use operator to enable notification
 		set(_defVal);
 		return this;
@@ -131,13 +144,25 @@ public:
 	// This enables easy usage of the variable within an operation.
 	virtual operator T() const
 	{
-		return _value;
+		return value();
 	}
 
 	virtual const T &value() const
 	{
-		return _value;
+        for (const auto &scope : ControllerContext::readScopes()) {
+            auto it = _scopedValues.find(scope);
+            if (it != _scopedValues.end()) return it->second;
+        }
+		if (ControllerContext::isolated()) return _defVal;
+        return _value;
 	}
+    void eraseScope(const string &scope) override { _scopedValues.erase(scope); scopedLabels.erase(scope); }
+    void inheritBase() { _baseAssigned = false; }
+    bool assigned() const {
+        for (const auto &scope : ControllerContext::readScopes()) if (_scopedValues.count(scope)) return true;
+        if (ControllerContext::isolated()) return false;
+        return _baseAssigned;
+    }
 
 	const T &defaultValue() const
 	{
@@ -149,6 +174,14 @@ public:
 	// for changing the member _value
 	virtual T set(T newValue)
 	{
+        if (!ControllerContext::writeScope.empty()) {
+            const T oldValue = value();
+            const T filtered = _filter(oldValue, newValue);
+            _scopedValues.insert_or_assign(ControllerContext::writeScope, filtered);
+            if (filtered != oldValue) for (auto listener : _onChangeListeners) listener.second(filtered);
+            return filtered;
+        }
+		_baseAssigned = true;
 		T oldValue = _value;
 		_value = _filter(oldValue, newValue); // Pass new value through filtering
 		if (_value != oldValue)
@@ -186,6 +219,7 @@ public:
 		{
 			// Create the chord when requested, using the copy constructor.
 			_chordedVariables.emplace(chord, JSMVariable<T>(*this, Base::_defVal));
+            _chordedVariables.at(chord).inheritBase();
 		}
 		return &_chordedVariables[chord];
 	}
@@ -202,9 +236,9 @@ public:
 		if (chord > ButtonID::NONE)
 		{
 			auto existingChord = _chordedVariables.find(chord);
-			return existingChord != _chordedVariables.end() ? optional<T>(T(existingChord->second)) : nullopt;
+			return existingChord != _chordedVariables.end() && existingChord->second.assigned() ? optional<T>(T(existingChord->second)) : nullopt;
 		}
-		return chord != ButtonID::INVALID ? optional(Base::_value) : nullopt;
+		return chord != ButtonID::INVALID ? optional(Base::value()) : nullopt;
 	}
 	virtual operator T() const
 	{
@@ -220,7 +254,8 @@ public:
 	virtual ChordedVariable<T> *reset() override
 	{
 		JSMVariable<T>::reset();
-		_chordedVariables.clear();
+        if (ControllerContext::writeScope.empty()) _chordedVariables.clear();
+        else for (auto &entry : _chordedVariables) entry.second.eraseScope(ControllerContext::writeScope);
 		return this;
 	}
 };
@@ -257,7 +292,7 @@ public:
 
 	void processModeshiftRemoval(ButtonID modeshift)
 	{
-		if (_chordToRemove == modeshift)
+		if (ControllerContext::writeScope.empty() && _chordToRemove == modeshift)
 		{
 			auto modeshiftVar = Base::_chordedVariables.find(modeshift);
 			if (modeshiftVar != Base::_chordedVariables.end())
@@ -274,7 +309,8 @@ typedef pair<const ButtonID, JSMVariable<Mapping>> ComboMap;
 
 class MapIterator
 {
-	const map<ButtonID, JSMVariable<Mapping>> *_mapping;
+	void skipUnassigned() { while (_iter != _mapping->end() && !_iter->second.assigned()) ++_iter; }
+    const map<ButtonID, JSMVariable<Mapping>> *_mapping;
 	map<ButtonID, JSMVariable<Mapping>>::const_iterator _iter;
 
 public:
@@ -282,6 +318,7 @@ public:
 	  : _mapping(&mapping)
 	  , _iter(_mapping->begin())
 	{
+        skipUnassigned();
 	}
 
 	operator bool() const
@@ -292,6 +329,7 @@ public:
 	void operator++()
 	{
 		_iter++;
+        skipUnassigned();
 	}
 
 	const ComboMap *operator->() const
@@ -352,18 +390,18 @@ public:
 	const ComboMap *getDblPressMap() const
 	{
 		auto existingChord = _chordedVariables.find(_id);
-		return existingChord != _chordedVariables.end() ? &*existingChord : nullptr;
+		return existingChord != _chordedVariables.end() && existingChord->second.assigned() ? &*existingChord : nullptr;
 	}
 
 	// Indicate whether any sim press mappings are present
 	inline bool hasSimMappings() const
 	{
-		return !_simMappings.empty();
+		return std::any_of(_simMappings.begin(), _simMappings.end(), [](const auto &entry) { return entry.second.assigned(); });
 	}
 
 	inline bool hasDiagMappings() const
 	{
-		return !_diagMappings.empty();
+		return std::any_of(_diagMappings.begin(), _diagMappings.end(), [](const auto &entry) { return entry.second.assigned(); });
 	}
 
 	virtual Mapping set(Mapping baseValue) override
@@ -421,6 +459,11 @@ public:
 	virtual JSMButton *reset() override
 	{
 		ChordedVariable<Mapping>::reset();
+        if (!ControllerContext::writeScope.empty()) {
+            for (auto &entry : _simMappings) entry.second.eraseScope(ControllerContext::writeScope);
+            for (auto &entry : _diagMappings) entry.second.eraseScope(ControllerContext::writeScope);
+            return this;
+        }
 		for (auto id : _mapping)
 		{
 			_simMappings[id.first].removeOnChangeListener(id.second);
@@ -440,6 +483,7 @@ public:
 		if (existingSim == _simMappings.end())
 		{
 			JSMVariable<Mapping> var(*this, Mapping());
+            var.inheritBase();
 			_simMappings.emplace(chord, var);
 			_mapping[chord] = _simMappings[chord].addOnChangeListener(
 			  bind(&updateSimPressPartner, chord, _id, placeholders::_1));
@@ -456,6 +500,7 @@ public:
 		if (existingDiag == _diagMappings.end())
 		{
 			JSMVariable<Mapping> var(*this, Mapping());
+            var.inheritBase();
 			_diagMappings.emplace(chord, var);
 			_mapping[chord] = _diagMappings[chord].addOnChangeListener(
 			  bind(&updateDiagPressPartner, chord, _id, placeholders::_1));
@@ -466,18 +511,18 @@ public:
 	const JSMVariable<Mapping> *atSimPress(ButtonID chord) const
 	{
 		auto existingSim = _simMappings.find(chord);
-		return existingSim != _simMappings.end() ? &existingSim->second : nullptr;
+		return existingSim != _simMappings.end() && existingSim->second.assigned() ? &existingSim->second : nullptr;
 	}
 
 	const JSMVariable<Mapping> *atDiagPress(ButtonID chord) const
 	{
 		auto existingSim = _diagMappings.find(chord);
-		return existingSim != _diagMappings.end() ? &existingSim->second : nullptr;
+		return existingSim != _diagMappings.end() && existingSim->second.assigned() ? &existingSim->second : nullptr;
 	}
 
 	void processChordRemoval(ButtonID chord, const JSMVariable<Mapping> *value)
 	{
-		if (value && value->value() == Mapping::NO_MAPPING)
+		if (ControllerContext::writeScope.empty() && value && value->value() == Mapping::NO_MAPPING)
 		{
 			auto chordVar = _chordedVariables.find(chord);
 			if (chordVar != _chordedVariables.end())
@@ -489,7 +534,7 @@ public:
 
 	void processSimPressRemoval(ButtonID chord, const JSMVariable<Mapping> *value)
 	{
-		if (value && value->value() == Mapping::NO_MAPPING)
+		if (ControllerContext::writeScope.empty() && value && value->value() == Mapping::NO_MAPPING)
 		{
 			auto chordVar = _simMappings.find(chord);
 			if (chordVar != _simMappings.end())
@@ -501,7 +546,7 @@ public:
 
 	void processDiagPressRemoval(ButtonID chord, const JSMVariable<Mapping> *value)
 	{
-		if (value && value->value() == Mapping::NO_MAPPING)
+		if (ControllerContext::writeScope.empty() && value && value->value() == Mapping::NO_MAPPING)
 		{
 			auto chordVar = _diagMappings.find(chord);
 			if (chordVar != _diagMappings.end())

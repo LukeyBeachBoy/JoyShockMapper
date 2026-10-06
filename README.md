@@ -1029,6 +1029,13 @@ The touchpad always offers the ```TOUCH``` button binding. It will be pressed if
 The most important setting for the touchpad is simply ```TOUCHPAD_MODE``` which will determine the primary functionality of the touchpad. Here are two possible values:
 * **GRID_AND_STICK** - Grid And Stick will create a button grid of equally sized buttons on the touch pad. You have to also assign to ```GRID_SIZE``` the number of columns and rows of the grid : the product of the two cannot be greater than 25 or lesser than 1. Touch buttons T1-TN will then become available for assignment: they are layed out in order from left to right, from top to bottom. There are also two touchsticks available. See below.
 * **MOUSE** - Mouse mode turns the touchpad into a familiar laptop touchpad. Sensitivity can be adjusted via ```TOUCHPAD_SENS```. Gestures will be added to this mode in future releases. Taps and double taps are already usable via ```TOUCH```.
+* **MOUSE_AREA** - The touchpad becomes a map of one rectangle of the screen: the cursor goes where your finger is inside that rectangle, absolutely, and cannot leave it. This is what Steam Input calls a mouse region, and it is how a hotbar or an inventory can be swept with a thumb instead of swiping across the whole screen. The rectangle is ```TOUCHPAD_AREA = left top width height```, four fractions of the screen the game is on (each 0 to 1; the default ```0 0 1 1``` is the whole screen). Fractions rather than pixels, so the same configuration lands on the same part of a 1080p monitor and a 4K TV. ```TOUCHPAD_AREA_FIT``` decides how a pad whose shape differs from the rectangle's is laid over it: ```STRETCH``` (default) makes the whole pad the whole rectangle, so a square pad over a wide strip moves faster sideways than up and down; ```UNIFORM``` moves the cursor the same distance per millimetre both ways, scaling the pad to cover the rectangle and letting its spare travel stop at the edge. While a finger is on a MOUSE_AREA pad, gyro mouse output is held off. Two-pad controllers have ```LEFT_TOUCHPAD_AREA```, ```LEFT_TOUCHPAD_AREA_FIT```, ```RIGHT_TOUCHPAD_AREA``` and ```RIGHT_TOUCHPAD_AREA_FIT```.
+
+```
+RIGHT_TOUCHPAD_MODE = MOUSE_AREA
+RIGHT_TOUCHPAD_AREA = 0.3 0.9 0.4 0.08   # a hotbar along the bottom
+MISC2 = LMOUSE                           # click the pad to use the slot
+```
 
 Here's an example of grid usage to add some more buttons that otherwise would not be worth putting on a controller
 ```

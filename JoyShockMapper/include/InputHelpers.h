@@ -58,6 +58,16 @@ void flushMouseMotion();
 
 void setMouseNorm(float x, float y);
 
+// Puts the cursor at (x, y), fractions 0..1 of the screen the game is on --
+// the monitor holding the foreground window, falling back to the primary. Sent
+// immediately rather than accumulated: this is a position, not a motion.
+void setMouseOnActiveScreen(float x, float y);
+
+// The pixel size of that same screen, for callers that need its shape. False
+// when the platform cannot say, in which case the caller falls back to the
+// SCREEN_RESOLUTION_X/Y settings.
+bool getActiveScreenSize(int &width, int &height);
+
 // delta time will apply to shaped movement, but the extra (velocity parameters after deltaTime) is
 // applied as given
 inline void shapedSensitivityMoveMouse(float x, float y, float deltaTime, float extraVelocityX, float extraVelocityY)

@@ -35,6 +35,7 @@ add_executable (
     src/DigitalButton.cpp
     src/MotionImpl.cpp
     src/Mapping.cpp
+    src/VirtualMenuCatalog.cpp
     src/TriggerEffectGenerator.cpp
     src/AutoLoad.cpp
 	src/AutoConnect.cpp

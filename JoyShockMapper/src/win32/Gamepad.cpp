@@ -255,6 +255,8 @@ public:
 		isLeft ? setLeftStick(x, y) : setRightStick(x, y);
 	}
 
+  optional<VirtualStickReport> submittedSticks() const override { return _submittedSticks; }
+
 	void setGyro(TimePoint now, float accelX, float accelY, float accelZ, float gyroX, float gyroY, float gyroZ) override
 	{}
 
@@ -269,6 +271,7 @@ protected:
 	}
 
 	PVIGEM_TARGET _gamepad = nullptr;
+  optional<VirtualStickReport> _submittedSticks;
 	bool isLeftTriggerPressedDigitally = false;
 	bool isRightTriggerPressedDigitally = false;
 
@@ -381,7 +384,11 @@ public:
 			if (isRightTriggerPressedDigitally)
 				setRightTrigger(1.0f);
 
-			vigem_target_x360_update(VigemClient::get(), _gamepad, _stateX360);
+      if (VIGEM_SUCCESS(vigem_target_x360_update(VigemClient::get(), _gamepad, _stateX360)))
+        _submittedSticks = VirtualStickReport{
+          clamp(_stateX360.sThumbLX / float(SHRT_MAX), -1.f, 1.f), clamp(_stateX360.sThumbLY / float(SHRT_MAX), -1.f, 1.f),
+          clamp(_stateX360.sThumbRX / float(SHRT_MAX), -1.f, 1.f), clamp(_stateX360.sThumbRY / float(SHRT_MAX), -1.f, 1.f) };
+      else _submittedSticks.reset();
 			auto buttons = _stateX360.wButtons;
 			XUSB_REPORT_INIT(&_stateX360);
 			_stateX360.wButtons = buttons;
@@ -604,7 +611,11 @@ public:
 			if (isRightTriggerPressedDigitally)
 				setRightTrigger(1.0f);
 
-			vigem_target_ds4_update_ex(VigemClient::get(), _gamepad, _stateDS4);
+      if (VIGEM_SUCCESS(vigem_target_ds4_update_ex(VigemClient::get(), _gamepad, _stateDS4)))
+        _submittedSticks = VirtualStickReport{
+          clamp((_stateDS4.Report.bThumbLX - 128) / 127.f, -1.f, 1.f), clamp((128 - _stateDS4.Report.bThumbLY) / 127.f, -1.f, 1.f),
+          clamp((_stateDS4.Report.bThumbRX - 128) / 127.f, -1.f, 1.f), clamp((128 - _stateDS4.Report.bThumbRY) / 127.f, -1.f, 1.f) };
+      else _submittedSticks.reset();
 			auto buttons = _stateDS4.Report.wButtons;
 			auto special = _stateDS4.Report.bSpecial;
 			DS4_REPORT_EX_INIT(&_stateDS4);

@@ -70,7 +70,7 @@ std::ostream &operator<<(std::ostream &out, const KeyCode &code)
 }
 
 /// Valid inputs:
-/// 0-9, N0-N9, F1-F29, A-Z, (L, R, )CONTROL, (L, R, )ALT, (L, R, )SHIFT, TAB, ENTER
+/// 0-9, N0-N9, F1-F24, A-Z, (L, R, )CONTROL, (L, R, )ALT, (L, R, )SHIFT, TAB, ENTER
 /// (L, M, R)MOUSE, SCROLL(UP, DOWN)
 /// NONE
 /// And characters: ; ' , . / \ [ ] + - `
@@ -91,7 +91,7 @@ WORD nameToKey(string_view name)
 		{
 			return character - 'A' + 0x41;
 		}
-		if (character == '+')
+		if (character == '+' || character == '=')
 		{
 			return VK_OEM_PLUS;
 		}
@@ -164,34 +164,23 @@ WORD nameToKey(string_view name)
 		char character3 = name.at(2);
 		if (character == 'F')
 		{
-			if (character2 == '1' || character2 <= '2')
+			if (character2 == '1' || character2 == '2')
 			{
-				if (character3 >= '0' && character3 <= '9')
+				if (character3 >= '0' && character3 <= '9' && (character2 != '2' || character3 <= '4'))
 				{
 					return (character2 - '1') * 10 + VK_F10 + (character3 - '0');
 				}
 			}
 		}
 	}
-	if (length == 5)
+	if (length == 5 && name[0] == 'R')
 	{
-		auto pchar = name.data();
-		if (*pchar++ == 'R')
-		{
-			while (*pchar != '\0')
-			{
-				if (*pchar < '0' || *pchar > 'F' || (*pchar > '9' && *pchar < 'A'))
-				{
-					break;
-				}
-				pchar++;
-			}
-			if (*pchar == '\0')
-			{
-				return RUMBLE;
-			}
-			// Else it's not a rumble command. Could be RIGHT for example
-		}
+		// A string_view can refer to a non-terminated slice. Check its four
+		// payload bytes, never scan beyond the declared token length.
+		bool valid = true;
+		for (size_t i = 1; i < name.size(); ++i)
+			valid = valid && ((name[i] >= '0' && name[i] <= '9') || (name[i] >= 'A' && name[i] <= 'F'));
+		if (valid) return RUMBLE;
 	}
 	if (length > 2 && name[0] == '"' && name[length - 1] == '"')
 	{

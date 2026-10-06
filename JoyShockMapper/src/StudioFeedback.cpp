@@ -69,15 +69,18 @@ namespace StudioFeedback
 
 bool Parse(const char *text, Request &out)
 {
-	int effect = 0, side = 0, rumbleMs = 0, target = 0;
+	int effect = 0, side = 0, rumbleMs = 0, target = 0, gainDb = 0;
 	float intensity = 0.f, rumble = 0.f;
 	// The target is optional, so a Studio that predates it still parses.
-	const int fields = std::sscanf(text, "FEEDBACK %d %f %d %d %f %d", &effect, &intensity, &side, &rumbleMs, &rumble, &target);
-	if (fields != 5 && fields != 6)
+	const int fields = std::sscanf(text, "FEEDBACK %d %f %d %d %f %d %d", &effect, &intensity, &side, &rumbleMs, &rumble, &target, &gainDb);
+	if (fields != 5 && fields != 6 && fields != 7)
 		return false;
 	// TICK .. TAP: HapticEffect's playable range (OFF is 0, INVALID after TAP).
 	if (effect < 1 || effect > 9 || side < 1 || side > 3)
 		return false;
+	if (fields == 7 && (target != 2 || (effect != 1 && effect != 8) || gainDb < -128 || gainDb > 127)) return false;
+    out.steamKeyboard = fields == 7 && target == 2;
+    out.gainDb = gainDb;
 	out.effect = effect;
 	out.intensity = std::clamp(intensity, 0.f, 100.f);
 	out.side = side;

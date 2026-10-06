@@ -4,6 +4,7 @@
 #include "JoyShockMapper.h"
 #include "Gamepad.h"
 #include "MotionIf.h"
+#include "VirtualMenuRouting.h"
 #include <chrono>
 #include <deque>
 #include <mutex>
@@ -98,6 +99,8 @@ class DigitalButtonState : public pocket_fsm::StatePimplIF<DigitalButtonImpl>
 
 	// Get matching enum value
 	virtual BtnState getState() const = 0;
+	void releaseOwnedToggles();
+    DigitalButtonState *neutralForKeyboard();
 
 	virtual void swapPimpl(DigitalButtonState& otherState)
 	{
@@ -123,10 +126,12 @@ public:
 		deque<pair<ButtonID, KeyCode>> gyroActionQueue; // Queue of gyro control actions currently in effect
 		deque<pair<ButtonID, KeyCode>> activeTogglesQueue;
 		deque<ButtonID> chordStack; // Represents the current active _buttons in order from most recent to latest
+		std::map<std::string, VirtualMenuCommandState> menuCommands;
 		unique_ptr<Gamepad> _vigemController;
 		function<DigitalButton *(ButtonID)> _getMatchingSimBtn; // A functor to JoyShock::getMatchingSimBtn
 		function<DigitalButton *(ButtonID, optional<MapIterator>&)> _getMatchingDiagBtn; // A functor to JoyShock::getMatchingDiagBtn
 		function<void(int small, int big)> _rumble;             // A functor to JoyShock::sendRumble
+		function<void(const string &)> _studioCommand;
 		function<void(int side, int effect, int gainDb)> _haptic; // A functor to JoyShock::sendHaptic
 		mutex callback_lock;                                    // Needs to be in the common struct for both joycons to use the same
 		shared_ptr<MotionIf> rightMainMotion = nullptr;
@@ -134,6 +139,10 @@ public:
 		int nn = 0;
 
 		void updateChordStack(bool isPressed, ButtonID index);
+		// Steam capacitive conditions follow hardware, independently of the
+		// touch/click activator policy. Other controllers retain their semantics.
+		void syncSteamConditions(const std::array<bool, 8>& states);
+		std::optional<std::array<bool, 8>> steamConditions;
 		// Brings the "while released" chords in line with what is held and
 		// which of them the loaded configuration uses. Poll callback only.
 		void syncInvertedChords();
@@ -142,6 +151,9 @@ public:
 	DigitalButton(shared_ptr<DigitalButton::Context> _context, JSMButton &mapping);
 
 	const ButtonID _id;
+	// A dynamically removed menu input must not leave its toggled outputs held.
+	void releaseOwnedToggles() { _currentState->releaseOwnedToggles(); }
+    void cancelForKeyboard();
 
 	// Get the enum identifier of the current state
 	BtnState getState() const

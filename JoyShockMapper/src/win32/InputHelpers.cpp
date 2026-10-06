@@ -1,6 +1,7 @@
 #include "MouseMotionAccumulator.h"
 #include "InputHelpers.h"
 #include <thread>
+#include <algorithm>
 
 #include <unordered_map>
 
@@ -180,6 +181,65 @@ void setMouseNorm(float x, float y)
 	input.mi.dx = LONG(roundf(65535.0f * x));
 	input.mi.dy = LONG(roundf(65535.0f * y));
 	input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+	SendInput(1, &input, sizeof(input));
+}
+
+// The monitor the game is on: whichever holds the foreground window. A game
+// that has gone away between polls, or a desktop with nothing focused, falls
+// back to the primary monitor rather than to nothing.
+static bool activeScreenRect(RECT &rect)
+{
+	HMONITOR monitor = nullptr;
+	if (HWND foreground = GetForegroundWindow())
+		monitor = MonitorFromWindow(foreground, MONITOR_DEFAULTTOPRIMARY);
+	if (!monitor)
+		monitor = MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+	MONITORINFO info{};
+	info.cbSize = sizeof(info);
+	if (!monitor || !GetMonitorInfo(monitor, &info))
+		return false;
+	rect = info.rcMonitor;
+	return rect.right > rect.left && rect.bottom > rect.top;
+}
+
+bool getActiveScreenSize(int &width, int &height)
+{
+	RECT rect;
+	if (!activeScreenRect(rect))
+		return false;
+	width = int(rect.right - rect.left);
+	height = int(rect.bottom - rect.top);
+	return true;
+}
+
+void setMouseOnActiveScreen(float x, float y)
+{
+	RECT screen;
+	if (!activeScreenRect(screen))
+	{
+		setMouseNorm(x, y);
+		return;
+	}
+	// Absolute coordinates with MOUSEEVENTF_VIRTUALDESK span every monitor, so
+	// the target pixel is converted to the virtual desktop's 0..65535 frame.
+	// Without the flag the frame would be the primary monitor alone, and an
+	// area drawn on a second screen would land on the first.
+	const int virtualX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+	const int virtualY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+	const int virtualW = std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
+	const int virtualH = std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN));
+	const float pixelX = float(screen.left) + x * float(screen.right - screen.left);
+	const float pixelY = float(screen.top) + y * float(screen.bottom - screen.top);
+	// The pixel's centre, so a position does not round down onto the previous
+	// pixel on a display scaled to more than 65535 units per screen width.
+	const float normX = (pixelX + 0.5f - float(virtualX)) * 65536.0f / float(virtualW);
+	const float normY = (pixelY + 0.5f - float(virtualY)) * 65536.0f / float(virtualH);
+
+	INPUT input{};
+	input.type = INPUT_MOUSE;
+	input.mi.dx = LONG(std::clamp(normX, 0.f, 65535.f));
+	input.mi.dy = LONG(std::clamp(normY, 0.f, 65535.f));
+	input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
 	SendInput(1, &input, sizeof(input));
 }
 

@@ -1,8 +1,10 @@
+#include "ControllerContext.h"
 #include "Mapping.h"
 #include "InputHelpers.h"
 #include <regex>
 #include <cstring>
 #include <atomic>
+#include <cmath>
 
 const Mapping Mapping::NO_MAPPING = Mapping("NONE");
 function<bool(string_view)> Mapping::_isCommandValid = function<bool(string_view)>();
@@ -15,14 +17,13 @@ ostream &operator<<(ostream &out, const Mapping &mapping)
 istream &operator>>(istream &in, Mapping &mapping)
 {
 	// Has friend access
-	string valueName(128, '\0');
-	in.getline(&valueName[0], valueName.size());
-	valueName.resize(strlen(valueName.c_str()));
+	string valueName;
+	std::getline(in, valueName);
 	smatch results;
 	int count = 0;
 
 	mapping._command = valueName;
-	static constexpr string_view rgx = R"(\s*([!\^-]?)((\".*?\")|\w*[0-9A-Z]|\W)([\\\/+'_]?)\s*(.*))";
+	static constexpr string_view rgx = R"(\s*([!\^-]?)((\".*?\")|\w*[0-9A-Z]|\W)([\\\/+'_]?)(?:\{([0-9]+(?:\.[0-9]+)?)\})?\s*(.*))";
 	while (regex_match(valueName, results, regex(rgx.data())) && !results[0].str().empty())
 	{
 		Mapping::ActionModifier actMod =
@@ -43,7 +44,15 @@ istream &operator>>(istream &in, Mapping &mapping)
 		  results[4].str()[0] == '_'  ? Mapping::EventModifier::HoldPress :
 		                                Mapping::EventModifier::INVALID;
 
-		string leftovers(results[5]);
+		string leftovers(results[6]);
+		float turboInterval = 0;
+		if (!results[5].str().empty())
+		{
+			try { turboInterval = stof(results[5].str()); }
+			catch (...) { in.setstate(in.failbit); break; }
+			if (evtMod != Mapping::EventModifier::TurboPress || !std::isfinite(turboInterval) || turboInterval <= 0)
+			{ in.setstate(in.failbit); break; }
+		}
 
 		KeyCode key(keyStr);
 		if (evtMod == Mapping::EventModifier::Auto)
@@ -53,7 +62,7 @@ istream &operator>>(istream &in, Mapping &mapping)
 		}
 
 		// Some exceptions :(
-		if (key.code == COMMAND_ACTION && actMod == Mapping::ActionModifier::None)
+		if (key.code == COMMAND_ACTION && actMod == Mapping::ActionModifier::None && key.name.rfind("MENU_HOLD ", 0) != 0)
 		{
 			// Any command actions are instant by default
 			actMod = Mapping::ActionModifier::Instant;
@@ -66,12 +75,12 @@ istream &operator>>(istream &in, Mapping &mapping)
 		}
 
 		if (key.code == 0 ||
-		  key.code == COMMAND_ACTION && actMod != Mapping::ActionModifier::Instant ||
+		  key.code == COMMAND_ACTION && actMod != Mapping::ActionModifier::Instant && !(key.name.rfind("MENU_HOLD ", 0) == 0 && actMod == Mapping::ActionModifier::None) ||
 		  actMod == Mapping::ActionModifier::INVALID ||
 		  evtMod == Mapping::EventModifier::INVALID ||
 		  evtMod == Mapping::EventModifier::Auto && count >= 2 ||
 		  evtMod == Mapping::EventModifier::ReleasePress && actMod == Mapping::ActionModifier::None ||
-		  !mapping.AddMapping(key, evtMod, actMod))
+		  !mapping.AddMapping(key, evtMod, actMod, turboInterval))
 		{
 			// error!!!
 			in.setstate(in.failbit);
@@ -102,6 +111,7 @@ Mapping::Mapping(string_view mapping)
 
 void Mapping::ProcessEvent(BtnEvent evt, EventActionIf &button) const
 {
+	if (evt == BtnEvent::OnRelease && !_bindingTurbos.empty()) button.FinishBindingTurbo();
 	// COUT << button._id << " processes event " << evt << '\n';
 	auto entry = _eventMapping.find(evt);
 	if (entry != _eventMapping.end() && entry->second) // Skip over empty entries
@@ -144,7 +154,13 @@ void Mapping::InsertEventMapping(BtnEvent evt, EventActionIf::Callback action)
 	}
 }
 
-bool Mapping::AddMapping(KeyCode key, EventModifier evtMod, ActionModifier actMod)
+void Mapping::ProcessBindingTurbos(float elapsed, EventActionIf &button) const
+{
+	for (size_t index = 0; index < _bindingTurbos.size(); ++index)
+		button.TickBindingTurbo(index, elapsed, _bindingTurbos[index].first, _bindingTurbos[index].second);
+}
+
+bool Mapping::AddMapping(KeyCode key, EventModifier evtMod, ActionModifier actMod, float turboInterval)
 {
 	EventActionIf::Callback apply, apply2, release;
 	if (key.code == 0)
@@ -165,19 +181,64 @@ bool Mapping::AddMapping(KeyCode key, EventModifier evtMod, ActionModifier actMo
 			g_hasGyroOnAllBinding.store(true);
 		}
 		apply = bind(&EventActionIf::ApplyGyroAction, placeholders::_1, key);
-		release = bind(&EventActionIf::RemoveGyroAction, placeholders::_1);
+		release = bind(&EventActionIf::RemoveGyroAction, placeholders::_1, key,
+		  actMod == ActionModifier::Release, actMod == ActionModifier::Toggle);
 		_tapDurationMs = MAGIC_EXTENDED_TAP_DURATION; // Unused in regular press
 	}
 	else if (key.code == COMMAND_ACTION)
 	{
+		if (key.name == "OPEN_KEYBOARD" || key.name == "TOGGLE_MAPPING")
+		{
+			apply = [command = key.name](EventActionIf *button) { button->StudioCommand(command); };
+		}
+		else if (key.name.rfind("MENU_", 0) == 0)
+		{
+			std::smatch menu;
+			if (!std::regex_match(key.name, menu, std::regex("MENU_(OPEN|CLOSE|TOGGLE|HOLD) ([A-Za-z][A-Za-z0-9_-]{0,63})"))) return false;
+			const auto verb = menu[1].str(), id = menu[2].str();
+			if (verb == "HOLD" && actMod != ActionModifier::None) return false;
+			apply = [id, verb](EventActionIf *button) { button->MenuCommand(id, verb, false); };
+			if (verb == "HOLD") release = [id, verb](EventActionIf *button) { button->MenuCommand(id, verb, true); };
+		}
+		else if (key.name.rfind("CYCLE ", 0) == 0)
+		{
+			// A quoted cycle is a native binding action, never a console macro.
+			// Each step is one ordinary output token; the outer activator supplies
+			// timing. Reject partial/empty steps and nested command syntax.
+			vector<Mapping> choices;
+			stringstream steps(key.name.substr(6));
+			string item;
+			while (std::getline(steps, item, '|'))
+			{
+				auto first = item.find_first_not_of(" \t");
+				auto last = item.find_last_not_of(" \t");
+				if (first == string::npos) return false;
+				item = item.substr(first, last - first + 1);
+				if (item.find_first_of(" \t\"\\/'^!") != string::npos) return false;
+				KeyCode output(item);
+				if (!output.isValid() || output.code == COMMAND_ACTION) return false;
+				Mapping step;
+				if (!step.AddMapping(output, EventModifier::StartPress)) return false;
+				step.AppendToCommand(output, EventModifier::StartPress);
+				_hasViGEmBtn |= step.hasViGEmBtn();
+				choices.push_back(step);
+				if (choices.size() > 32) return false;
+			}
+			if (choices.size() < 2 || key.name.back() == '|') return false;
+			apply = [identity = key.name, choices](EventActionIf *button) { button->ApplyCycle(identity, choices); };
+			release = [identity = key.name](EventActionIf *button) { button->ReleaseCycle(identity); };
+		}
+		else
+		{
 		_ASSERT_EXPR(Mapping::_isCommandValid, "You need to assign a function to this field. It should be a function that validates the command line.");
 		if (!Mapping::_isCommandValid(key.name))
 		{
 			COUT << "Error: \"" << key.name << "\" is not a valid command\n";
 			return false;
 		}
-		apply = bind(&WriteToConsole, key.name);
+		apply = [command = key.name](EventActionIf *) { WriteToConsole(ControllerContext::handle ? "STUDIO_DEVICE_COMMAND " + std::to_string(ControllerContext::handle) + " " + command : command); };
 		release = EventActionIf::Callback();
+		}
 	}
 	else if (key.code == RUMBLE)
 	{
@@ -270,7 +331,9 @@ bool Mapping::AddMapping(KeyCode key, EventModifier evtMod, ActionModifier actMo
 		// else handled already in instant case above
 	}
 
-	InsertEventMapping(applyEvt, apply);
+	if (evtMod == EventModifier::TurboPress && turboInterval > 0)
+		_bindingTurbos.emplace_back(turboInterval, apply);
+	else InsertEventMapping(applyEvt, apply);
 	InsertEventMapping(releaseEvt, release);
 
 	stringstream ss;

@@ -268,6 +268,7 @@ typedef struct TOUCH_STATE
 
 #include <string>
 #include <vector>
+#include "ToneSequence.h"
 
 struct ControllerInfo
 {
@@ -342,6 +343,9 @@ public:
 	virtual IMU_STATE GetIMUState(int deviceId) = 0;
 	virtual MOTION_STATE GetMotionState(int deviceId) = 0;
 	virtual TOUCH_STATE GetTouchState(int deviceId, bool previous = false) = 0;
+	// Keep the TOUCH_STATE ABI unchanged for the JoyShockLibrary backend.
+	// Only SDL exposes pre-orientation sensor positions for keyboard telemetry.
+	virtual bool GetRawTouchState(int deviceId, TOUCH_STATE &state) { return false; }
 	// Capacitive thumbstick contact. Display only: it drives the live preview so a
 	// resting thumb is visible alongside the pads and grips, and is not a bindable
 	// button (the controller has no MISC slots left for it).
@@ -387,12 +391,14 @@ public:
 	virtual int GetControllerProduct(int deviceId) = 0;
 	virtual int GetControllerColour(int deviceId) = 0;
 	virtual void SetLightColour(int deviceId, int colour) = 0;
+	virtual void SetLightBrightness(int deviceId, int brightness) {}
 	virtual void SetRumble(int deviceId, int smallRumble, int bigRumble) = 0;
 	// Play one of the controller's own haptic effects. side is a bitmask
 	// (1 = left, 2 = right, 3 = both), effect indexes the firmware's effect list
 	// (0 off, 1 tick, 2 click, 3 tone, 4 rumble, 5 noise, 6 script, 7 sweep), and
 	// gainDb is a signed decibel gain the firmware limits rather than clips.
 	virtual void SetHaptic(int deviceId, int side, int effect, int gainDb) = 0;
+    virtual void SetSteamKeyboardHaptic(int deviceId, int side, int effect, int gainDb) { SetHaptic(deviceId, side, effect, gainDb); }
 	// The same, played as the grip sensors' own haptic plays it: PULSE and TAP
 	// on the grip actuators rather than the pads. Studio's grip haptic preview.
 	// Backends without grips play it as SetHaptic does.
@@ -409,6 +415,11 @@ public:
 	// scripts 0-13; Steam's "Identify Controller" ping is 12).
 	// gainDb: the firmware's gain for the tune, 0 = as recorded, negative = quieter.
 	virtual bool PlayHapticScript(int deviceId, int script, int gainDb = 0) { return false; }
+	// Plays a tune from a tone sequence file (ToneSequence.h) on the controller's
+	// pads, one LFO tone report per note, with gainDb added to each note's own
+	// gain. Starts at once, cancelling a sequence still playing on that device.
+	// Returns the sequence's total length in ms, 0 when the device cannot play it.
+	virtual int PlayToneSequence(int deviceId, const std::vector<Tone> &tones, int gainDb) { return 0; }
 	// percent: 0-100, or -1 if the device/driver can't report one. state:
 	// mirrors SDL_PowerState (-1 error, 0 unknown, 1 on battery, 2 no battery,
 	// 3 charging, 4 charged). Defaults leave both at "unknown" for backends

@@ -121,6 +121,38 @@ istream &operator>>(istream &in, GyroSettings &gyro_settings)
 {
 	string valueName;
 	in >> valueName;
+	gyro_settings.conditions.clear();
+	gyro_settings.require_all = false;
+	if (valueName == "ANY" || valueName == "ALL")
+	{
+		gyro_settings.require_all = valueName == "ALL";
+		gyro_settings.ignore_mode = GyroIgnoreMode::BUTTON;
+		gyro_settings.button = ButtonID::NONE;
+		string condition;
+		while (in >> condition)
+		{
+			if (!condition.empty() && condition.front() == '#') break;
+			const bool inverted = !condition.empty() && condition.front() == '!';
+			ButtonID button;
+			stringstream token(inverted ? condition.substr(1) : condition);
+			token >> button;
+			optional<ButtonID> id = button == ButtonID::INVALID ? nullopt : optional<ButtonID>(button);
+			if (!id || *id <= ButtonID::NONE || *id == ButtonID::SIZE || gyro_settings.conditions.size() >= 16)
+			{
+				gyro_settings.ignore_mode = GyroIgnoreMode::INVALID;
+				in.setstate(in.failbit);
+				return in;
+			}
+			gyro_settings.conditions.emplace_back(*id, inverted);
+		}
+		if (gyro_settings.conditions.empty())
+		{
+			gyro_settings.ignore_mode = GyroIgnoreMode::INVALID;
+			in.setstate(in.failbit);
+		}
+		else in.clear(in.rdstate() & ~ios::failbit); // normal end-of-value
+		return in;
+	}
 	stringstream ss(valueName);
 	auto rhsMappingIndex = magic_enum::enum_cast<ButtonID>(valueName);
 	if (valueName.compare("NONE\\") == 0) // Special handling to assign none to a modeshift
@@ -159,7 +191,13 @@ ostream &operator<<(ostream &out, const GyroSettings &gyro_settings)
 {
 	if (gyro_settings.ignore_mode == GyroIgnoreMode::BUTTON)
 	{
-		out << gyro_settings.button;
+		if (gyro_settings.conditions.empty()) out << gyro_settings.button;
+		else
+		{
+			out << (gyro_settings.require_all ? "ALL" : "ANY");
+			for (const auto &condition : gyro_settings.conditions)
+				out << ' ' << (condition.second ? "!" : "") << condition.first;
+		}
 	}
 	else
 	{
@@ -172,7 +210,7 @@ bool operator==(const GyroSettings &lhs, const GyroSettings &rhs)
 {
 	return lhs.always_off == rhs.always_off &&
 	  lhs.button == rhs.button &&
-	  lhs.ignore_mode == rhs.ignore_mode;
+	  lhs.ignore_mode == rhs.ignore_mode && lhs.conditions == rhs.conditions && lhs.require_all == rhs.require_all;
 }
 
 ostream &operator<<(ostream &out, const FloatXY &fxy)
@@ -212,6 +250,52 @@ bool operator==(const FloatXY &lhs, const FloatXY &rhs)
 	// Do we need more precision than 1e-5?
 	return fabs(lhs.first - rhs.first) < 1e-5 &&
 	  fabs(lhs.second - rhs.second) < 1e-5;
+}
+
+// "x y w h", four fractions of the screen. Written with enough places that a
+// rectangle drawn on a 4K screen round-trips to the pixel.
+ostream &operator<<(ostream &out, const MouseArea &area)
+{
+	const auto flags = out.flags();
+	const auto precision = out.precision();
+	out << fixed << setprecision(4) << area.x << " " << area.y << " " << area.w << " " << area.h;
+	out.flags(flags);
+	out.precision(precision);
+	return out;
+}
+
+istream &operator>>(istream &in, MouseArea &area)
+{
+	string value;
+	getline(in, value);
+	size_t pos = 0;
+	float parts[4];
+	for (float &part : parts)
+	{
+		size_t advance = 0;
+		auto number = getFloat(&value[pos], &advance);
+		if (!number)
+		{
+			in.setstate(in.failbit);
+			return in;
+		}
+		part = *number;
+		pos += advance;
+	}
+	// A fifth token is a typo, not a bigger rectangle.
+	if (value.find_first_not_of(" \t\r\n", pos) != string::npos)
+	{
+		in.setstate(in.failbit);
+		return in;
+	}
+	area = MouseArea{ parts[0], parts[1], parts[2], parts[3] };
+	return in;
+}
+
+bool operator==(const MouseArea &lhs, const MouseArea &rhs)
+{
+	return fabs(lhs.x - rhs.x) < 1e-5 && fabs(lhs.y - rhs.y) < 1e-5 &&
+	  fabs(lhs.w - rhs.w) < 1e-5 && fabs(lhs.h - rhs.h) < 1e-5;
 }
 
 istream &operator>>(istream &in, AxisMode &am)
@@ -320,6 +404,12 @@ istream &operator>>(istream &in, Color &color)
 		color.rgb.g = uint8_t(clamp(g, 0, 255));
 		color.rgb.b = uint8_t(clamp(b, 0, 255));
 	}
+	// A colour a configuration chose is marked in the otherwise unused alpha
+	// byte, so a backend can tell an explicit white from the untouched default:
+	// the Steam Controller 2026 keeps its own light patterns until a colour is
+	// actually set. Printing and the DS4 path only ever read the RGB bytes.
+	if (!in.fail())
+		color.rgb.a = 0xFF;
 	return in;
 }
 

@@ -1,3 +1,4 @@
+#include "GyroSteadying.h"
 #include "JoyShockMapper.h"
 #include "JSMVersion.h"
 #include "DigitalButton.h"
@@ -12,11 +13,14 @@
 #include "JoyShock.h"
 #include "Telemetry.h"
 #include "StudioFeedback.h"
+#include "ToneSequence.h"
 #include "NaturalCurve.h"
 #include "PowerCurve.h"
 #include "QuadraticCurve.h"
 #include "SigmoidCurve.h"
 #include "JumpCurve.h"
+#include "TouchAreaMapping.h"
+#include "ConfigErrors.h"
 #include <filesystem>
 #include <algorithm>
 #include <atomic>
@@ -54,7 +58,7 @@ vector<JSMButton> mappings;           // array enables use of for each loop and 
 
 float os_mouse_speed = 1.0;
 float last_flick_and_rotation = 0.0;
-bool gyroOneEuroEnabled = false;
+JSMVariable<bool> gyroOneEuroEnabled(false);
 unique_ptr<PollingThread> autoLoadThread;
 unique_ptr<JSM::AutoConnect> autoConnectThread;
 std::atomic<int> g_gyroGlobalOffCount(0);
@@ -68,6 +72,21 @@ bool g_manualConnectMode = false;
 // mapper's tray actions in its own icon, so there is one icon rather than two.
 bool g_noTray = false;
 unordered_map<int, shared_ptr<JoyShock>> handle_to_joyshock;
+string controllerModelForHandle(int handle) {
+    auto it = handle_to_joyshock.find(handle);
+    return it == handle_to_joyshock.end() ? string{} : ControllerContext::modelKey(it->second->_controllerType, it->second->_vendorId, it->second->_productId);
+}
+void prepareControllerProfile(int handle) {
+    auto it = handle_to_joyshock.find(handle);
+    if (it == handle_to_joyshock.end()) return;
+    auto &jc = it->second;
+    ControllerContext::Guard scope(controllerModelForHandle(handle), handle);
+    lock_guard guard(jc->_context->callback_lock);
+    for (auto *buttons : { &jc->_buttons, &jc->_gridButtons, &jc->_leftGridButtons, &jc->_rightGridButtons, &jc->_leftStickMenuButtons, &jc->_rightStickMenuButtons })
+        for (auto &button : *buttons) button.cancelForKeyboard();
+    for (auto &pad : jc->_touchpads) for (auto &entry : pad.buttons) entry.second.cancelForKeyboard();
+    jc->stopTilt();
+}
 
 int input_pipe_fd[2];
 int triggerCalibrationStep = 0;
@@ -199,6 +218,7 @@ struct TOUCH_POINT
 //	}
 // }
 
+
 // One acceleration-curve evaluator shared by the gyro (deg/s -> sensitivity)
 // and the trackpad mouse (px/s -> gain). A shape is a curve type, its parameters
 // and the speed thresholds it was tuned against, all in that input's own units.
@@ -282,6 +302,17 @@ static float rescaleAdjustedSpeed(float vAdjusted, const AccelCurveShape &from, 
 	return t * toRange;
 }
 
+// Keep existing shared profiles unchanged until a side explicitly opts in.
+// getSetting evaluates native held/released setting chords on every poll.
+template<typename T>
+static T padFeedbackSetting(JoyShock &js, int padIndex, SettingID shared, SettingID left, SettingID right)
+{
+	const bool separate = js.getSetting<Switch>(padIndex == 1 ? SettingID::RIGHT_TOUCHPAD_HAPTICS : SettingID::LEFT_TOUCHPAD_HAPTICS) == Switch::ON;
+	const SettingID key = separate ? (padIndex == 1 ? right : left) : shared;
+	if constexpr (std::is_same_v<T, float>) return js.getSetting(key);
+	else return js.getSetting<T>(key);
+}
+
 // Fires the pad-click pulses on whichever pad just changed, and only on the poll
 // it changed. Left is pipeline/side index 0, right is 1, matching touchPipelines
 // and the firmware's own side bitmask.
@@ -296,15 +327,15 @@ static void updatePadClickHaptics(shared_ptr<JoyShock> &js, bool leftDown, bool 
 		return intensity > 0.f && effect != HapticEffect::OFF && effect != HapticEffect::INVALID;
 	};
 
-	const float pressIntensity = js->getSetting(SettingID::TOUCHPAD_CLICK_HAPTIC_INTENSITY);
-	const auto pressEffect = js->getSetting<HapticEffect>(SettingID::TOUCHPAD_CLICK_HAPTIC_EFFECT);
-	const float releaseIntensity = js->getSetting(SettingID::TOUCHPAD_RELEASE_HAPTIC_INTENSITY);
-	const auto releaseEffect = js->getSetting<HapticEffect>(SettingID::TOUCHPAD_RELEASE_HAPTIC_EFFECT);
 	const bool down[2] = { leftDown, rightDown };
 
 	for (int side = 0; side < 2; ++side)
 	{
 		const int sideMask = side == 1 ? 2 : 1;
+		const float pressIntensity = padFeedbackSetting<float>(*js, side, SettingID::TOUCHPAD_CLICK_HAPTIC_INTENSITY, SettingID::LEFT_TOUCHPAD_CLICK_HAPTIC_INTENSITY, SettingID::RIGHT_TOUCHPAD_CLICK_HAPTIC_INTENSITY);
+		const auto pressEffect = padFeedbackSetting<HapticEffect>(*js, side, SettingID::TOUCHPAD_CLICK_HAPTIC_EFFECT, SettingID::LEFT_TOUCHPAD_CLICK_HAPTIC_EFFECT, SettingID::RIGHT_TOUCHPAD_CLICK_HAPTIC_EFFECT);
+		const float releaseIntensity = padFeedbackSetting<float>(*js, side, SettingID::TOUCHPAD_RELEASE_HAPTIC_INTENSITY, SettingID::LEFT_TOUCHPAD_RELEASE_HAPTIC_INTENSITY, SettingID::RIGHT_TOUCHPAD_RELEASE_HAPTIC_INTENSITY);
+		const auto releaseEffect = padFeedbackSetting<HapticEffect>(*js, side, SettingID::TOUCHPAD_RELEASE_HAPTIC_EFFECT, SettingID::LEFT_TOUCHPAD_RELEASE_HAPTIC_EFFECT, SettingID::RIGHT_TOUCHPAD_RELEASE_HAPTIC_EFFECT);
 		// Tracked even while disabled, so turning a pulse on with a pad already
 		// held down doesn't fire for an edge that happened before it existed.
 		if (down[side] && !js->padClickWasOn[side])
@@ -481,9 +512,9 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 		// remainder carries over rather than resetting, so a slow drag ticks at the
 		// same spacing as a fast one instead of falling silent between polls.
 		{
-			const float hapticIntensity = js->getSetting(SettingID::TOUCHPAD_HAPTIC_INTENSITY);
-			const auto hapticEffect = js->getSetting<HapticEffect>(SettingID::TOUCHPAD_HAPTIC_EFFECT);
-			const float interval = js->getSetting(SettingID::TOUCHPAD_HAPTIC_INTERVAL);
+			const float hapticIntensity = padFeedbackSetting<float>(*js, padIndex, SettingID::TOUCHPAD_HAPTIC_INTENSITY, SettingID::LEFT_TOUCHPAD_HAPTIC_INTENSITY, SettingID::RIGHT_TOUCHPAD_HAPTIC_INTENSITY);
+			const auto hapticEffect = padFeedbackSetting<HapticEffect>(*js, padIndex, SettingID::TOUCHPAD_HAPTIC_EFFECT, SettingID::LEFT_TOUCHPAD_HAPTIC_EFFECT, SettingID::RIGHT_TOUCHPAD_HAPTIC_EFFECT);
+			const float interval = padFeedbackSetting<float>(*js, padIndex, SettingID::TOUCHPAD_HAPTIC_INTERVAL, SettingID::LEFT_TOUCHPAD_HAPTIC_INTERVAL, SettingID::RIGHT_TOUCHPAD_HAPTIC_INTERVAL);
 			if (hapticIntensity > 0.f && interval > 0.f &&
 			    hapticEffect != HapticEffect::OFF && hapticEffect != HapticEffect::INVALID)
 			{
@@ -608,8 +639,49 @@ static void processTouchMouse(shared_ptr<JoyShock> &js, int padIndex, TOUCH_POIN
 	}
 }
 
+// TOUCHPAD_MODE = MOUSE_AREA. The finger's place on the pad IS the cursor's
+// place in the area (TouchAreaMapping.h), so there is no sensitivity, no
+// filter and no momentum: the cursor is put where the finger points and
+// nowhere else. Returns true while a finger is on the pad, so the caller can
+// hold gyro mouse output off for the duration.
+static bool processTouchArea(shared_ptr<JoyShock> &js, TOUCH_POINT &point, bool wasDown,
+  SettingID areaId, SettingID fitId, FloatXY tpSize)
+{
+	if (!point.isDown())
+		return false;
+	// Only a finger that has just landed or has moved places the cursor. A
+	// resting thumb says nothing new, and sending its position every poll would
+	// pin the cursor against the physical mouse and against anything else that
+	// moves it.
+	if (wasDown && point.movX == 0.f && point.movY == 0.f)
+		return true;
+
+	const MouseArea area = js->getSetting<MouseArea>(areaId);
+	const auto fit = js->getSetting<MouseAreaFit>(fitId) == MouseAreaFit::UNIFORM
+	  ? touch_area::Fit::UNIFORM
+	  : touch_area::Fit::STRETCH;
+
+	// The shape of the screen the game is on; the typed SCREEN_RESOLUTION
+	// settings stand in on a platform that cannot say. Only UNIFORM uses it.
+	int screenW = 0, screenH = 0;
+	if (!getActiveScreenSize(screenW, screenH) || screenW <= 0 || screenH <= 0)
+	{
+		screenW = int(js->getSetting(SettingID::SCREEN_RESOLUTION_X));
+		screenH = int(js->getSetting(SettingID::SCREEN_RESOLUTION_Y));
+	}
+	const float screenAspect = screenH > 0 ? float(screenW) / float(screenH) : 16.f / 9.f;
+	const float padAspect = tpSize.y() > 0.f ? tpSize.x() / tpSize.y() : 1.f;
+
+	float x = 0.f, y = 0.f;
+	touch_area::map(point.posX, point.posY, touch_area::Rect{ area.x, area.y, area.w, area.h },
+	  fit, padAspect, screenAspect, x, y);
+	setMouseOnActiveScreen(x, y);
+	return true;
+}
+
 void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, float delta_time)
 {
+    ControllerContext::Guard controllerScope(controllerModelForHandle(jcHandle), jcHandle);
 	shared_ptr<JoyShock> js = handle_to_joyshock[jcHandle];
 	int tpSizeX, tpSizeY;
 	if (!js || jsl->GetTouchpadDimension(jcHandle, tpSizeX, tpSizeY) == false)
@@ -617,6 +689,7 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 	FloatXY tpSize{ float(tpSizeX), float(tpSizeY) };
 
 	lock_guard guard(js->_context->callback_lock);
+	if (CmdRegistry::activeProfile(jcHandle) == "profiles-library/.layers/virtual-keyboard.txt") return;
 
 	// delta_time arrives as the NOMINAL TICK_TIME in milliseconds, not measured and
 	// not in seconds. Every consumer downstream (trackball decay, touch sticks, the
@@ -691,9 +764,12 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 		// remain independent and configurable.
 		auto leftMode = js->getSetting<TouchpadMode>(SettingID::LEFT_TOUCHPAD_MODE);
 		auto rightMode = js->getSetting<TouchpadMode>(SettingID::RIGHT_TOUCHPAD_MODE);
+    if (js->virtualMenuConsumes(VirtualMenuSource::LEFT)) leftMode = TouchpadMode::INVALID;
+    if (js->virtualMenuConsumes(VirtualMenuSource::RIGHT)) rightMode = TouchpadMode::INVALID;
 
 		if (leftMode != TouchpadMode::MOUSE) js->touchPipelines[0].reset();
 		if (rightMode != TouchpadMode::MOUSE) js->touchPipelines[1].reset();
+		js->touchAreaHold = false;
 
 
         auto releaseGrid = [&](auto &mappings, int first, int pad) {
@@ -740,6 +816,11 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			  js->getSetting<FloatXY>(SettingID::LEFT_TOUCHPAD_SENS), delta_time,
 			  newState.t0Pressure, js->isPressed(ButtonID::MISC3));
 		}
+		else if (leftMode == TouchpadMode::MOUSE_AREA)
+		{
+			js->touchAreaHold |= processTouchArea(js, point0, prevState.t0Down,
+			  SettingID::LEFT_TOUCHPAD_AREA, SettingID::LEFT_TOUCHPAD_AREA_FIT, tpSize);
+		}
 
 		// Process right pad
 		if (rightMode == TouchpadMode::GRID_AND_STICK)
@@ -765,13 +846,20 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			  js->getSetting<FloatXY>(SettingID::RIGHT_TOUCHPAD_SENS), delta_time,
 			  newState.t1Pressure, js->isPressed(ButtonID::MISC2));
 		}
+		else if (rightMode == TouchpadMode::MOUSE_AREA)
+		{
+			js->touchAreaHold |= processTouchArea(js, point1, prevState.t1Down,
+			  SettingID::RIGHT_TOUCHPAD_AREA, SettingID::RIGHT_TOUCHPAD_AREA_FIT, tpSize);
+		}
 
 		// PS_TOUCHPAD not supported for dual-pad controllers
 	}
 	else
 	{
 		// --- Legacy single-pad behavior (DS4, DualSense, etc.) ---
+    if (js->virtualMenuConsumes(VirtualMenuSource::RIGHT)) mode = TouchpadMode::INVALID;
 		if (mode != TouchpadMode::MOUSE) js->touchPipelines[0].reset();
+		js->touchAreaHold = false;
 		const auto size = js->getSetting<FloatXY>(SettingID::GRID_SIZE);
 		if (js->touchGridRouting[0].update(mode == TouchpadMode::GRID_AND_STICK, gridChord(SettingID::TOUCHPAD_MODE), int(size.x()), int(size.y()), js->getSetting<GridShape>(SettingID::GRID_SHAPE)))
 		{
@@ -819,6 +907,15 @@ void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, fl
 			  js->getSetting<FloatXY>(SettingID::TOUCHPAD_SENS), delta_time,
 			  sourceIndex == 0 ? newState.t0Pressure : newState.t1Pressure,
 			  js->isPressed(ButtonID::CAPTURE));
+		}
+		else if (mode == TouchpadMode::MOUSE_AREA)
+		{
+			// One surface, and the first finger down owns it: a second finger
+			// resting on the pad must not yank the cursor across the area.
+			const bool useFirst = point0.isDown() || !point1.isDown();
+			js->touchAreaHold = processTouchArea(js, useFirst ? point0 : point1,
+			  useFirst ? prevState.t0Down : prevState.t1Down,
+			  SettingID::TOUCHPAD_AREA, SettingID::TOUCHPAD_AREA_FIT, tpSize);
 		}
 		else if (mode == TouchpadMode::PS_TOUCHPAD)
 		{
@@ -987,7 +1084,9 @@ static void serviceStudioFeedback(shared_ptr<JoyShock> &jc, chrono::steady_clock
 		return;
 	if (jc->_controllerType == JS_TYPE_STEAM_CONTROLLER_2026)
 	{
-		if (request.grips)
+		if (request.steamKeyboard)
+            jsl->SetSteamKeyboardHaptic(jc->_handle, request.side, request.effect, request.gainDb);
+        else if (request.grips)
 			jsl->SetGripHaptic(jc->_handle, request.side, request.effect, hapticGainDb(request.intensity));
 		else
 			jc->fireHaptic(request.side, request.effect, hapticGainDb(request.intensity));
@@ -1002,18 +1101,259 @@ static void serviceStudioFeedback(shared_ptr<JoyShock> &jc, chrono::steady_clock
 	jc->studioFeedbackRumbleUntil = now + chrono::milliseconds(request.rumbleMs);
 }
 
+// A read-only menu census uses the same physical button routing as normal
+// bindings. It captures this poll before any source or confirm is processed.
+static void dispatchPhysicalButtons(shared_ptr<JoyShock> &jc, bool menuSnapshot)
+{
+  auto changeButton = [&](ButtonID id, bool pressed) {
+    if (menuSnapshot) { if (int(id) >= 0 && int(id) < int(ButtonID::SIZE)) jc->_virtualMenuInputs[int(id)] = pressed; }
+    else jc->handleButtonChange(id, pressed);
+  };
+	uint64_t buttons = jsl->GetButtons(jc->_handle);
+	// button mappings
+	if (jc->_splitType != JS_SPLIT_TYPE_RIGHT)
+	{
+		changeButton(ButtonID::UP, buttons & (1ULL << JSOFFSET_UP));
+		changeButton(ButtonID::DOWN, buttons & (1ULL << JSOFFSET_DOWN));
+		changeButton(ButtonID::LEFT, buttons & (1ULL << JSOFFSET_LEFT));
+		changeButton(ButtonID::RIGHT, buttons & (1ULL << JSOFFSET_RIGHT));
+		changeButton(ButtonID::L, buttons & (1ULL << JSOFFSET_L));
+		changeButton(ButtonID::MINUS, buttons & (1ULL << JSOFFSET_MINUS));
+		changeButton(ButtonID::L3, buttons & (1ULL << JSOFFSET_LCLICK));
+
+		float lTrigger = jsl->GetLeftTrigger(jc->_handle);
+		if (!menuSnapshot) jc->handleTriggerChange(ButtonID::ZL, ButtonID::ZLF, jc->getSetting<TriggerMode>(SettingID::ZL_MODE), lTrigger, jc->_leftEffect);
+
+		bool touch = jsl->GetTouchDown(jc->_handle, false) || jsl->GetTouchDown(jc->_handle, true);
+		switch (jc->_controllerType)
+		{
+		case JS_TYPE_DS:
+			// JSL mapps mic button on the SL index
+			// Edge grips
+			changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
+			changeButton(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
+			// Edge FN
+			changeButton(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));
+			changeButton(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));
+
+			changeButton(ButtonID::MIC, buttons & (1ULL << JSOFFSET_MIC));
+			// Don't break but continue onto DS4 stuff too
+		case JS_TYPE_DS4:
+		{
+			float triggerpos = buttons & (1ULL << JSOFFSET_CAPTURE) ? 1.f :
+			  touch                                              ? 0.99f :
+			                                                       0.f;
+			if (menuSnapshot) {
+				changeButton(ButtonID::TOUCH, touch);
+				changeButton(ButtonID::CAPTURE, (buttons & (1ULL << JSOFFSET_CAPTURE)) != 0);
+			} else jc->handleTriggerChange(ButtonID::TOUCH, ButtonID::CAPTURE, jc->getSetting<TriggerMode>(SettingID::TOUCHPAD_DUAL_STAGE_MODE), triggerpos, jc->_unusedEffect);
+		}
+		break;
+		case JS_TYPE_XBOXONE_ELITE:
+			changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL)); // Xbox Elite back paddles
+			changeButton(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
+			changeButton(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));
+			changeButton(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));
+			break;
+		case JS_TYPE_XBOX_SERIES:
+			changeButton(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE));
+			break;
+		case JS_TYPE_JOYCON_LEFT:
+			changeButton(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE));
+			changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
+			changeButton(ButtonID::LSR, buttons & (1ULL << JSOFFSET_SR));
+			break;
+		case JS_TYPE_PRO_CONTROLLER:
+			changeButton(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE));
+			break;
+		case JS_TYPE_SWITCH2_PRO_CONTROLLER:
+			changeButton(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE)); // Capture button
+			changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));          // GL back button
+			changeButton(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));          // GR back button
+			changeButton(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));     // C button
+			break;
+		case JS_TYPE_HORI_STEAM:
+			changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));        // L4 back button
+			changeButton(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));        // R4 back button
+			changeButton(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));       // M1 button below left stick
+			changeButton(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));       // M2 button below right stick
+			changeButton(ButtonID::LTOUCH, buttons & (1ULL << JSOFFSET_LTOUCH)); // Left stick capacitive touch
+			changeButton(ButtonID::RTOUCH, buttons & (1ULL << JSOFFSET_RTOUCH)); // Right stick capacitive touch
+			changeButton(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));   // QAM button ("..." button)
+			break;
+		case JS_TYPE_STEAM_CONTROLLER_2026:
+		{
+			// Four paddles: R4→RSR, L4→LSL, R5→RSL, L5→LSR
+			changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
+			changeButton(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
+			changeButton(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));
+			changeButton(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));
+			// QAM button
+			changeButton(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));
+			// The two contacts and click switches are independent inputs. A menu
+			// reads raw contact/switch state, while ordinary bindings use each
+			// pad's selected touch/click activator mode.
+			const bool leftContact = jsl->GetTouchDown(jc->_handle, false);
+			const bool rightContact = jsl->GetTouchDown(jc->_handle, true);
+			const bool leftClick = (buttons & (1ULL << JSOFFSET_MISC3)) != 0;
+			const bool rightClick = (buttons & (1ULL << JSOFFSET_MISC2)) != 0;
+			if (menuSnapshot) {
+				changeButton(ButtonID::MISC4, leftContact);
+				changeButton(ButtonID::TOUCH, rightContact);
+				changeButton(ButtonID::MISC3, leftClick);
+				changeButton(ButtonID::MISC2, rightClick);
+			} else {
+				jc->handleTriggerChange(ButtonID::MISC4, ButtonID::MISC3, jc->getSetting<TriggerMode>(SettingID::LEFT_TOUCHPAD_DUAL_STAGE_MODE), leftClick ? 1.f : leftContact ? .99f : 0.f, jc->_unusedEffect);
+				jc->handleTriggerChange(ButtonID::TOUCH, ButtonID::MISC2, jc->getSetting<TriggerMode>(SettingID::RIGHT_TOUCHPAD_DUAL_STAGE_MODE), rightClick ? 1.f : rightContact ? .99f : 0.f, jc->_unusedEffect);
+			}
+			// Confirmation pulse on the pad you actually pressed. Edge-triggered off
+			// padClickWasOn: a level check would replay the effect every poll the
+			// pad stayed held. Independent of what the click is bound to, since the
+			// feel of the click is not the same question as what it does.
+			if (!menuSnapshot) updatePadClickHaptics(jc,
+			  (buttons & (1ULL << JSOFFSET_MISC3)) != 0,
+			  (buttons & (1ULL << JSOFFSET_MISC2)) != 0);
+			// Right grip, left grip
+			changeButton(ButtonID::MISC5, buttons & (1ULL << JSOFFSET_MISC5));
+			changeButton(ButtonID::MISC6, buttons & (1ULL << JSOFFSET_MISC6));
+			// Stick touch is an independent bindable condition on each side.
+			changeButton(ButtonID::LTOUCH, buttons & (1ULL << JSOFFSET_LTOUCH));
+			changeButton(ButtonID::RTOUCH, buttons & (1ULL << JSOFFSET_RTOUCH));
+		}
+		break;
+		case JS_TYPE_G7_PRO_8K:
+			changeButton(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI));     // L5 mini shoulder button
+			changeButton(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI));     // R5 mini shoulder button
+			changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));          // L4 back button
+			changeButton(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));          // R4 back button
+			changeButton(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE)); // Share button
+			break;
+		// 8BitDo controllers with gyro and no additional buttons.
+		case JS_TYPE_8BITDO_SF30_PRO:
+		case JS_TYPE_8BITDO_SF30_PRO_BT:
+		case JS_TYPE_8BITDO_SN30_PRO:
+		case JS_TYPE_8BITDO_SN30_PRO_BT:
+			break;
+		// 8BitDo controllers with gyro and two additional buttons.
+		case JS_TYPE_8BITDO_PRO_2:
+		case JS_TYPE_8BITDO_PRO_2_BT:
+			changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL)); // P2 back button (left)
+			changeButton(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR)); // P1 back button (right)
+			break;
+		// 8BitDo controllers with gyro and four additional buttons.
+		case JS_TYPE_8BITDO_PRO_3:
+		case JS_TYPE_8BITDO_ULTIMATE2_WIRELESS:
+			changeButton(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI)); // L4 mini shoulder button
+			changeButton(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI)); // R4 mini shoulder button
+			changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));      // PL back button
+			changeButton(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));      // PR back button
+			break;
+		case JS_TYPE_FLYDIGI_APEX5:
+			changeButton(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI)); // LM mini shoulder button
+			changeButton(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI)); // RM mini shoulder button
+			changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));  // M2 back button (top left)
+			changeButton(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));  // M1 back button (top right)
+			changeButton(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL)); // M4 back button (bottom left)
+			changeButton(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR)); // M3 back button (bottom right)
+			break;
+		case JS_TYPE_FLYDIGI_VADER5_PRO:
+			changeButton(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI)); // LM mini shoulder button
+			changeButton(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI)); // RM mini shoulder button
+			changeButton(ButtonID::MISC3, buttons & (1ULL << JSOFFSET_MISC3)); // Circle button below right stick
+			// Fall through.
+		case JS_TYPE_FLYDIGI_VADER4_PRO:
+		case JS_TYPE_FLYDIGI_VADER3_PRO:
+			changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));  // M2 back button (top left)
+			changeButton(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));  // M1 back button (top right)
+			changeButton(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL)); // M4 back button (bottom left)
+			changeButton(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR)); // M3 back button (bottom right)
+			changeButton(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1)); // C face button
+			changeButton(ButtonID::MISC2, buttons & (1ULL << JSOFFSET_MISC2)); // Z face button
+			break;
+		default:
+			changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
+			changeButton(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
+			changeButton(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));
+			changeButton(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));
+			changeButton(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));
+			changeButton(ButtonID::MISC2, buttons & (1ULL << JSOFFSET_MISC2));
+			changeButton(ButtonID::MISC3, buttons & (1ULL << JSOFFSET_MISC3));
+			changeButton(ButtonID::MISC4, buttons & (1ULL << JSOFFSET_MISC4));
+			changeButton(ButtonID::MISC5, buttons & (1ULL << JSOFFSET_MISC5));
+			changeButton(ButtonID::MISC6, buttons & (1ULL << JSOFFSET_MISC6));
+			break;
+		}
+	}
+	else // split type IS right
+	{
+		// Right joycon bumpers
+		changeButton(ButtonID::RSL, buttons & (1ULL << JSOFFSET_SL));
+		changeButton(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
+	}
+
+	if (jc->_splitType != JS_SPLIT_TYPE_LEFT)
+	{
+		changeButton(ButtonID::E, buttons & (1ULL << JSOFFSET_E));
+		changeButton(ButtonID::S, buttons & (1ULL << JSOFFSET_S));
+		changeButton(ButtonID::N, buttons & (1ULL << JSOFFSET_N));
+		changeButton(ButtonID::W, buttons & (1ULL << JSOFFSET_W));
+		changeButton(ButtonID::R, buttons & (1ULL << JSOFFSET_R));
+		changeButton(ButtonID::PLUS, buttons & (1ULL << JSOFFSET_PLUS));
+		changeButton(ButtonID::HOME, buttons & (1ULL << JSOFFSET_HOME));
+		changeButton(ButtonID::R3, buttons & (1ULL << JSOFFSET_RCLICK));
+
+		float rTrigger = jsl->GetRightTrigger(jc->_handle);
+		if (!menuSnapshot) jc->handleTriggerChange(ButtonID::ZR, ButtonID::ZRF, jc->getSetting<TriggerMode>(SettingID::ZR_MODE), rTrigger, jc->_rightEffect);
+	}
+	else
+	{
+		// Left joycon bumpers
+		changeButton(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
+		changeButton(ButtonID::LSR, buttons & (1ULL << JSOFFSET_SR));
+	}
+
+}
+
+static void syncSteamPhysicalConditions(shared_ptr<JoyShock>& jc)
+{
+	if (jc->_controllerType != JS_TYPE_STEAM_CONTROLLER_2026) return;
+	const auto buttons = jsl->GetButtons(jc->_handle);
+	jc->_context->syncSteamConditions({
+		jsl->GetTouchDown(jc->_handle, false), jsl->GetTouchDown(jc->_handle, true),
+		(buttons & (1ULL << JSOFFSET_MISC3)) != 0, (buttons & (1ULL << JSOFFSET_MISC2)) != 0,
+		(buttons & (1ULL << JSOFFSET_MISC6)) != 0, (buttons & (1ULL << JSOFFSET_MISC5)) != 0,
+		(buttons & (1ULL << JSOFFSET_LTOUCH)) != 0, (buttons & (1ULL << JSOFFSET_RTOUCH)) != 0
+	});
+}
+
 void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE lastState, IMU_STATE imuState, IMU_STATE lastImuState, float deltaTime)
 {
+    ControllerContext::Guard controllerScope(controllerModelForHandle(jcHandle), jcHandle);
 
 	shared_ptr<JoyShock> jc = handle_to_joyshock[jcHandle];
 	if (jc == nullptr)
 		return;
 	jc->_context->callback_lock.lock();
+    const bool keyboardCapture = CmdRegistry::activeProfile(jcHandle) == "profiles-library/.layers/virtual-keyboard.txt";
+    if (keyboardCapture && !jc->_keyboardCaptured) {
+        for (auto *buttons : { &jc->_buttons, &jc->_gridButtons, &jc->_leftGridButtons, &jc->_rightGridButtons, &jc->_leftStickMenuButtons, &jc->_rightStickMenuButtons })
+            for (auto &button : *buttons) button.cancelForKeyboard();
+        for (auto &pad : jc->_touchpads) for (auto &entry : pad.buttons) entry.second.cancelForKeyboard();
+        for (auto &pipeline : jc->touchPipelines) pipeline.reset();
+        jc->stopTilt();
+    }
+    jc->_keyboardCaptured = keyboardCapture;
+	// Conditions must be current before gyro and setting lookup. Dispatching
+	// bindings remains later in the poll and cannot clear a held sensor.
+	syncSteamPhysicalConditions(jc);
 	jc->_context->syncInvertedChords();
 
 	auto timeNow = chrono::steady_clock::now();
 	deltaTime = ((float)chrono::duration_cast<chrono::microseconds>(timeNow - jc->_timeNow).count()) / 1000000.0f;
 	jc->_timeNow = timeNow;
+  jc->refreshVirtualMenuCatalog();
+  jc->_virtualMenuInputs.fill(std::nullopt);
+  if (!keyboardCapture && !jc->_virtualMenus.empty()) dispatchPhysicalButtons(jc, true);
 	serviceStudioFeedback(jc, timeNow);
 
 	if (triggerCalibrationStep)
@@ -1279,8 +1619,8 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		// convert gyro smooth time to number of samples
 		auto tick_time = SettingsManager::get<float>(SettingID::TICK_TIME)->value();
 		auto numGyroSamples = jc->getSetting(SettingID::GYRO_SMOOTH_TIME) * 1000.f / tick_time;
-		if (numGyroSamples < 1)
-			numGyroSamples = 1; // need at least 1 sample
+		// Bound before integer conversion as imported windows can be very large.
+		numGyroSamples = isfinite(numGyroSamples) ? clamp(numGyroSamples, 1.f, float(JoyShock::MAX_GYRO_SAMPLES)) : 1.f;
 		auto threshold = jc->getSetting(SettingID::GYRO_SMOOTH_THRESHOLD);
 		jc->getSmoothedGyro(gyroX, gyroY, gyroLength, threshold / 2.0f, threshold, int(numGyroSamples), gyroX, gyroY);
 		// COUT << "%d Samples for threshold: %0.4f\n", numGyroSamples, gyro_smooth_threshold * maxSmoothingSamples);
@@ -1299,7 +1639,20 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	gyroLength = sqrt(gyroX * gyroX + gyroY * gyroY);
 	auto speed = jc->getSetting(SettingID::GYRO_CUTOFF_SPEED);
 	auto recovery = jc->getSetting(SettingID::GYRO_CUTOFF_RECOVERY);
-	if (recovery > speed)
+	const FloatXY steadyingFloor = jc->getSetting<FloatXY>(SettingID::GYRO_STEADYING_FLOOR);
+	const bool floorConfigured = steadyingFloor.first > 0.f || steadyingFloor.second > 0.f;
+	const auto steadyingOutput = floorConfigured ? jc->getSetting<GyroOutput>(SettingID::GYRO_OUTPUT) : GyroOutput::MOUSE;
+	const bool floorEnabled = floorConfigured && !(jc->getSetting<Switch>(SettingID::GYRO_STICK_DEFLECTION) == Switch::ON &&
+	  (steadyingOutput == GyroOutput::LEFT_STICK || steadyingOutput == GyroOutput::RIGHT_STICK));
+	const float steadyingInputSpeed = gyroLength;
+	const float steadyingFactor = gyroSteadyingFactor(gyroLength, speed, recovery);
+	if (floorEnabled)
+	{
+		// Recovery is applied to sensitivity below; retain the literal cutoff.
+		if (speed > 0.f && (recovery > speed ? gyroLength <= speed : gyroLength < speed))
+			gyroX = gyroY = gyroLength = 0.f;
+	}
+	else if (recovery > speed)
 	{
 		// we can use gyro_cutoff_speed
 		float gyroIgnoreFactor = (gyroLength - speed) / (recovery - speed);
@@ -1328,7 +1681,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	switch (gyro.ignore_mode)
 	{
 	case GyroIgnoreMode::BUTTON:
-		blockGyro = gyro.always_off ^ jc->isPressed(gyro.button);
+		blockGyro = gyro.always_off ^ gyro.active([&](ButtonID button) { return jc->isPressed(button); });
 		break;
 	case GyroIgnoreMode::LEFT_STICK:
 	{
@@ -1465,6 +1818,15 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		blockGyro = true;
 	}
 
+	// Angular travel is measured before sensitivity and trackball synthesis.
+	const auto deflectionTarget = jc->getSetting<GyroOutput>(SettingID::GYRO_OUTPUT);
+	const bool deflectionMode = jc->getSetting<Switch>(SettingID::GYRO_STICK_DEFLECTION) == Switch::ON &&
+	  (deflectionTarget == GyroOutput::LEFT_STICK || deflectionTarget == GyroOutput::RIGHT_STICK);
+	const auto deflection = jc->updateGyroDeflection(gyroX * gyro_x_sign_to_use, gyroY * gyro_y_sign_to_use,
+	  deltaTime, deflectionMode && !blockGyro && !trackball_x_pressed && !trackball_y_pressed, int(deflectionTarget));
+	// Suppressed gyro and synthetic coast must not keep buzzing the controller.
+	jc->updateGyroHaptics(gyroX * gyro_x_sign_to_use, gyroY * gyro_y_sign_to_use, deltaTime,
+	  !blockGyro && !trackball_x_pressed && !trackball_y_pressed);
 	float decay = exp2f(-deltaTime * jc->getSetting(SettingID::TRACKBALL_DECAY));
 	int maxTrackballSamples = max(1, min(jc->NUM_LAST_GYRO_SAMPLES, (int)(1.f / deltaTime * 0.125f)));
 
@@ -1684,6 +2046,13 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		appliedSensY = evaluateAccelCurve(activeShape, vForCurve, lowSensXY.second, hiSensXY.second);
 	}
 
+	if (floorEnabled)
+	{
+		const float factor = gyroSteadyingFactor(omega, speed, recovery);
+		appliedSensX = speed > 0.f && factor == 0.f ? 0.f : gyroSteadyingSensitivity(appliedSensX, steadyingFloor.first, factor);
+		appliedSensY = speed > 0.f && factor == 0.f ? 0.f : gyroSteadyingSensitivity(appliedSensY, steadyingFloor.second, factor);
+	}
+
 	// Map post-curve sensitivities back to 0..1 for telemetry
 	const auto normalizeSens = [](float sens, float sMin, float sMax) -> float {
 		const float denom = sMax - sMin;
@@ -1720,11 +2089,13 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	}
 
 	TelemetrySample telemetrySample;
-	telemetrySample.omega = omega;
+	telemetrySample.omega = floorEnabled || trackball_x_pressed || trackball_y_pressed ? omega : steadyingInputSpeed;
 	// Report post-curve normalized value so the live dot follows the selected curve
-	telemetrySample.normalized = normalizedPostCurve;
-	telemetrySample.sensX = appliedSensX;
-	telemetrySample.sensY = appliedSensY;
+	telemetrySample.normalized = floorEnabled ? normalizedPostCurve : std::max(
+	  normalizeSens(appliedSensX * (trackball_x_pressed ? 1.f : steadyingFactor), lowSensXY.first, hiSensXY.first),
+	  normalizeSens(appliedSensY * (trackball_y_pressed ? 1.f : steadyingFactor), lowSensXY.second, hiSensXY.second));
+	telemetrySample.sensX = appliedSensX * (floorEnabled || trackball_x_pressed ? 1.f : steadyingFactor);
+	telemetrySample.sensY = appliedSensY * (floorEnabled || trackball_y_pressed ? 1.f : steadyingFactor);
 	telemetrySample.minThreshold = minThreshold;
 	telemetrySample.maxThreshold = maxThreshold;
 	telemetrySample.sMinX = lowSensXY.first;
@@ -1812,7 +2183,9 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		for (const auto &entry : handle_to_joyshock)
 		{
 			const auto &device = entry.second;
+            ControllerContext::Guard telemetryScope(controllerModelForHandle(entry.first), entry.first);
 			TelemetryDevice dev;
+            dev.activeProfile = CmdRegistry::activeProfile(entry.first);
 			dev.handle = device->_handle;
 			dev.controllerType = device->_controllerType;
 			dev.supportedButtons = jsl->GetSupportedButtons(device->_handle);
@@ -1826,6 +2199,13 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 				dev.touchpadWidth = dev.touchpadHeight = 0;
 #ifdef SDL
 			TelemetryDeviceStatus status;
+      for (const auto &menu : device->_virtualMenus)
+        status.virtualMenus.push_back({ menu.attachment.menu, int(menu.attachment.source), menu.result.open, menu.result.selected, menu.result.cursor, menu.result.x, menu.result.y, menu.result.navigating });
+      if (device->_context->_vigemController) {
+        if (const auto output = device->_context->_vigemController->submittedSticks())
+          status.virtualSticks = TelemetryDeviceStatus::VirtualSticks{
+            { output->leftX, output->leftY }, { output->rightX, output->rightY } };
+      }
 			status.buttons = jsl->GetButtons(device->_handle);
 			if (device->_splitType != JS_SPLIT_TYPE_RIGHT)
 			{
@@ -1847,15 +2227,23 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			if (device->_controllerType == JS_TYPE_STEAM_CONTROLLER_2026)
 			{
 				TOUCH_STATE touch = jsl->GetTouchState(device->_handle);
+				TOUCH_STATE rawTouch{};
+				if (jsl->GetRawTouchState(device->_handle, rawTouch)) {
+					status.leftPad.raw = TelemetryStickState{rawTouch.t0X * 2.f - 1.f, rawTouch.t0Y * 2.f - 1.f};
+					status.rightPad.raw = TelemetryStickState{rawTouch.t1X * 2.f - 1.f, rawTouch.t1Y * 2.f - 1.f};
+				}
 				// Steam Controller 2026: t0 = left pad, t1 = right pad
 				status.leftPad.x = touch.t0X * 2.f - 1.f;
 				status.leftPad.y = touch.t0Y * 2.f - 1.f;
 				status.leftPad.touched = touch.t0Down;
+				// The frame the reading is in: SDLWrapper turned it by this much.
+				status.leftPad.rotation = SettingsManager::get<float>(SettingID::LEFT_TOUCHPAD_ROTATION)->value();
 				status.leftPad.pressure = touch.t0Pressure;
 	            status.leftPad.speed = device->touchPipelines[0].fingerSpeed;
 				status.rightPad.x = touch.t1X * 2.f - 1.f;
 				status.rightPad.y = touch.t1Y * 2.f - 1.f;
 				status.rightPad.touched = touch.t1Down;
+				status.rightPad.rotation = SettingsManager::get<float>(SettingID::RIGHT_TOUCHPAD_ROTATION)->value();
 				status.rightPad.pressure = touch.t1Pressure;
 	            status.rightPad.speed = device->touchPipelines[1].fingerSpeed;
 
@@ -1865,8 +2253,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 				// JSOFFSET_MISC5 = right, the same bits a binding sees.
 				status.leftGrip.pressed = (status.buttons & (1ULL << JSOFFSET_MISC6)) != 0;
 				status.rightGrip.pressed = (status.buttons & (1ULL << JSOFFSET_MISC5)) != 0;
-				// Same family of signal as the pads and the grips: a capacitive contact
-				// bit. Display only -- there is no MISC slot left to bind it to.
+				// Independent capacitive contacts, also available as LTOUCH/RTOUCH bindings.
 				status.leftStickTouch = jsl->GetStickTouch(device->_handle, false);
 				status.rightStickTouch = jsl->GetStickTouch(device->_handle, true);
 			}
@@ -1877,10 +2264,56 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		Telemetry::MaybeSend(telemetrySample);
 	}
 
+	// Keep raw telemetry alive for the keyboard/global chord worker, but give
+    // NO source or binding (including cached turbo mappings) a game output.
+    if (keyboardCapture) { jc->_context->callback_lock.unlock(); return; }
+
 	jc->gyroXVelocity = gyroXVelocity;
 	jc->gyroYVelocity = gyroYVelocity;
+	if (deflectionMode)
+	{
+		// Reuse native inverse game-response correction and physical-stick mixing.
+		// The calibration factor cancels for deflection's normalized position.
+		const float maximum = jc->getSetting(SettingID::VIRTUAL_STICK_CALIBRATION);
+		jc->gyroXVelocity = deflection.first * maximum;
+		jc->gyroYVelocity = deflection.second * maximum;
+	}
 
 	jc->_timeNow = chrono::steady_clock::now();
+
+  // Clear the previous tilt target BEFORE physical sticks and gyro refill their outputs.
+  // This prevents disabling tilt from erasing another source sharing that stick.
+  const auto tilt = jc->getSetting<GyroSettings>(SettingID::TILT_ON);
+  const auto tiltMode = jc->getSetting<StickMode>(SettingID::MOTION_STICK_MODE);
+  const auto tiltStickActive = [&](bool left) {
+    float x = left ? jsl->GetLeftX(jc->_handle) : jsl->GetRightX(jc->_handle);
+    float y = left ? jsl->GetLeftY(jc->_handle) : jsl->GetRightY(jc->_handle);
+    const auto mode = jc->getSetting<StickMode>(left ? SettingID::LEFT_STICK_MODE : SettingID::RIGHT_STICK_MODE);
+    const float deadzone = mode == StickMode::FLICK
+      ? 1.f - jc->getSetting(left ? SettingID::LEFT_STICK_DEADZONE_OUTER : SettingID::RIGHT_STICK_DEADZONE_OUTER)
+      : jc->getSetting(left ? SettingID::LEFT_STICK_DEADZONE_INNER : SettingID::RIGHT_STICK_DEADZONE_INNER);
+    return sqrtf(x * x + y * y) > deadzone;
+  };
+  const bool tiltCondition = tilt.ignore_mode == GyroIgnoreMode::LEFT_STICK ? tiltStickActive(true)
+    : tilt.ignore_mode == GyroIgnoreMode::RIGHT_STICK ? tiltStickActive(false)
+    : tilt.active([&](ButtonID button) { return jc->isPressed(button); });
+  const bool tiltEnabled = !(tilt.always_off ^ tiltCondition) &&
+    (jc->_splitType == JS_SPLIT_TYPE_FULL ||
+      (jc->_splitType & (int)jc->getSetting<JoyconMask>(SettingID::JOYCON_MOTION_MASK)) == 0);
+  if (!tiltEnabled || (jc->_tiltWasActive && jc->_tiltOutputMode != tiltMode))
+  {
+    if (jc->_tiltWasActive && jc->_context->_vigemController)
+    {
+      const auto previous = jc->_tiltOutputMode;
+      if (previous == StickMode::LEFT_STICK || previous == StickMode::LEFT_STEER_X ||
+          previous == StickMode::LEFT_ANGLE_TO_X || previous == StickMode::LEFT_ANGLE_TO_Y || previous == StickMode::LEFT_WIND_X)
+        jc->_context->_vigemController->setStick(0.f, 0.f, true);
+      if (previous == StickMode::RIGHT_STICK || previous == StickMode::RIGHT_STEER_X ||
+          previous == StickMode::RIGHT_ANGLE_TO_X || previous == StickMode::RIGHT_ANGLE_TO_Y || previous == StickMode::RIGHT_WIND_X)
+        jc->_context->_vigemController->setStick(0.f, 0.f, false);
+    }
+    jc->stopTilt();
+  }
 
 	// sticks!
 	jc->processed_gyro_stick = false;
@@ -1893,6 +2326,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		auto axisSign = jc->getSetting<AxisSignPair>(SettingID::LEFT_STICK_AXIS);
 		float calX = jsl->GetLeftX(jc->_handle) * float(axisSign.first);
 		float calY = jsl->GetLeftY(jc->_handle) * float(axisSign.second);
+    if (jc->virtualMenuConsumes(VirtualMenuSource::LSTICK)) calX = calY = 0.f;
 
 		jc->processStick(calX, calY, jc->_leftStick, mouseCalibrationFactor, deltaTime, leftAny, lockMouse, camSpeedX, camSpeedY);
 		jc->_leftStick.lastX = calX;
@@ -1904,14 +2338,14 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		auto axisSign = jc->getSetting<AxisSignPair>(SettingID::RIGHT_STICK_AXIS);
 		float calX = jsl->GetRightX(jc->_handle) * float(axisSign.first);
 		float calY = jsl->GetRightY(jc->_handle) * float(axisSign.second);
+    if (jc->virtualMenuConsumes(VirtualMenuSource::RSTICK)) calX = calY = 0.f;
 
 		jc->processStick(calX, calY, jc->_rightStick, mouseCalibrationFactor, deltaTime, rightAny, lockMouse, camSpeedX, camSpeedY);
 		jc->_rightStick.lastX = calX;
 		jc->_rightStick.lastY = calY;
 	}
 
-	if (jc->_splitType == JS_SPLIT_TYPE_FULL ||
-	  (jc->_splitType & (int)jc->getSetting<JoyconMask>(SettingID::JOYCON_MOTION_MASK)) == 0)
+	if (tiltEnabled)
 	{
 		Quat neutralQuat = Quat(jc->neutralQuatW, jc->neutralQuatX, jc->neutralQuatY, jc->neutralQuatZ);
 		Vec grav = Vec(inGravX, inGravY, inGravZ) * neutralQuat.Inverse();
@@ -1932,6 +2366,14 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			calY *= gravStickDeflection / gravLength2D;
 		}
 
+    if (!jc->_tiltWasActive)
+    {
+      // Resume position-derived modes from the current sample, avoiding a cursor jump.
+      jc->_motionStick.lastX = calX;
+      jc->_motionStick.lastY = calY;
+    }
+    jc->_tiltWasActive = true;
+    jc->_tiltOutputMode = tiltMode;
 		jc->processStick(calX, calY, jc->_motionStick, mouseCalibrationFactor, deltaTime, motionAny, lockMouse, camSpeedX, camSpeedY);
 		jc->_motionStick.lastX = calX;
 		jc->_motionStick.lastY = calY;
@@ -2013,192 +2455,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		}
 	}
 
-	uint64_t buttons = jsl->GetButtons(jc->_handle);
-	// button mappings
-	if (jc->_splitType != JS_SPLIT_TYPE_RIGHT)
-	{
-		jc->handleButtonChange(ButtonID::UP, buttons & (1ULL << JSOFFSET_UP));
-		jc->handleButtonChange(ButtonID::DOWN, buttons & (1ULL << JSOFFSET_DOWN));
-		jc->handleButtonChange(ButtonID::LEFT, buttons & (1ULL << JSOFFSET_LEFT));
-		jc->handleButtonChange(ButtonID::RIGHT, buttons & (1ULL << JSOFFSET_RIGHT));
-		jc->handleButtonChange(ButtonID::L, buttons & (1ULL << JSOFFSET_L));
-		jc->handleButtonChange(ButtonID::MINUS, buttons & (1ULL << JSOFFSET_MINUS));
-		jc->handleButtonChange(ButtonID::L3, buttons & (1ULL << JSOFFSET_LCLICK));
-
-		float lTrigger = jsl->GetLeftTrigger(jc->_handle);
-		jc->handleTriggerChange(ButtonID::ZL, ButtonID::ZLF, jc->getSetting<TriggerMode>(SettingID::ZL_MODE), lTrigger, jc->_leftEffect);
-
-		bool touch = jsl->GetTouchDown(jc->_handle, false) || jsl->GetTouchDown(jc->_handle, true);
-		switch (jc->_controllerType)
-		{
-		case JS_TYPE_DS:
-			// JSL mapps mic button on the SL index
-			// Edge grips
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
-			// Edge FN
-			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));
-			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));
-
-			jc->handleButtonChange(ButtonID::MIC, buttons & (1ULL << JSOFFSET_MIC));
-			// Don't break but continue onto DS4 stuff too
-		case JS_TYPE_DS4:
-		{
-			float triggerpos = buttons & (1ULL << JSOFFSET_CAPTURE) ? 1.f :
-			  touch                                              ? 0.99f :
-			                                                       0.f;
-			jc->handleTriggerChange(ButtonID::TOUCH, ButtonID::CAPTURE, jc->getSetting<TriggerMode>(SettingID::TOUCHPAD_DUAL_STAGE_MODE), triggerpos, jc->_unusedEffect);
-		}
-		break;
-		case JS_TYPE_XBOXONE_ELITE:
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL)); // Xbox Elite back paddles
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
-			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));
-			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));
-			break;
-		case JS_TYPE_XBOX_SERIES:
-			jc->handleButtonChange(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE));
-			break;
-		case JS_TYPE_JOYCON_LEFT:
-			jc->handleButtonChange(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE));
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
-			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_SR));
-			break;
-		case JS_TYPE_PRO_CONTROLLER:
-			jc->handleButtonChange(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE));
-			break;
-		case JS_TYPE_SWITCH2_PRO_CONTROLLER:
-			jc->handleButtonChange(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE)); // Capture button
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));          // GL back button
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));          // GR back button
-			jc->handleButtonChange(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));     // C button
-			break;
-		case JS_TYPE_HORI_STEAM:
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));        // L4 back button
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));        // R4 back button
-			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));       // M1 button below left stick
-			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));       // M2 button below right stick
-			jc->handleButtonChange(ButtonID::LTOUCH, buttons & (1ULL << JSOFFSET_LTOUCH)); // Left stick capacitive touch
-			jc->handleButtonChange(ButtonID::RTOUCH, buttons & (1ULL << JSOFFSET_RTOUCH)); // Right stick capacitive touch
-			jc->handleButtonChange(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));   // QAM button ("..." button)
-			break;
-		case JS_TYPE_STEAM_CONTROLLER_2026:
-			// Four paddles: R4→RSR, L4→LSL, R5→RSL, L5→LSR
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
-			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));
-			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));
-			// QAM button
-			jc->handleButtonChange(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));
-			// Right pad click, left pad click
-			jc->handleButtonChange(ButtonID::MISC2, buttons & (1ULL << JSOFFSET_MISC2));
-			jc->handleButtonChange(ButtonID::MISC3, buttons & (1ULL << JSOFFSET_MISC3));
-			// Confirmation pulse on the pad you actually pressed. Edge-triggered off
-			// padClickWasOn: a level check would replay the effect every poll the
-			// pad stayed held. Independent of what the click is bound to, since the
-			// feel of the click is not the same question as what it does.
-			updatePadClickHaptics(jc,
-			  (buttons & (1ULL << JSOFFSET_MISC3)) != 0,
-			  (buttons & (1ULL << JSOFFSET_MISC2)) != 0);
-			// Right grip, left grip
-			jc->handleButtonChange(ButtonID::MISC5, buttons & (1ULL << JSOFFSET_MISC5));
-			jc->handleButtonChange(ButtonID::MISC6, buttons & (1ULL << JSOFFSET_MISC6));
-			// Cap-sense: stick touch (LTOUCH/RTOUCH are in the default block)
-				// Touchpad touch (TOUCH) and click (MISC3) are both handled as
-				// regular buttons above. The dual-stage trigger mechanism requires
-				// an analog trigger index, which MISC3 is not, so we skip it here
-				// to avoid console spam: "Trigger MISC3 does not exist in state map."
-				break;
-		case JS_TYPE_G7_PRO_8K:
-			jc->handleButtonChange(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI));     // L5 mini shoulder button
-			jc->handleButtonChange(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI));     // R5 mini shoulder button
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));          // L4 back button
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));          // R4 back button
-			jc->handleButtonChange(ButtonID::CAPTURE, buttons & (1ULL << JSOFFSET_CAPTURE)); // Share button
-			break;
-		// 8BitDo controllers with gyro and no additional buttons.
-		case JS_TYPE_8BITDO_SF30_PRO:
-		case JS_TYPE_8BITDO_SF30_PRO_BT:
-		case JS_TYPE_8BITDO_SN30_PRO:
-		case JS_TYPE_8BITDO_SN30_PRO_BT:
-			break;
-		// 8BitDo controllers with gyro and two additional buttons.
-		case JS_TYPE_8BITDO_PRO_2:
-		case JS_TYPE_8BITDO_PRO_2_BT:
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL)); // P2 back button (left)
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR)); // P1 back button (right)
-			break;
-		// 8BitDo controllers with gyro and four additional buttons.
-		case JS_TYPE_8BITDO_PRO_3:
-		case JS_TYPE_8BITDO_ULTIMATE2_WIRELESS:
-			jc->handleButtonChange(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI)); // L4 mini shoulder button
-			jc->handleButtonChange(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI)); // R4 mini shoulder button
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));      // PL back button
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));      // PR back button
-			break;
-		case JS_TYPE_FLYDIGI_APEX5:
-			jc->handleButtonChange(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI)); // LM mini shoulder button
-			jc->handleButtonChange(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI)); // RM mini shoulder button
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));  // M2 back button (top left)
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));  // M1 back button (top right)
-			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL)); // M4 back button (bottom left)
-			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR)); // M3 back button (bottom right)
-			break;
-		case JS_TYPE_FLYDIGI_VADER5_PRO:
-			jc->handleButtonChange(ButtonID::LMINI, buttons & (1ULL << JSOFFSET_LMINI)); // LM mini shoulder button
-			jc->handleButtonChange(ButtonID::RMINI, buttons & (1ULL << JSOFFSET_RMINI)); // RM mini shoulder button
-			jc->handleButtonChange(ButtonID::MISC3, buttons & (1ULL << JSOFFSET_MISC3)); // Circle button below right stick
-			// Fall through.
-		case JS_TYPE_FLYDIGI_VADER4_PRO:
-		case JS_TYPE_FLYDIGI_VADER3_PRO:
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));  // M2 back button (top left)
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));  // M1 back button (top right)
-			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL)); // M4 back button (bottom left)
-			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR)); // M3 back button (bottom right)
-			jc->handleButtonChange(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1)); // C face button
-			jc->handleButtonChange(ButtonID::MISC2, buttons & (1ULL << JSOFFSET_MISC2)); // Z face button
-			break;
-		default:
-			jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
-			jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
-			jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_FNL));
-			jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_FNR));
-			jc->handleButtonChange(ButtonID::MISC1, buttons & (1ULL << JSOFFSET_MISC1));
-			jc->handleButtonChange(ButtonID::MISC2, buttons & (1ULL << JSOFFSET_MISC2));
-			jc->handleButtonChange(ButtonID::MISC3, buttons & (1ULL << JSOFFSET_MISC3));
-			jc->handleButtonChange(ButtonID::MISC4, buttons & (1ULL << JSOFFSET_MISC4));
-			jc->handleButtonChange(ButtonID::MISC5, buttons & (1ULL << JSOFFSET_MISC5));
-			jc->handleButtonChange(ButtonID::MISC6, buttons & (1ULL << JSOFFSET_MISC6));
-			break;
-		}
-	}
-	else // split type IS right
-	{
-		// Right joycon bumpers
-		jc->handleButtonChange(ButtonID::RSL, buttons & (1ULL << JSOFFSET_SL));
-		jc->handleButtonChange(ButtonID::RSR, buttons & (1ULL << JSOFFSET_SR));
-	}
-
-	if (jc->_splitType != JS_SPLIT_TYPE_LEFT)
-	{
-		jc->handleButtonChange(ButtonID::E, buttons & (1ULL << JSOFFSET_E));
-		jc->handleButtonChange(ButtonID::S, buttons & (1ULL << JSOFFSET_S));
-		jc->handleButtonChange(ButtonID::N, buttons & (1ULL << JSOFFSET_N));
-		jc->handleButtonChange(ButtonID::W, buttons & (1ULL << JSOFFSET_W));
-		jc->handleButtonChange(ButtonID::R, buttons & (1ULL << JSOFFSET_R));
-		jc->handleButtonChange(ButtonID::PLUS, buttons & (1ULL << JSOFFSET_PLUS));
-		jc->handleButtonChange(ButtonID::HOME, buttons & (1ULL << JSOFFSET_HOME));
-		jc->handleButtonChange(ButtonID::R3, buttons & (1ULL << JSOFFSET_RCLICK));
-
-		float rTrigger = jsl->GetRightTrigger(jc->_handle);
-		jc->handleTriggerChange(ButtonID::ZR, ButtonID::ZRF, jc->getSetting<TriggerMode>(SettingID::ZR_MODE), rTrigger, jc->_rightEffect);
-	}
-	else
-	{
-		// Left joycon bumpers
-		jc->handleButtonChange(ButtonID::LSL, buttons & (1ULL << JSOFFSET_SL));
-		jc->handleButtonChange(ButtonID::LSR, buttons & (1ULL << JSOFFSET_SR));
-	}
+	dispatchPhysicalButtons(jc, false);
 
 	auto at = jc->getSetting<Switch>(SettingID::ADAPTIVE_TRIGGER);
 	if (at == Switch::OFF)
@@ -2224,6 +2481,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		jsl->SetMicLight(controller.first, currentMicToggleState ? 1 : 0);
 	}
 
+	jc->processVirtualMenus();
 	GyroOutput gyroOutput = jc->getSetting<GyroOutput>(SettingID::GYRO_OUTPUT);
 	if (!jc->processed_gyro_stick)
 	{
@@ -2244,8 +2502,9 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		}
 	}
 
-	// optionally ignore the gyro of one of the joycons
-	if (!lockMouse && gyroOutput == GyroOutput::MOUSE &&
+	// optionally ignore the gyro of one of the joycons. A finger on a MOUSE_AREA
+	// pad has parked the cursor; the gyro gets it back when the finger lifts.
+	if (!lockMouse && !jc->touchAreaHold && gyroOutput == GyroOutput::MOUSE &&
 	  (jc->_splitType == JS_SPLIT_TYPE_FULL ||
 	    (jc->_splitType & (int)jc->getSetting<JoyconMask>(SettingID::JOYCON_GYRO_MASK)) == 0))
 	{
@@ -2259,6 +2518,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		jc->_context->_vigemController->update(); // Check for initialized built-in
 	}
 	auto newColor = jc->getSetting<Color>(SettingID::LIGHT_BAR);
+	jsl->SetLightBrightness(jc->_handle, jc->getSetting<int>(SettingID::LED_BRIGHTNESS));
 	if (jc->_light_bar != newColor)
 	{
 		jsl->SetLightColour(jc->_handle, newColor.raw);
@@ -2510,10 +2770,12 @@ bool do_NO_GYRO_BUTTON()
 
 bool do_RESET_MAPPINGS(CmdRegistry *registry)
 {
+    const bool scoped = !ControllerContext::writeScope.empty();
+	VirtualMenus::clear();
 	COUT << "Resetting all mappings to defaults\n";
 	// The next configuration says which "!X" chords it uses; each controller
 	// drops the old ones on its next poll.
-	clearInvertedChords();
+	if (!scoped) clearInvertedChords();
 	static constexpr auto callReset = [](JSMButton &map)
 	{
 		map.reset();
@@ -2528,9 +2790,10 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
 	ranges::for_each(right_stick_menu_mappings, callReset);
 	ranges::for_each(right_grid_mappings, callReset);
 
+    if (scoped) { gyroOneEuroEnabled.reset(); return true; }
 	os_mouse_speed = 1.0f;
 	last_flick_and_rotation = 0.0f;
-	gyroOneEuroEnabled = false;
+	gyroOneEuroEnabled.reset();
 	for (auto &[id, jc] : handle_to_joyshock)
 	{
 		jc->resetOneEuroFilter();
@@ -2652,7 +2915,7 @@ bool do_IGNORE_OS_MOUSE_SPEED()
 bool do_ONE_EURO_FILTER()
 {
 	COUT << "One Euro Filter enabled for gyro\n";
-	gyroOneEuroEnabled = true;
+	gyroOneEuroEnabled.set(true);
 	for (auto &[id, jc] : handle_to_joyshock)
 	{
 		jc->resetOneEuroFilter();
@@ -2862,41 +3125,73 @@ bool do_CALIBRATE_GYRO()
 
 bool do_PLAY_SOUND(string_view argument)
 {
-	// PLAY_SOUND <sound> [gain dB]: without a gain, SOUND_GAIN's. Studio's
-	// preview names the gain so it plays at the level just picked, before that
-	// reaches SOUND_GAIN.
-	int script = 0;
+	// PLAY_SOUND <0..13|relative-file> [gain dB]. The preview names its gain
+	// before SOUND_GAIN has been saved; bindings normally use SOUND_GAIN.
 	int gain = SettingsManager::get<int>(SettingID::SOUND_GAIN)->value();
-	try
+	stringstream words{ string(argument) };
+	string target, level, extra;
+	words >> target >> level >> extra;
+	if (target.empty() || !extra.empty())
 	{
-		stringstream words{ string(argument) };
-		string sound, level;
-		words >> sound >> level;
-		script = stoi(sound);
-		if (!level.empty())
-			gain = clamp(stoi(level), -30, 6);
-	}
-	catch (...)
-	{
-		CERR << "PLAY_SOUND needs a sound number, 0-13, and optionally a gain in dB.\n";
+		CERR << "PLAY_SOUND needs a sound number (0-13) or relative tone file, and optionally a gain in dB.\n";
 		return false;
 	}
+	if (!level.empty())
+	{
+		try { size_t used = 0; gain = clamp(stoi(level, &used), -30, 6); if (used != level.size()) throw invalid_argument("gain"); }
+		catch (...) { CERR << "PLAY_SOUND gain must be an integer.\n"; return false; }
+	}
+	if (target.find_first_not_of("0123456789") == string::npos)
+	{
+		int script = -1;
+		try { script = stoi(target); } catch (...) { CERR << "PLAY_SOUND built-in sound must be 0-13.\n"; return false; }
+		if (script < 0 || script > 13) { CERR << "PLAY_SOUND built-in sound must be 0-13.\n"; return false; }
+		bool played = false;
+		for (auto &[handle, jc] : handle_to_joyshock)
+			played |= jsl->PlayHapticScript(handle, script, gain);
+		return played;
+	}
+	if (filesystem::path(target).is_absolute() || target.find("..") != string::npos || target.find_first_of("\"'\\") != string::npos)
+	{
+		CERR << "PLAY_SOUND " << target << " must be a relative path without spaces or parent segments.\n";
+		return false;
+	}
+	const auto file = readToneFile(target, BASE_JSM_CONFIG_FOLDER());
+	if (!file.error.empty()) { CERR << "PLAY_SOUND " << target << ' ' << file.error << ".\n"; return false; }
+	bool played = false;
 	for (auto &[handle, jc] : handle_to_joyshock)
-		jsl->PlayHapticScript(handle, script, gain);
-	return true;
+		played |= jsl->PlayToneSequence(handle, file.tones, gain) > 0;
+	return played;
 }
 
 bool do_TURN_OFF_CONTROLLER()
 {
 	// The tune has to finish before the power goes: the report would cut it off.
-	if (const int sound = SettingsManager::get<int>(SettingID::SHUTDOWN_SOUND)->value(); sound >= 0)
+	int waitMs = 0;
+	const auto setting = SettingsManager::get<PathString>(SettingID::SHUTDOWN_SOUND_FILE);
+	if (setting && !tone_sequence::isNoToneFile(setting->value()))
 	{
-		bool played = false;
-		for (auto &[handle, jc] : handle_to_joyshock)
-			played |= jsl->PlayHapticScript(handle, sound, SettingsManager::get<int>(SettingID::SOUND_GAIN)->value());
-		if (played)
-			this_thread::sleep_for(chrono::milliseconds(1500));
+		const string path = tone_sequence::trimmed(setting->value());
+		const auto file = readToneFile(path, BASE_JSM_CONFIG_FOLDER());
+		if (!file.error.empty())
+		{
+			static string logged;
+			if (logged != path) { logged = path; CERR << "SHUTDOWN_SOUND_FILE " << path << ' ' << file.error << "; playing SHUTDOWN_SOUND instead.\n"; }
+		}
+		else for (auto &[handle, jc] : handle_to_joyshock)
+			waitMs = max(waitMs, jsl->PlayToneSequence(handle, file.tones, SettingsManager::get<int>(SettingID::SOUND_GAIN)->value()));
 	}
+	if (waitMs == 0)
+	{
+		if (const int sound = SettingsManager::get<int>(SettingID::SHUTDOWN_SOUND)->value(); sound >= 0)
+		{
+			bool played = false;
+			for (auto &[handle, jc] : handle_to_joyshock)
+				played |= jsl->PlayHapticScript(handle, sound, SettingsManager::get<int>(SettingID::SOUND_GAIN)->value());
+			if (played) waitMs = 1500;
+		}
+	}
+	if (waitMs > 0) this_thread::sleep_for(chrono::milliseconds(min(waitMs, tone_sequence::kMaxTotalMs)));
 
 	int delivered = 0;
 	for (auto iter = handle_to_joyshock.begin(); iter != handle_to_joyshock.end(); ++iter)
@@ -2927,6 +3222,12 @@ bool do_SET_MOTION_STICK_NEUTRAL()
 	{
 		iter->second->set_neutral_quat = true;
 	}
+	return true;
+}
+
+bool do_RECENTER_GYRO_DEFLECTION()
+{
+	for (const auto &entry : handle_to_joyshock) entry.second->gyroDeflectionRecenterRequested.store(true);
 	return true;
 }
 
@@ -3202,7 +3503,8 @@ Mapping filterMapping(Mapping current, Mapping next)
 		}
 		for (auto &js : handle_to_joyshock)
 		{
-			if (js.second->hasVirtualController() == false)
+			if (!ControllerContext::matches(js.second->_controllerType, js.first, js.second->_vendorId, js.second->_productId)) continue;
+            if (js.second->hasVirtualController() == false)
 				return current;
 		}
 	}
@@ -3232,7 +3534,8 @@ TriggerMode filterTriggerMode(TriggerMode current, TriggerMode next)
 		}
 		for (auto &js : handle_to_joyshock)
 		{
-			if (js.second->hasVirtualController() == false)
+			if (!ControllerContext::matches(js.second->_controllerType, js.first, js.second->_vendorId, js.second->_productId)) continue;
+            if (js.second->hasVirtualController() == false)
 				return current;
 		}
 	}
@@ -3261,7 +3564,8 @@ StickMode filterMotionStickMode(StickMode current, StickMode next)
 		}
 		for (auto &js : handle_to_joyshock)
 		{
-			if (js.second->hasVirtualController() == false)
+			if (!ControllerContext::matches(js.second->_controllerType, js.first, js.second->_vendorId, js.second->_productId)) continue;
+            if (js.second->hasVirtualController() == false)
 				return current;
 		}
 	}
@@ -3297,7 +3601,8 @@ GyroOutput filterGyroOutput(GyroOutput current, GyroOutput next)
 		}
 		for (auto &js : handle_to_joyshock)
 		{
-			if (js.second->hasVirtualController() == false)
+			if (!ControllerContext::matches(js.second->_controllerType, js.first, js.second->_vendorId, js.second->_productId)) continue;
+            if (js.second->hasVirtualController() == false)
 				return current;
 		}
 	}
@@ -3322,6 +3627,7 @@ ControllerScheme updateVirtualController(ControllerScheme prevScheme, Controller
 	bool success = true;
 	for (auto &js : handle_to_joyshock)
 	{
+        if (!ControllerContext::matches(js.second->_controllerType, js.first, js.second->_vendorId, js.second->_productId)) continue;
 		lock_guard guard(js.second->_context->callback_lock);
 		if (!js.second->_context->_vigemController ||
 		  js.second->_context->_vigemController->getType() != nextScheme)
@@ -3354,6 +3660,7 @@ void onVirtualControllerChange(const ControllerScheme &newScheme)
 {
 	for (auto &js : handle_to_joyshock)
 	{
+        if (!ControllerContext::matches(js.second->_controllerType, js.first, js.second->_vendorId, js.second->_productId)) continue;
 		// Display an error message if any vigem is no good.
 		lock_guard guard(js.second->_context->callback_lock);
 		if (!js.second->hasVirtualController())
@@ -3362,6 +3669,16 @@ void onVirtualControllerChange(const ControllerScheme &newScheme)
 		}
 	}
 	// TODO: on NONE clear mappings with vigem commands?
+}
+
+void refreshControllerOutput(int handle) {
+    auto it = handle_to_joyshock.find(handle);
+    if (it == handle_to_joyshock.end()) return;
+    ControllerContext::Guard scope(controllerModelForHandle(handle), handle, ControllerContext::isolatedScopes.count(ControllerContext::deviceKey(handle)) ? ControllerContext::deviceKey(handle) : ControllerContext::baseKey(handle));
+    const auto scheme = SettingsManager::getV<ControllerScheme>(SettingID::VIRTUAL_CONTROLLER)->value();
+    updateVirtualController(scheme, scheme);
+    lock_guard guard(it->second->_context->callback_lock);
+    it->second->updateGridSize();
 }
 
 void refreshAutoLoadHelp(JSMAssignment<Switch> *autoloadCmd)
@@ -3387,7 +3704,9 @@ void onNewGridDimensions(CmdRegistry *registry, const FloatXY &)
 	}
 	for (auto &entry : handle_to_joyshock)
 	{
-		lock_guard guard(entry.second->_context->callback_lock);
+		if (!ControllerContext::matches(entry.second->_controllerType, entry.first, entry.second->_vendorId, entry.second->_productId)) continue;
+        ControllerContext::Guard deviceScope(controllerModelForHandle(entry.first), entry.first);
+        lock_guard guard(entry.second->_context->callback_lock);
 		entry.second->updateGridSize();
 	}
 }
@@ -3407,7 +3726,9 @@ void onNewLeftGridDimensions(CmdRegistry *registry, const FloatXY &)
 	}
 	for (auto &entry : handle_to_joyshock)
 	{
-		lock_guard guard(entry.second->_context->callback_lock);
+		if (!ControllerContext::matches(entry.second->_controllerType, entry.first, entry.second->_vendorId, entry.second->_productId)) continue;
+        ControllerContext::Guard deviceScope(controllerModelForHandle(entry.first), entry.first);
+        lock_guard guard(entry.second->_context->callback_lock);
 		entry.second->updateGridSize();
 	}
 }
@@ -3427,7 +3748,9 @@ void onNewRightGridDimensions(CmdRegistry *registry, const FloatXY &)
 	}
 	for (auto &entry : handle_to_joyshock)
 	{
-		lock_guard guard(entry.second->_context->callback_lock);
+		if (!ControllerContext::matches(entry.second->_controllerType, entry.first, entry.second->_vendorId, entry.second->_productId)) continue;
+        ControllerContext::Guard deviceScope(controllerModelForHandle(entry.first), entry.first);
+        lock_guard guard(entry.second->_context->callback_lock);
 		entry.second->updateGridSize();
 	}
 }
@@ -3453,7 +3776,9 @@ void onNewStickMenuSize(CmdRegistry *registry, vector<JSMButton> &maps, int firs
 	}
 	for (auto &entry : handle_to_joyshock)
 	{
-		lock_guard guard(entry.second->_context->callback_lock);
+		if (!ControllerContext::matches(entry.second->_controllerType, entry.first, entry.second->_vendorId, entry.second->_productId)) continue;
+        ControllerContext::Guard deviceScope(controllerModelForHandle(entry.first), entry.first);
+        lock_guard guard(entry.second->_context->callback_lock);
 		entry.second->updateGridSize();
 	}
 }
@@ -3506,6 +3831,7 @@ class GyroButtonAssignment : public JSMAssignment<GyroSettings>
 {
 protected:
 	const bool _always_off;
+	const string _activationPrefix;
 	const ButtonID _chordButton;
 
 	virtual void displayCurrentValue() override
@@ -3515,7 +3841,7 @@ protected:
 		{
 			COUT << _chordButton << ',';
 		}
-		COUT << (value.always_off ? string("GYRO_ON") : string("GYRO_OFF")) << " = " << value << '\n';
+		COUT << (_activationPrefix + (value.always_off ? "_ON" : "_OFF")) << " = " << value << '\n';
 	}
 
 	virtual GyroSettings readValue(stringstream &in) override
@@ -3532,19 +3858,20 @@ protected:
 		{
 			COUT << _chordButton << ',';
 		}
-		COUT << (value.always_off ? string("GYRO_ON") : string("GYRO_OFF")) << " has been set to " << value << '\n';
+		COUT << (_activationPrefix + (value.always_off ? "_ON" : "_OFF")) << " has been set to " << value << '\n';
 	}
 
 public:
 	GyroButtonAssignment(string_view name, string_view displayName, JSMVariable<GyroSettings> &setting, bool always_off, ButtonID chord = ButtonID::NONE)
-	  : JSMAssignment(name, name, setting, true)
+	  : JSMAssignment(name, displayName, setting, true)
 	  , _always_off(always_off)
+	  , _activationPrefix(name.substr(0, 4) == "TILT" ? "TILT" : "GYRO")
 	  , _chordButton(chord)
 	{
 	}
 
 	GyroButtonAssignment(SettingID id, bool always_off)
-	  : GyroButtonAssignment(magic_enum::enum_name(id).data(), magic_enum::enum_name(id).data(), *SettingsManager::get<GyroSettings>(SettingID::GYRO_ON), always_off)
+	  : GyroButtonAssignment(magic_enum::enum_name(id).data(), magic_enum::enum_name(id).data(), *SettingsManager::get<GyroSettings>(id == SettingID::TILT_ON || id == SettingID::TILT_OFF ? SettingID::TILT_ON : SettingID::GYRO_ON), always_off)
 	{
 	}
 
@@ -3720,6 +4047,15 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	                       ->setHelp("Assign a controller button to disable the gyro when pressed."));
 	commandRegistry->add((new GyroButtonAssignment(SettingID::GYRO_ON, true))->setListener() // Set only one listener
 	                       ->setHelp("Assign a controller button to enable the gyro when pressed."));
+
+  auto tilt_settings = new JSMSetting<GyroSettings>(SettingID::TILT_ON, GyroSettings());
+  tilt_settings->setFilter([](GyroSettings current, GyroSettings next)
+    { return next.ignore_mode != GyroIgnoreMode::INVALID ? next : current; });
+  SettingsManager::add(tilt_settings);
+  commandRegistry->add((new GyroButtonAssignment(SettingID::TILT_OFF, false))
+    ->setHelp("Disable tilt output while this input is active. NONE keeps tilt always on. Independent of gyro."));
+  commandRegistry->add((new GyroButtonAssignment(SettingID::TILT_ON, true))->setListener()
+    ->setHelp("Enable tilt output while this input is active. NONE keeps tilt always off. Supports ANY/ALL conditions and held settings."));
 
 	auto joycon_gyro_mask = new JSMSetting<JoyconMask>(SettingID::JOYCON_GYRO_MASK, JoyconMask::IGNORE_LEFT);
 	joycon_gyro_mask->setFilter(&filterInvalidValue<JoyconMask, JoyconMask::INVALID>);
@@ -3975,6 +4311,35 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<float>(*gyro_cutoff_recovery))
 	                       ->setHelp("Below this threshold (in degrees per second), gyro sensitivity is pushed down towards zero. This can tighten and steady aim without a deadzone."));
 
+	auto gyro_steadying_floor = new JSMSetting<FloatXY>(SettingID::GYRO_STEADYING_FLOOR, { 0.f, 0.f });
+	gyro_steadying_floor->setFilter([](FloatXY current, FloatXY next) {
+		return isfinite(next.first) && isfinite(next.second) && next.first >= 0.f && next.second >= 0.f ? next : current;
+	});
+	SettingsManager::add(gyro_steadying_floor);
+	commandRegistry->add((new JSMAssignment<FloatXY>(*gyro_steadying_floor))
+	  ->setHelp("Minimum low-speed steadying sensitivity in RWS (X [Y]). Default 0 preserves legacy velocity attenuation. Positive floors blend into the unattenuated curve, capped per axis. Hard cutoff still produces zero output."));
+
+	auto gyro_haptic_intensity = new JSMSetting<float>(SettingID::GYRO_HAPTIC_INTENSITY, 0.f);
+	gyro_haptic_intensity->setFilter([](float current, float next) { return isfinite(next) ? clamp(next, 0.f, 100.f) : current; });
+	SettingsManager::add(gyro_haptic_intensity);
+	commandRegistry->add((new JSMAssignment<float>(*gyro_haptic_intensity))
+	  ->setHelp("Steam Controller rotation feedback strength, 0-100. Zero disables it. Measures selected gyro aim axes before sensitivity; suppressed gyro and trackball coast do not emit pulses."));
+	auto gyro_haptic_interval = new JSMSetting<float>(SettingID::GYRO_HAPTIC_INTERVAL, 15.f);
+	gyro_haptic_interval->setFilter([](float current, float next) { return isfinite(next) ? clamp(next, .1f, 3600.f) : current; });
+	SettingsManager::add(gyro_haptic_interval);
+	commandRegistry->add((new JSMAssignment<float>(*gyro_haptic_interval))
+	  ->setHelp("Degrees of selected gyro-axis travel between rotation feedback pulses. Default 15. At most one pulse per poll; excess crossings are coalesced."));
+	auto gyro_haptic_effect = new JSMSetting<HapticEffect>(SettingID::GYRO_HAPTIC_EFFECT, HapticEffect::TICK);
+	gyro_haptic_effect->setFilter(&filterInvalidValue<HapticEffect, HapticEffect::INVALID>);
+	SettingsManager::add(gyro_haptic_effect);
+	commandRegistry->add((new JSMAssignment<HapticEffect>(*gyro_haptic_effect))
+	  ->setHelp("Steam Controller effect for gyro rotation feedback. Default TICK. OFF disables pulses without discarding strength or spacing."));
+	auto gyro_haptic_side = new JSMSetting<int>(SettingID::GYRO_HAPTIC_SIDE, 3);
+	gyro_haptic_side->setFilter([](int current, int next) { return next >= 1 && next <= 3 ? next : current; });
+	SettingsManager::add(gyro_haptic_side);
+	commandRegistry->add((new JSMAssignment<int>(*gyro_haptic_side))
+	  ->setHelp("Steam Controller actuator for gyro rotation feedback: 1 left, 2 right, 3 both. Default both. All GYRO_HAPTIC settings can be changed by held input chords."));
+
 	auto one_euro_min_cutoff = new JSMSetting<float>(SettingID::ONE_EURO_MIN_CUTOFF, 6.0f);
 	one_euro_min_cutoff->setFilter(&filterPositive);
 	SettingsManager::add(one_euro_min_cutoff);
@@ -4175,7 +4540,7 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	dbl_press_window->setFilter(&filterPositive);
 	SettingsManager::add(dbl_press_window);
 	commandRegistry->add((new JSMAssignment<float>("DBL_PRESS_WINDOW", *dbl_press_window))
-	                       ->setHelp("Sets the amount of time in milliseconds within which the user needs to press a button twice before enabling the double press mappings. This setting does not support modeshift."));
+	                       ->setHelp("Sets the amount of time in milliseconds within which the user needs to press a button twice before enabling the double press mappings. Supports held setting chords."));
 
 	auto tick_time = new JSMSetting<float>(SettingID::TICK_TIME, 3);
 	tick_time->setFilter(&filterTickTime);
@@ -4187,7 +4552,7 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	// light_bar needs no filter or listener. The callback polls and updates the color.
 	SettingsManager::add(light_bar);
 	commandRegistry->add((new JSMAssignment<Color>(*light_bar))
-	                       ->setHelp("Changes the color bar of the DS4. Either enter as a hex code (xRRGGBB), as three decimal values between 0 and 255 (RRR GGG BBB), or as a common color name in all caps and underscores."));
+	                       ->setHelp("Changes the DS4's light bar, or the Steam Controller 2026's light while a configuration sets a colour (unset, that controller keeps its own white, charging and low-battery patterns). Either enter as a hex code (xRRGGBB), as three decimal values between 0 and 255 (RRR GGG BBB), or as a common color name in all caps and underscores."));
 
 	auto scroll_sens = new JSMSetting<FloatXY>(SettingID::SCROLL_SENS, { 30.f, 30.f });
 	scroll_sens->setFilter(&filterFloatPair);
@@ -4273,7 +4638,18 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	touchpad_mode->setFilter(&filterInvalidValue<TouchpadMode, TouchpadMode::INVALID>);
 	SettingsManager::add(touchpad_mode);
 	commandRegistry->add((new JSMAssignment<TouchpadMode>("TOUCHPAD_MODE", *touchpad_mode))
-	                       ->setHelp("Assign a mode to the touchpad. Valid values are GRID_AND_STICK or MOUSE."));
+	                       ->setHelp("Assign a mode to the touchpad. Valid values are GRID_AND_STICK, MOUSE, MOUSE_AREA or PS_TOUCHPAD. MOUSE_AREA puts the cursor where your finger is inside the rectangle set by TOUCHPAD_AREA."));
+
+	auto touchpad_area = new JSMSetting<MouseArea>(SettingID::TOUCHPAD_AREA, MouseArea{});
+	SettingsManager::add(touchpad_area);
+	commandRegistry->add((new JSMAssignment<MouseArea>("TOUCHPAD_AREA", *touchpad_area))
+	                       ->setHelp("The part of the screen a MOUSE_AREA touchpad maps to, as four fractions of the screen the game is on: left top width height, each between 0 and 1. The default 0 0 1 1 is the whole screen. Fractions rather than pixels, so the same profile lands on the same part of any monitor."));
+
+	auto touchpad_area_fit = new JSMSetting<MouseAreaFit>(SettingID::TOUCHPAD_AREA_FIT, MouseAreaFit::STRETCH);
+	touchpad_area_fit->setFilter(&filterInvalidValue<MouseAreaFit, MouseAreaFit::INVALID>);
+	SettingsManager::add(touchpad_area_fit);
+	commandRegistry->add((new JSMAssignment<MouseAreaFit>("TOUCHPAD_AREA_FIT", *touchpad_area_fit))
+	                       ->setHelp("How a MOUSE_AREA touchpad is laid over its area when their shapes differ. STRETCH (default): the whole pad is the whole area, so a square pad over a wide area moves faster sideways. UNIFORM: the same travel per millimetre both ways; the pad is scaled to cover the area and centred, and its spare travel clamps to the area's edge."));
 
 	auto touch_ring_mode = new JSMSetting<RingMode>(SettingID::TOUCH_RING_MODE, RingMode::OUTER);
 	touch_ring_mode->setFilter(&filterInvalidValue<RingMode, RingMode::INVALID>);
@@ -4530,6 +4906,10 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(connect_sound);
 	commandRegistry->add((new JSMAssignment<int>("CONNECT_SOUND", *connect_sound))
 	                       ->setHelp("Built-in Steam Controller tune (0-13) played when the controller connects to JoyShockMapper. -1 (default) plays nothing."));
+	auto connect_sound_file = new JSMSetting<PathString>(SettingID::CONNECT_SOUND_FILE, PathString(string{}));
+	SettingsManager::add(connect_sound_file);
+	commandRegistry->add((new JSMAssignment<PathString>("CONNECT_SOUND_FILE", *connect_sound_file))
+	                       ->setHelp("Relative tone sequence file played on connection instead of CONNECT_SOUND. NONE clears it."));
 
 	auto left_grip_release_delay = new JSMSetting<float>(SettingID::LEFT_GRIP_RELEASE_DELAY, 0.f);
 	left_grip_release_delay->setFilter([](auto, auto next) { return clamp(next, 0.f, 2000.f); });
@@ -4547,7 +4927,30 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	led_brightness->setFilter([](auto, auto next) { return clamp(next, -1, 100); });
 	SettingsManager::add(led_brightness);
 	commandRegistry->add((new JSMAssignment<int>("LED_BRIGHTNESS", *led_brightness))
-	                       ->setHelp("Steam Controller light brightness, 0-100. -1 (default) leaves it unchanged. Bind a button to the command \"LED_BRIGHTNESS = n\" to change it from the controller."));
+	                       ->setHelp("Steam Controller light brightness, 0-100. -1 leaves it unchanged. A button command sets it until changed again; BUTTON,LED_BRIGHTNESS applies while that button is held."));
+
+	// Stored in the controller, so it is written only when it changes, and holds
+	// with JoyShockMapper closed.
+	auto boot_sound_level = new JSMSetting<int>(SettingID::BOOT_SOUND_LEVEL, -1);
+	boot_sound_level->setFilter([](auto, auto next) { return clamp(next, -1, 2); });
+	SettingsManager::add(boot_sound_level);
+	commandRegistry->add((new JSMAssignment<int>("BOOT_SOUND_LEVEL", *boot_sound_level))
+	                       ->setHelp("How loud the Steam Controller plays its own power-on and power-off jingle: 2 normal, 1 quiet, 0 silent (which also silences its lost-connection cue). Stored in the controller, so it keeps applying with JoyShockMapper closed. -1 (default) leaves the controller's setting alone."));
+
+	// The 2026's pads are canted about 10.6 degrees outward. These turn each
+	// pad's reading back, where the pad is read, so everything downstream and
+	// the telemetry Studio draws see one frame.
+	auto left_touchpad_rotation = new JSMSetting<float>(SettingID::LEFT_TOUCHPAD_ROTATION, 0.f);
+	left_touchpad_rotation->setFilter([](auto current, auto next) { return isfinite(next) && next >= -180.f && next <= 180.f ? next : current; });
+	SettingsManager::add(left_touchpad_rotation);
+	commandRegistry->add((new JSMAssignment<float>("LEFT_TOUCHPAD_ROTATION", *left_touchpad_rotation))
+	                       ->setHelp("Turns the left touchpad's reading about its centre, in degrees from -180 to 180; positive is clockwise as you look at the controller. The Steam Controller 2026's left pad is canted about 10.7 degrees, so 10.7 makes a swipe straight up the controller read as straight up. Applied before grids, menus, the touch stick and the mouse, and to the position Studio shows. Global: a chord or modeshift cannot change it. 0 (default) leaves the pad as mounted."));
+
+	auto right_touchpad_rotation = new JSMSetting<float>(SettingID::RIGHT_TOUCHPAD_ROTATION, 0.f);
+	right_touchpad_rotation->setFilter([](auto current, auto next) { return isfinite(next) && next >= -180.f && next <= 180.f ? next : current; });
+	SettingsManager::add(right_touchpad_rotation);
+	commandRegistry->add((new JSMAssignment<float>("RIGHT_TOUCHPAD_ROTATION", *right_touchpad_rotation))
+	                       ->setHelp("Turns the right touchpad's reading about its centre, in degrees from -180 to 180; positive is clockwise as you look at the controller. The Steam Controller 2026's right pad is canted about 10.5 degrees the other way, so -10.5 makes a swipe straight up the controller read as straight up. Global: a chord or modeshift cannot change it. 0 (default) leaves the pad as mounted."));
 
 	auto disable_hardware_gyro_calibration = new JSMSetting<Switch>(SettingID::DISABLE_HARDWARE_GYRO_CALIBRATION, Switch::ON);
 	disable_hardware_gyro_calibration->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
@@ -4560,6 +4963,19 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(shutdown_sound);
 	commandRegistry->add((new JSMAssignment<int>("SHUTDOWN_SOUND", *shutdown_sound))
 	                       ->setHelp("Built-in Steam Controller tune (0-13) played before TURN_OFF_CONTROLLER powers the controller off. -1 (default) plays nothing."));
+	auto shutdown_sound_file = new JSMSetting<PathString>(SettingID::SHUTDOWN_SOUND_FILE, PathString(string{}));
+	SettingsManager::add(shutdown_sound_file);
+	commandRegistry->add((new JSMAssignment<PathString>("SHUTDOWN_SOUND_FILE", *shutdown_sound_file))
+	                       ->setHelp("Relative tone sequence file played before TURN_OFF_CONTROLLER instead of SHUTDOWN_SOUND. NONE clears it."));
+
+	// The firmware's own tunes are tone requests aimed at the two grip motors;
+	// a tone sequence sent to the trackpads' actuators has a different voice
+	// however well it is arranged, which is why GRIPS is the default.
+	auto sound_actuators = new JSMSetting<SoundActuators>(SettingID::SOUND_ACTUATORS, SoundActuators::GRIPS);
+	sound_actuators->setFilter(&filterInvalidValue<SoundActuators, SoundActuators::INVALID>);
+	SettingsManager::add(sound_actuators);
+	commandRegistry->add((new JSMAssignment<SoundActuators>("SOUND_ACTUATORS", *sound_actuators))
+	                       ->setHelp("Which of the Steam Controller's actuators play a tone sequence (CONNECT_SOUND_FILE, SHUTDOWN_SOUND_FILE, PLAY_SOUND with a file): GRIPS (default) is the pair of motors behind the grips that the controller's own tunes use, PADS is the trackpads' actuators, BOTH is all four."));
 
 	auto sound_gain = new JSMSetting<int>(SettingID::SOUND_GAIN, 0);
 	sound_gain->setFilter([](auto, auto next) { return clamp(next, -30, 6); });
@@ -4627,6 +5043,88 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(touch_release_haptic_effect);
 	commandRegistry->add((new JSMAssignment<HapticEffect>("TOUCHPAD_RELEASE_HAPTIC_EFFECT", *touch_release_haptic_effect))
 	                       ->setHelp("Which effect the pad actuator plays when you let the pad click back up. Same valid values as TOUCHPAD_HAPTIC_EFFECT. Defaults to TICK, lighter than the press so the two edges are told apart."));
+
+	// Independent actuator profiles; legacy shared defaults stay active until ON.
+	auto left_touchpad_haptics = new JSMSetting<Switch>(SettingID::LEFT_TOUCHPAD_HAPTICS, Switch::OFF);
+	left_touchpad_haptics->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(left_touchpad_haptics);
+	commandRegistry->add((new JSMAssignment<Switch>("LEFT_TOUCHPAD_HAPTICS", *left_touchpad_haptics))
+	                       ->setHelp("Use this pad's independent movement/click/release feedback settings when ON. OFF (default) uses shared TOUCHPAD_* feedback; held setting chords are supported."));
+	auto left_touchpad_haptic_intensity = new JSMSetting<float>(SettingID::LEFT_TOUCHPAD_HAPTIC_INTENSITY, 0.f);
+	left_touchpad_haptic_intensity->setFilter([](auto, auto next) { return clamp(next, 0.f, 100.f); });
+	SettingsManager::add(left_touchpad_haptic_intensity);
+	commandRegistry->add((new JSMAssignment<float>("LEFT_TOUCHPAD_HAPTIC_INTENSITY", *left_touchpad_haptic_intensity))
+	                       ->setHelp("Strength for this pad actuator, 0-100 percent; 0 disables this feedback event. Used only while LEFT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto left_touchpad_haptic_effect = new JSMSetting<HapticEffect>(SettingID::LEFT_TOUCHPAD_HAPTIC_EFFECT, HapticEffect::TICK);
+	left_touchpad_haptic_effect->setFilter(&filterInvalidValue<HapticEffect, HapticEffect::INVALID>);
+	SettingsManager::add(left_touchpad_haptic_effect);
+	commandRegistry->add((new JSMAssignment<HapticEffect>("LEFT_TOUCHPAD_HAPTIC_EFFECT", *left_touchpad_haptic_effect))
+	                       ->setHelp("Effect for this pad actuator; accepts the same firmware effects as the shared feedback setting. Used only while LEFT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto left_touchpad_haptic_interval = new JSMSetting<float>(SettingID::LEFT_TOUCHPAD_HAPTIC_INTERVAL, 250.f);
+	left_touchpad_haptic_interval->setFilter([](auto, auto next) { return clamp(next, 1.f, 20000.f); });
+	SettingsManager::add(left_touchpad_haptic_interval);
+	commandRegistry->add((new JSMAssignment<float>("LEFT_TOUCHPAD_HAPTIC_INTERVAL", *left_touchpad_haptic_interval))
+	                       ->setHelp("Finger travel between movement ticks, in pad pixels (1-20000). Used only while LEFT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto left_touchpad_click_haptic_intensity = new JSMSetting<float>(SettingID::LEFT_TOUCHPAD_CLICK_HAPTIC_INTENSITY, 0.f);
+	left_touchpad_click_haptic_intensity->setFilter([](auto, auto next) { return clamp(next, 0.f, 100.f); });
+	SettingsManager::add(left_touchpad_click_haptic_intensity);
+	commandRegistry->add((new JSMAssignment<float>("LEFT_TOUCHPAD_CLICK_HAPTIC_INTENSITY", *left_touchpad_click_haptic_intensity))
+	                       ->setHelp("Strength for this pad actuator, 0-100 percent; 0 disables this feedback event. Used only while LEFT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto left_touchpad_click_haptic_effect = new JSMSetting<HapticEffect>(SettingID::LEFT_TOUCHPAD_CLICK_HAPTIC_EFFECT, HapticEffect::CLICK);
+	left_touchpad_click_haptic_effect->setFilter(&filterInvalidValue<HapticEffect, HapticEffect::INVALID>);
+	SettingsManager::add(left_touchpad_click_haptic_effect);
+	commandRegistry->add((new JSMAssignment<HapticEffect>("LEFT_TOUCHPAD_CLICK_HAPTIC_EFFECT", *left_touchpad_click_haptic_effect))
+	                       ->setHelp("Effect for this pad actuator; accepts the same firmware effects as the shared feedback setting. Used only while LEFT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto left_touchpad_release_haptic_intensity = new JSMSetting<float>(SettingID::LEFT_TOUCHPAD_RELEASE_HAPTIC_INTENSITY, 0.f);
+	left_touchpad_release_haptic_intensity->setFilter([](auto, auto next) { return clamp(next, 0.f, 100.f); });
+	SettingsManager::add(left_touchpad_release_haptic_intensity);
+	commandRegistry->add((new JSMAssignment<float>("LEFT_TOUCHPAD_RELEASE_HAPTIC_INTENSITY", *left_touchpad_release_haptic_intensity))
+	                       ->setHelp("Strength for this pad actuator, 0-100 percent; 0 disables this feedback event. Used only while LEFT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto left_touchpad_release_haptic_effect = new JSMSetting<HapticEffect>(SettingID::LEFT_TOUCHPAD_RELEASE_HAPTIC_EFFECT, HapticEffect::TICK);
+	left_touchpad_release_haptic_effect->setFilter(&filterInvalidValue<HapticEffect, HapticEffect::INVALID>);
+	SettingsManager::add(left_touchpad_release_haptic_effect);
+	commandRegistry->add((new JSMAssignment<HapticEffect>("LEFT_TOUCHPAD_RELEASE_HAPTIC_EFFECT", *left_touchpad_release_haptic_effect))
+	                       ->setHelp("Effect for this pad actuator; accepts the same firmware effects as the shared feedback setting. Used only while LEFT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto right_touchpad_haptics = new JSMSetting<Switch>(SettingID::RIGHT_TOUCHPAD_HAPTICS, Switch::OFF);
+	right_touchpad_haptics->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(right_touchpad_haptics);
+	commandRegistry->add((new JSMAssignment<Switch>("RIGHT_TOUCHPAD_HAPTICS", *right_touchpad_haptics))
+	                       ->setHelp("Use this pad's independent movement/click/release feedback settings when ON. OFF (default) uses shared TOUCHPAD_* feedback; held setting chords are supported."));
+	auto right_touchpad_haptic_intensity = new JSMSetting<float>(SettingID::RIGHT_TOUCHPAD_HAPTIC_INTENSITY, 0.f);
+	right_touchpad_haptic_intensity->setFilter([](auto, auto next) { return clamp(next, 0.f, 100.f); });
+	SettingsManager::add(right_touchpad_haptic_intensity);
+	commandRegistry->add((new JSMAssignment<float>("RIGHT_TOUCHPAD_HAPTIC_INTENSITY", *right_touchpad_haptic_intensity))
+	                       ->setHelp("Strength for this pad actuator, 0-100 percent; 0 disables this feedback event. Used only while RIGHT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto right_touchpad_haptic_effect = new JSMSetting<HapticEffect>(SettingID::RIGHT_TOUCHPAD_HAPTIC_EFFECT, HapticEffect::TICK);
+	right_touchpad_haptic_effect->setFilter(&filterInvalidValue<HapticEffect, HapticEffect::INVALID>);
+	SettingsManager::add(right_touchpad_haptic_effect);
+	commandRegistry->add((new JSMAssignment<HapticEffect>("RIGHT_TOUCHPAD_HAPTIC_EFFECT", *right_touchpad_haptic_effect))
+	                       ->setHelp("Effect for this pad actuator; accepts the same firmware effects as the shared feedback setting. Used only while RIGHT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto right_touchpad_haptic_interval = new JSMSetting<float>(SettingID::RIGHT_TOUCHPAD_HAPTIC_INTERVAL, 250.f);
+	right_touchpad_haptic_interval->setFilter([](auto, auto next) { return clamp(next, 1.f, 20000.f); });
+	SettingsManager::add(right_touchpad_haptic_interval);
+	commandRegistry->add((new JSMAssignment<float>("RIGHT_TOUCHPAD_HAPTIC_INTERVAL", *right_touchpad_haptic_interval))
+	                       ->setHelp("Finger travel between movement ticks, in pad pixels (1-20000). Used only while RIGHT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto right_touchpad_click_haptic_intensity = new JSMSetting<float>(SettingID::RIGHT_TOUCHPAD_CLICK_HAPTIC_INTENSITY, 0.f);
+	right_touchpad_click_haptic_intensity->setFilter([](auto, auto next) { return clamp(next, 0.f, 100.f); });
+	SettingsManager::add(right_touchpad_click_haptic_intensity);
+	commandRegistry->add((new JSMAssignment<float>("RIGHT_TOUCHPAD_CLICK_HAPTIC_INTENSITY", *right_touchpad_click_haptic_intensity))
+	                       ->setHelp("Strength for this pad actuator, 0-100 percent; 0 disables this feedback event. Used only while RIGHT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto right_touchpad_click_haptic_effect = new JSMSetting<HapticEffect>(SettingID::RIGHT_TOUCHPAD_CLICK_HAPTIC_EFFECT, HapticEffect::CLICK);
+	right_touchpad_click_haptic_effect->setFilter(&filterInvalidValue<HapticEffect, HapticEffect::INVALID>);
+	SettingsManager::add(right_touchpad_click_haptic_effect);
+	commandRegistry->add((new JSMAssignment<HapticEffect>("RIGHT_TOUCHPAD_CLICK_HAPTIC_EFFECT", *right_touchpad_click_haptic_effect))
+	                       ->setHelp("Effect for this pad actuator; accepts the same firmware effects as the shared feedback setting. Used only while RIGHT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto right_touchpad_release_haptic_intensity = new JSMSetting<float>(SettingID::RIGHT_TOUCHPAD_RELEASE_HAPTIC_INTENSITY, 0.f);
+	right_touchpad_release_haptic_intensity->setFilter([](auto, auto next) { return clamp(next, 0.f, 100.f); });
+	SettingsManager::add(right_touchpad_release_haptic_intensity);
+	commandRegistry->add((new JSMAssignment<float>("RIGHT_TOUCHPAD_RELEASE_HAPTIC_INTENSITY", *right_touchpad_release_haptic_intensity))
+	                       ->setHelp("Strength for this pad actuator, 0-100 percent; 0 disables this feedback event. Used only while RIGHT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
+	auto right_touchpad_release_haptic_effect = new JSMSetting<HapticEffect>(SettingID::RIGHT_TOUCHPAD_RELEASE_HAPTIC_EFFECT, HapticEffect::TICK);
+	right_touchpad_release_haptic_effect->setFilter(&filterInvalidValue<HapticEffect, HapticEffect::INVALID>);
+	SettingsManager::add(right_touchpad_release_haptic_effect);
+	commandRegistry->add((new JSMAssignment<HapticEffect>("RIGHT_TOUCHPAD_RELEASE_HAPTIC_EFFECT", *right_touchpad_release_haptic_effect))
+	                       ->setHelp("Effect for this pad actuator; accepts the same firmware effects as the shared feedback setting. Used only while RIGHT_TOUCHPAD_HAPTICS = ON; supports held setting chords."));
 
 	// Clicking a pad you are also using as a mouse rolls the finger, and that roll
 	// is a camera movement nobody asked for. Off by default: with no click bound
@@ -4699,7 +5197,18 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 		left_touchpad_mode->setFilter(&filterInvalidValue<TouchpadMode, TouchpadMode::INVALID>);
 		SettingsManager::add(left_touchpad_mode);
 		commandRegistry->add((new JSMAssignment<TouchpadMode>("LEFT_TOUCHPAD_MODE", *left_touchpad_mode))
-		                       ->setHelp("Assign a mode to the left touchpad. Valid values are GRID_AND_STICK or MOUSE."));
+		                       ->setHelp("Assign a mode to the left touchpad. Valid values are GRID_AND_STICK, MOUSE or MOUSE_AREA."));
+
+		auto left_touchpad_area = new JSMSetting<MouseArea>(SettingID::LEFT_TOUCHPAD_AREA, MouseArea{});
+		SettingsManager::add(left_touchpad_area);
+		commandRegistry->add((new JSMAssignment<MouseArea>("LEFT_TOUCHPAD_AREA", *left_touchpad_area))
+		                       ->setHelp("The part of the screen the left pad maps to in MOUSE_AREA mode: left top width height, each a fraction of the screen between 0 and 1. Default 0 0 1 1, the whole screen."));
+
+		auto left_touchpad_area_fit = new JSMSetting<MouseAreaFit>(SettingID::LEFT_TOUCHPAD_AREA_FIT, MouseAreaFit::STRETCH);
+		left_touchpad_area_fit->setFilter(&filterInvalidValue<MouseAreaFit, MouseAreaFit::INVALID>);
+		SettingsManager::add(left_touchpad_area_fit);
+		commandRegistry->add((new JSMAssignment<MouseAreaFit>("LEFT_TOUCHPAD_AREA_FIT", *left_touchpad_area_fit))
+		                       ->setHelp("How the left pad is laid over its MOUSE_AREA when their shapes differ: STRETCH (default) or UNIFORM. See TOUCHPAD_AREA_FIT."));
 
 		auto left_grid_size = new JSMSetting<FloatXY>(SettingID::LEFT_GRID_SIZE, FloatXY{ 2.f, 1.f });
 		left_grid_size->setFilter([](auto current, auto next)
@@ -4778,7 +5287,18 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 		right_touchpad_mode->setFilter(&filterInvalidValue<TouchpadMode, TouchpadMode::INVALID>);
 		SettingsManager::add(right_touchpad_mode);
 		commandRegistry->add((new JSMAssignment<TouchpadMode>("RIGHT_TOUCHPAD_MODE", *right_touchpad_mode))
-		                       ->setHelp("Assign a mode to the right touchpad. Valid values are GRID_AND_STICK or MOUSE."));
+		                       ->setHelp("Assign a mode to the right touchpad. Valid values are GRID_AND_STICK, MOUSE or MOUSE_AREA."));
+
+		auto right_touchpad_area = new JSMSetting<MouseArea>(SettingID::RIGHT_TOUCHPAD_AREA, MouseArea{});
+		SettingsManager::add(right_touchpad_area);
+		commandRegistry->add((new JSMAssignment<MouseArea>("RIGHT_TOUCHPAD_AREA", *right_touchpad_area))
+		                       ->setHelp("The part of the screen the right pad maps to in MOUSE_AREA mode: left top width height, each a fraction of the screen between 0 and 1. Default 0 0 1 1, the whole screen."));
+
+		auto right_touchpad_area_fit = new JSMSetting<MouseAreaFit>(SettingID::RIGHT_TOUCHPAD_AREA_FIT, MouseAreaFit::STRETCH);
+		right_touchpad_area_fit->setFilter(&filterInvalidValue<MouseAreaFit, MouseAreaFit::INVALID>);
+		SettingsManager::add(right_touchpad_area_fit);
+		commandRegistry->add((new JSMAssignment<MouseAreaFit>("RIGHT_TOUCHPAD_AREA_FIT", *right_touchpad_area_fit))
+		                       ->setHelp("How the right pad is laid over its MOUSE_AREA when their shapes differ: STRETCH (default) or UNIFORM. See TOUCHPAD_AREA_FIT."));
 
 		auto right_grid_size = new JSMSetting<FloatXY>(SettingID::RIGHT_GRID_SIZE, FloatXY{ 2.f, 1.f });
 		right_grid_size->setFilter([](auto current, auto next)
@@ -4978,6 +5498,16 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new JSMAssignment<float>(*right_stick_unpower))
 	                       ->setHelp("When outputting as a virtual controller, account for this power curve being applied in the target game."));
 
+	auto left_stick_deadzone_probe = new JSMSetting<Switch>(SettingID::LEFT_STICK_DEADZONE_PROBE, Switch::ON);
+	left_stick_deadzone_probe->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(left_stick_deadzone_probe);
+	commandRegistry->add((new JSMAssignment<Switch>(*left_stick_deadzone_probe))
+	                       ->setHelp("Send the inner anti-deadzone radius at rest to find a game's deadzone. OFF returns idle output to zero. ON preserves legacy gyro-stick calibration behavior."));
+	auto right_stick_deadzone_probe = new JSMSetting<Switch>(SettingID::RIGHT_STICK_DEADZONE_PROBE, Switch::ON);
+	right_stick_deadzone_probe->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(right_stick_deadzone_probe);
+	commandRegistry->add((new JSMAssignment<Switch>(*right_stick_deadzone_probe))
+	                       ->setHelp("Send the inner anti-deadzone radius at rest to find a game's deadzone. OFF returns idle output to zero. ON preserves legacy gyro-stick calibration behavior."));
 	auto left_stick_virtual_scale = new JSMSetting<float>(SettingID::LEFT_STICK_VIRTUAL_SCALE, 1.f);
 	left_stick_virtual_scale->setFilter(&filterFloat);
 	SettingsManager::add(left_stick_virtual_scale);
@@ -5015,6 +5545,20 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	                       ->setHelp("Whether gyro should be converted to mouse, left stick, or right stick movement. If you don't want to use gyro aiming, simply leave GYRO_SENS set to 0."));
 
 	auto flick_stick_output = new JSMSetting<GyroOutput>(SettingID::FLICK_STICK_OUTPUT, GyroOutput::MOUSE);
+	auto gyro_deflection = new JSMSetting<Switch>(SettingID::GYRO_STICK_DEFLECTION, Switch::OFF);
+	gyro_deflection->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(gyro_deflection);
+	commandRegistry->add((new JSMAssignment<Switch>(*gyro_deflection))->setHelp("OFF maps gyro velocity to a virtual stick camera. ON maps selected-axis angular travel from activation neutral to stick deflection. Only LEFT_STICK and RIGHT_STICK output use this setting; camera sensitivity and acceleration do not affect deflection."));
+	auto gyro_deflection_range = new JSMSetting<FloatXY>(SettingID::GYRO_DEFLECTION_RANGE, { 30.f, 30.f });
+	gyro_deflection_range->setFilter([](const FloatXY &oldValue, FloatXY next) {
+		return std::isfinite(next.first) && std::isfinite(next.second) && next.first >= 1.f && next.first <= 180.f && next.second >= 1.f && next.second <= 180.f ? next : oldValue;
+	});
+	SettingsManager::add(gyro_deflection_range);
+	commandRegistry->add((new JSMAssignment<FloatXY>(*gyro_deflection_range))->setHelp("Horizontal and vertical selected-axis travel in degrees to reach full deflection, 1-180. One value sets both axes. Default 30 30. This integrates filtered angular velocity rather than capturing an absolute orientation."));
+	auto gyro_deflection_extents = new JSMSetting<Switch>(SettingID::GYRO_DEFLECTION_LOCK_EXTENTS, Switch::ON);
+	gyro_deflection_extents->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+	SettingsManager::add(gyro_deflection_extents);
+	commandRegistry->add((new JSMAssignment<Switch>(*gyro_deflection_extents))->setHelp("ON discards travel beyond each deflection limit so reversing responds immediately. OFF retains excess angular travel until you rotate back within the configured range. Default ON."));
 	flick_stick_output->setFilter(&filterInvalidValue<GyroOutput, GyroOutput::INVALID>);
 	SettingsManager::add(flick_stick_output);
 	commandRegistry->add((new JSMAssignment<GyroOutput>(*flick_stick_output))
@@ -5250,6 +5794,18 @@ int main(int argc, char *argv[])
 	// Add Macro commands
 	commandRegistry.add((new JSMMacro("RESET_MAPPINGS"))->SetMacro(bind(&do_RESET_MAPPINGS, &commandRegistry))->setHelp("Delete all custom bindings and reset to default,\nand run script OnReset.txt in JSM_DIRECTORY."));
 	commandRegistry.add((new JSMMacro("NO_GYRO_BUTTON"))->SetMacro(bind(&do_NO_GYRO_BUTTON))->setHelp("Enable gyro at all times, without any GYRO_OFF binding."));
+  commandRegistry.add((new JSMMacro("VIRTUAL_MENU"))->SetMacro([](JSMMacro *, string_view args) { return VirtualMenus::define(args); })
+    ->setHelp("Define a reusable menu: id RADIAL|TOUCH|HOTBAR itemCount columns centreDeadzone. Up to 16 menus, 25 actions each."));
+  commandRegistry.add((new JSMMacro("VIRTUAL_MENUS"))->SetMacro([](JSMMacro *, string_view args) {
+    const bool valid = VirtualMenus::replace(args);
+    if (!valid) ConfigErrors::report("Invalid named-menu catalog. The previous catalog was retained.");
+    return valid;
+  })
+    ->setHelp("Replace the named-menu catalog atomically: = HEX:<UTF-8 menu statements>. JSM Evolved edits this through its reusable menu library. Layer overrides replace the catalog as one setting."));
+  commandRegistry.add((new JSMMacro("VIRTUAL_MENU_ACTION"))->SetMacro([](JSMMacro *, string_view args) { return VirtualMenus::action(args); })
+    ->setHelp("Set one named-menu action: menuId oneBasedItem ordinary JSM binding expression. Item 0 is the optional radial centre action."));
+  commandRegistry.add((new JSMMacro("VIRTUAL_MENU_SOURCE"))->SetMacro([](JSMMacro *, string_view args) { return VirtualMenus::attach(args); })
+    ->setHelp("Attach a menu: menuId LEFT|RIGHT|LSTICK|RSTICK|DPAD|ABXY HOLD|TOGGLE|ALWAYS activationInput CLICK|TOUCH_RELEASE|ACTIVATION_RELEASE|CONTINUOUS confirmInput cancelInput. NONE uses the source click, D-pad up or north face button. DPAD and ABXY navigate hotbars."));
 	commandRegistry.add((new JSMMacro("LIST_CONTROLLERS"))->SetMacro(bind(&do_LIST_CONTROLLERS))->setHelp("List currently available SDL controllers without connecting them."));
 	commandRegistry.add((new JSMMacro("RECONNECT_CONTROLLERS"))->SetMacro(bind(&do_RECONNECT_CONTROLLERS, placeholders::_2, [&commandRegistry]()
 		{
@@ -5268,9 +5824,10 @@ int main(int argc, char *argv[])
 	commandRegistry.add((new JSMMacro("FINISH_GYRO_CALIBRATION"))->SetMacro(bind(&do_FINISH_GYRO_CALIBRATION))->setHelp("Finish calibrating the gyro in all controllers."));
 	commandRegistry.add((new JSMMacro("RESTART_GYRO_CALIBRATION"))->SetMacro(bind(&do_RESTART_GYRO_CALIBRATION))->setHelp("Start calibrating the gyro in all controllers."));
 	commandRegistry.add((new JSMMacro("CALIBRATE_GYRO"))->SetMacro(bind(&do_CALIBRATE_GYRO))->setHelp("Calibrate the gyro in all controllers: wait GYRO_CALIBRATION_DELAY seconds, then calibrate for GYRO_CALIBRATION_TIME seconds. Returns immediately; progress is reported to JSM Studio's overlay."));
-	commandRegistry.add((new JSMMacro("PLAY_SOUND"))->SetMacro(bind(&do_PLAY_SOUND, placeholders::_2))->setHelp("Play one of the Steam Controller's built-in tunes, 0-13, on every connected controller."));
+	commandRegistry.add((new JSMMacro("PLAY_SOUND"))->SetMacro(bind(&do_PLAY_SOUND, placeholders::_2))->setHelp("Play a built-in Steam Controller tune (0-13) or a relative tone file on every connected controller. Optional gain in dB."));
 	commandRegistry.add((new JSMMacro("TURN_OFF_CONTROLLER"))->SetMacro(bind(&do_TURN_OFF_CONTROLLER))->setHelp("Send the Steam Controller power-off report. Bind this to your preferred shutdown shortcut. Only takes effect on hardware that supports it (Steam Controller 2026); bind it to a chord like a face button held together with your Guide or Quick Access Menu button."));
 	commandRegistry.add((new JSMMacro("SET_MOTION_STICK_NEUTRAL"))->SetMacro(bind(&do_SET_MOTION_STICK_NEUTRAL))->setHelp("Set the neutral orientation for motion stick to whatever the orientation of the controller is."));
+	commandRegistry.add((new JSMMacro("RECENTER_GYRO_DEFLECTION"))->SetMacro(bind(&do_RECENTER_GYRO_DEFLECTION))->setHelp("Capture a new angular deflection neutral for every connected controller on its next poll. Aiming activation also captures a fresh neutral. Does not change gravity motion-stick neutral or raw motion passthrough."));
 	commandRegistry.add((new JSMMacro("README"))->SetMacro(bind(&do_README))->setHelp("Open the latest JoyShockMapper README in your browser."));
 	commandRegistry.add((new JSMMacro("WHITELIST_SHOW"))->SetMacro(bind(&do_WHITELIST_SHOW))->setHelp("Open the whitelister application"));
 	commandRegistry.add((new JSMMacro("WHITELIST_ADD"))->SetMacro(bind(&do_WHITELIST_ADD))->setHelp("Add JoyShockMapper to the whitelisted applications."));
