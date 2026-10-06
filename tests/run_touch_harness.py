@@ -115,6 +115,7 @@ def main() -> int:
         tmp = Path(tmp)
         shutil.copyfile(ROOT / 'JoyShockMapper/include/InputGuards.h', tmp / 'InputGuards.h')
         shutil.copyfile(ROOT / 'JoyShockMapper/include/TouchMouseResampler.h', tmp / 'TouchMouseResampler.h')
+        shutil.copyfile(ROOT / 'JoyShockMapper/include/TouchGridRouting.h', tmp / 'TouchGridRouting.h')
         (tmp / 'lifted.inc').write_text(lifted, encoding='utf-8')
         filter_src = source(ROOT / 'JoyShockMapper/src/JoyShock.cpp')
         start = filter_src.index('float OneEuroFilter::filter(float x, float dt, float minCutoff, float beta)')

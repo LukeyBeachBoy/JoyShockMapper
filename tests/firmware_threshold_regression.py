@@ -155,7 +155,11 @@ def test_grip_haptic_plays_a_canned_effect_of_the_users_choosing():
     # OFF is a real firmware effect (stop), so it has to short-circuit rather than
     # be sent as a pulse.
     assert 'effect == HapticEffect::OFF' in body
-    wire = SDL.split('static bool sendHapticEffect', 1)[1].split('\n\t}', 1)[0]
+    # sendHapticEffect routes the canned effects through sendHapticCommand,
+    # which is where the wire report is built.
+    effect = SDL.split('static bool sendHapticEffect', 1)[1].split('\n\t}', 1)[0]
+    assert 'return sendHapticCommand(gamepad, side, effect, gainDb);' in effect
+    wire = SDL.split('static bool sendHapticCommand', 1)[1].split('\n\t}', 1)[0]
     assert 'buffer[0] = TRITON_ID_OUT_REPORT_HAPTIC_COMMAND;' in wire
     assert 'TRITON_HAPTIC_COMMAND_BYTES = 4' in SDL
 
