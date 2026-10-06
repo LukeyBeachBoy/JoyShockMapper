@@ -29,7 +29,9 @@ def test_touch_deltas_are_never_truncated_to_integers():
 
 def test_one_euro_filter_runs_on_position_not_on_deltas():
     body = HEADER.split('struct TouchMousePipeline', 1)[1].split('\n};', 1)[0]
-    assert 'OneEuroFilter posFilterX, posFilterY;' in body
+    # e9aace1 moved touch position onto TouchPositionFilter, a double-precision
+    # One Euro variant; the filter still runs on absolute position.
+    assert 'TouchPositionFilter posFilterX, posFilterY;' in body
     assert 'posFilterX.filter(rawX, dt, minCutoff, beta)' in body
     assert 'posFilterY.filter(rawY, dt, minCutoff, beta)' in body
     # The old fixed-alpha EMA on deltas plus lead compensation must be gone: the
