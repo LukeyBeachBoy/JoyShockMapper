@@ -681,6 +681,16 @@ static bool processTouchArea(shared_ptr<JoyShock> &js, TOUCH_POINT &point, bool 
 
 void touchCallback(int jcHandle, TOUCH_STATE newState, TOUCH_STATE prevState, float delta_time)
 {
+    // Don't wait forever for the configuration lock on the poll thread. The
+    // console thread holds it while it runs a command, and a command that then
+    // needs this thread (RECONNECT_CONTROLLERS waits for it to leave the poll;
+    // tones and power-off take the controller lock) would deadlock against an
+    // unbounded wait -- the mapper froze with the controller in Lizard Mode.
+    // A short wait covers ordinary commands, so no reading is lost (gyro adds
+    // up per reading); only a command that really is waiting on us makes this
+    // reading give way.
+    std::unique_lock<std::recursive_timed_mutex> configurationFree;
+    if (!ControllerContext::lockForPoll(configurationFree)) return;
     ControllerContext::Guard controllerScope(controllerModelForHandle(jcHandle), jcHandle);
 	shared_ptr<JoyShock> js = handle_to_joyshock[jcHandle];
 	int tpSizeX, tpSizeY;
@@ -1328,6 +1338,16 @@ static void syncSteamPhysicalConditions(shared_ptr<JoyShock>& jc)
 
 void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE lastState, IMU_STATE imuState, IMU_STATE lastImuState, float deltaTime)
 {
+    // Don't wait forever for the configuration lock on the poll thread. The
+    // console thread holds it while it runs a command, and a command that then
+    // needs this thread (RECONNECT_CONTROLLERS waits for it to leave the poll;
+    // tones and power-off take the controller lock) would deadlock against an
+    // unbounded wait -- the mapper froze with the controller in Lizard Mode.
+    // A short wait covers ordinary commands, so no reading is lost (gyro adds
+    // up per reading); only a command that really is waiting on us makes this
+    // reading give way.
+    std::unique_lock<std::recursive_timed_mutex> configurationFree;
+    if (!ControllerContext::lockForPoll(configurationFree)) return;
     ControllerContext::Guard controllerScope(controllerModelForHandle(jcHandle), jcHandle);
 
 	shared_ptr<JoyShock> jc = handle_to_joyshock[jcHandle];
@@ -2790,7 +2810,17 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
 	ranges::for_each(right_stick_menu_mappings, callReset);
 	ranges::for_each(right_grid_mappings, callReset);
 
-    if (scoped) { gyroOneEuroEnabled.reset(); return true; }
+    if (scoped)
+    {
+        gyroOneEuroEnabled.reset();
+        // A controller's own configuration (a Hold to swap, or one a binding
+        // loaded) starts from Studio's global defaults too, exactly as a
+        // whole-mapper reset does below. Without them a held chord ran with the
+        // mapper's factory values: no shutdown or connect sound, sound gain 0,
+        // tick time 3.
+        if (registry) registry->loadConfigFile("StudioDefaults.txt");
+        return true;
+    }
 	os_mouse_speed = 1.0f;
 	last_flick_and_rotation = 0.0f;
 	gyroOneEuroEnabled.reset();
@@ -3191,6 +3221,10 @@ bool do_TURN_OFF_CONTROLLER()
 			if (played) waitMs = 1500;
 		}
 	}
+	// Say what was (not) played: "my shutdown sound stopped" is otherwise silent.
+	if (waitMs == 0)
+		COUT_INFO << "TURN_OFF_CONTROLLER: no shutdown sound (SHUTDOWN_SOUND = " << SettingsManager::get<int>(SettingID::SHUTDOWN_SOUND)->value()
+		          << ", SHUTDOWN_SOUND_FILE = \"" << (setting ? string(setting->value()) : string()) << "\").\n";
 	if (waitMs > 0) this_thread::sleep_for(chrono::milliseconds(min(waitMs, tone_sequence::kMaxTotalMs)));
 
 	int delivered = 0;
@@ -3669,6 +3703,15 @@ void onVirtualControllerChange(const ControllerScheme &newScheme)
 		}
 	}
 	// TODO: on NONE clear mappings with vigem commands?
+}
+
+// "VIRTUAL_CONTROLLER = <scheme>" for what this controller uses outside a
+// Hold to swap (its own base, its model, or the whole configuration).
+string virtualControllerAssignment(int handle) {
+    if (handle_to_joyshock.find(handle) == handle_to_joyshock.end()) return {};
+    ControllerContext::Guard scope(controllerModelForHandle(handle), handle);
+    const auto scheme = SettingsManager::getV<ControllerScheme>(SettingID::VIRTUAL_CONTROLLER)->value();
+    return string("VIRTUAL_CONTROLLER = ") + string(magic_enum::enum_name(scheme));
 }
 
 void refreshControllerOutput(int handle) {

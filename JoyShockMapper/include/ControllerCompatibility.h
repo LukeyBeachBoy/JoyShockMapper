@@ -21,6 +21,10 @@ inline std::string key(const std::string &line) {
 inline std::string translateToken(std::string token, bool left) {
     const std::string side = left ? "LEFT_" : "RIGHT_";
     if (token == side + "GRID_REQUIRES_CLICK") return "TOUCHPAD_GRID_REQUIRES_CLICK";
+    // Pad rotation is a global setting for the two angled pads; a one-pad
+    // controller has no TOUCHPAD_ROTATION, and translating it only printed
+    // "Unrecognized command" once per model on every load.
+    if (token == side + "TOUCHPAD_ROTATION") return token;
     if (token.rfind(side, 0) == 0 && (token.rfind(side + "TOUCH", 0) == 0 || token.rfind(side + "GRID_", 0) == 0)) return token.substr(side.size());
     if (std::regex_match(token, std::regex(left ? "LT[0-9]+" : "RT[0-9]+"))) return token.substr(1);
     if (token == (left ? "MISC3" : "MISC2")) return "CAPTURE";
@@ -36,6 +40,12 @@ inline std::string translateKey(const std::string &value, bool left) {
         end = it->position() + it->length();
     }
     return result + value.substr(end);
+}
+// Whether a configuration's lines set `name` themselves (comments ignored).
+inline bool setsKey(const std::vector<std::string> &lines, const std::string &name) {
+    return std::any_of(lines.begin(), lines.end(), [&](const std::string &line) {
+        return line.find('=') != std::string::npos && trim(line).rfind('#', 0) != 0 && key(line) == name;
+    });
 }
 inline std::vector<std::string> fallback(const std::vector<std::string> &lines, bool left, bool forcePad = false) {
     std::set<std::string> explicitKeys;

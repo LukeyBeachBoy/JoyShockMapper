@@ -2,13 +2,27 @@
 #include <string>
 #include <set>
 #include <mutex>
+#include <chrono>
 #include <vector>
 
 // Configuration values inherit device -> controller model -> shared base.
 // A callback's context is thread-local; profile writes serialize with callbacks.
 namespace ControllerContext {
 inline std::set<std::string> isolatedScopes;
-inline std::recursive_mutex mutex;
+// Timed, so the controller thread can give up waiting rather than deadlock
+// against a command that is itself waiting for the controller thread.
+inline std::recursive_timed_mutex mutex;
+// How long the controller thread waits for a running command before it lets
+// that one reading go. Ordinary commands finish well inside it, so no reading
+// is lost (gyro movement adds up reading by reading); a command that is itself
+// waiting for the controller thread (RECONNECT_CONTROLLERS, tones, power-off)
+// can no longer deadlock against it.
+inline constexpr std::chrono::milliseconds kPollLockWait{ 25 };
+// Take the configuration lock for one controller reading; false: skip it.
+inline bool lockForPoll(std::unique_lock<std::recursive_timed_mutex> &lock) {
+    lock = std::unique_lock<std::recursive_timed_mutex>(mutex, std::defer_lock);
+    return lock.try_lock_for(kPollLockWait);
+}
 inline thread_local std::string model;
 inline thread_local int handle = 0;
 inline thread_local std::string writeScope;
@@ -27,7 +41,7 @@ inline std::vector<std::string> readScopes() {
     return handle ? std::vector<std::string>{deviceKey(handle), model} : std::vector<std::string>{model};
 }
 struct Guard {
-    std::unique_lock<std::recursive_mutex> lock{mutex};
+    std::unique_lock<std::recursive_timed_mutex> lock{mutex};
     std::string oldModel = model, oldWrite = writeScope;
     int oldHandle = handle;
     Guard(std::string nextModel, int nextHandle = 0, std::string nextWrite = {}) {

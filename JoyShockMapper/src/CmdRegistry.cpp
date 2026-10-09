@@ -20,6 +20,7 @@ string CmdRegistry::activeProfile() { std::lock_guard<std::mutex> lock(profileMu
 string CmdRegistry::activeProfile(int handle) { std::lock_guard<std::mutex> lock(profileMutex); auto it = deviceProfiles.find(handle); if (it != deviceProfiles.end()) return it->second; auto base = deviceBaseProfiles.find(handle); return base == deviceBaseProfiles.end() ? liveProfile : base->second; }
 extern string controllerModelForHandle(int handle);
 extern void refreshControllerOutput(int handle);
+extern string virtualControllerAssignment(int handle);
 extern void prepareControllerProfile(int handle);
 
 void CmdRegistry::applyControllerVariants() {
@@ -105,12 +106,14 @@ CmdRegistry::CmdRegistry()
 
 bool CmdRegistry::loadConfigFile(string fileName)
 {
-    std::lock_guard<std::recursive_mutex> configurationLock(ControllerContext::mutex);
+    std::lock_guard<std::recursive_timed_mutex> configurationLock(ControllerContext::mutex);
     if (fileName.empty()) return false;
     const int bindingHandle = (!_chordLoading && _loadingFiles.empty() && ControllerContext::handle) ? ControllerContext::handle : 0;
     const auto bindingLines = bindingHandle ? _profileLines : std::vector<string>{};
     const auto bindingLive = bindingHandle ? activeProfile() : string{};
     std::unique_ptr<ControllerContext::Guard> bindingScope;
+    // Hold to swap chords held when a whole configuration loads; put back after it.
+    std::map<int, string> reholdChords;
 
 
 	// https://stackoverflow.com/questions/2602013/read-whole-ascii-file-into-c-stdstring
@@ -141,6 +144,16 @@ bool CmdRegistry::loadConfigFile(string fileName)
     }
         if (_loadingFiles.empty() && !_chordLoading && ControllerContext::writeScope.empty()) {
             std::lock_guard<std::mutex> lock(profileMutex);
+            // A whole-mapper load (Autoload, Studio handing the pad over as the
+            // window in front changes) replaces what each controller falls back
+            // to, but a Hold to swap still held stays held: Studio ends it with
+            // STUDIO_DEVICE_CHORD_END when the button is let go, and the
+            // controller then lands on this new configuration. Dropping it here
+            // left Studio and the mapper disagreeing about whether it was held,
+            // so a swap held across an Alt+Tab never came back properly.
+            // The load's own reset clears every controller's settings, so the
+            // held swaps are put back once it is done (below).
+            reholdChords = deviceProfiles;
             for (const auto &[id, path] : deviceProfiles) { prepareControllerProfile(id); JSMVariableBase::clearScope(ControllerContext::deviceKey(id)); VirtualMenus::clearScope(ControllerContext::deviceKey(id)); }
             for (const auto &[id, path] : deviceBaseProfiles) { JSMVariableBase::clearScope(ControllerContext::baseKey(id)); VirtualMenus::clearScope(ControllerContext::baseKey(id)); }
             deviceProfiles.clear(); deviceBaseProfiles.clear(); ControllerContext::isolatedScopes.clear();
@@ -185,6 +198,20 @@ bool CmdRegistry::loadConfigFile(string fileName)
         _loadingLines.pop_back();
         if (_loadingFiles.empty()) applyControllerVariants();
         if (bindingHandle) { std::lock_guard<std::mutex> lock(profileMutex); deviceBaseProfiles[bindingHandle] = fileName; liveProfile = bindingLive; _profileLines = bindingLines; }
+        // A Hold to swap still held stays held over the configuration that just
+        // loaded (Autoload, or Studio handing the pad over as the window in
+        // front changed). Studio ends it with STUDIO_DEVICE_CHORD_END when the
+        // button is let go, and the controller then lands on this one. Dropping
+        // it left Studio and the mapper disagreeing about whether it was held.
+        if (!reholdChords.empty())
+        {
+            const auto rehold = std::exchange(reholdChords, {});
+            for (const auto &[id, path] : rehold)
+            {
+                COUT_INFO << "[CHORD] Controller " << id << " keeps holding " << path << " over " << fileName << '\n';
+                processLine("STUDIO_DEVICE_CHORD_BEGIN " + std::to_string(id) + " " + path);
+            }
+        }
 
 		return true;
 	}
@@ -266,7 +293,7 @@ bool CmdRegistry::isCommandValid(string_view line) const
 
 void CmdRegistry::processLine(const string& line)
 {
-    std::lock_guard<std::recursive_mutex> configurationLock(ControllerContext::mutex);
+    std::lock_guard<std::recursive_timed_mutex> configurationLock(ControllerContext::mutex);
 	auto trimmedLine = string{ strtrim(line) };
     if (trimmedLine.rfind("# @controller", 0) == 0) {
         if (!_controllerLoading) _profileLines.push_back(trimmedLine);
@@ -292,7 +319,10 @@ void CmdRegistry::processLine(const string& line)
         JSMVariableBase::clearScope(ControllerContext::deviceKey(id));
         ControllerContext::isolatedScopes.erase(ControllerContext::deviceKey(id));
         VirtualMenus::clearScope(ControllerContext::deviceKey(id));
-        { std::lock_guard<std::mutex> lock(profileMutex); deviceProfiles.erase(id); }
+        bool held = false;
+        { std::lock_guard<std::mutex> lock(profileMutex); held = deviceProfiles.erase(id) > 0; }
+        if (held) COUT_INFO << "[CHORD] Controller " << id << " let go: back to " << activeProfile() << '\n';
+        else COUT_INFO << "[CHORD] Controller " << id << " let go, but nothing was being held\n";
         refreshControllerOutput(id);
         return;
     }
@@ -307,16 +337,23 @@ void CmdRegistry::processLine(const string& line)
         const auto savedLines = _profileLines;
         const auto savedLive = activeProfile();
         const auto savedChordLoading = _chordLoading;
+        // The virtual pad this controller drives now. A swap that doesn't say
+        // otherwise keeps it: the isolated scope would read NONE, unplug the
+        // virtual Xbox pad on press and plug a new one in on release -- Steam
+        // announced each one, and the churn stalled input around both edges.
+        const auto keepVirtual = virtualControllerAssignment(id);
         _chordLoading = true;
         {
             ControllerContext::Guard scope(model, id, ControllerContext::deviceKey(id));
             ControllerContext::isolatedScopes.insert(ControllerContext::deviceKey(id));
             processLine("RESET_MAPPINGS");
             loadConfigFile(path);
+            if (!ControllerCompatibility::setsKey(_profileLines, "VIRTUAL_CONTROLLER") && !keepVirtual.empty()) processLine(keepVirtual);
         }
         _chordLoading = savedChordLoading;
         _profileLines = savedLines;
         { std::lock_guard<std::mutex> lock(profileMutex); liveProfile = savedLive; deviceProfiles[id] = path; }
+        COUT_INFO << "[CHORD] Controller " << id << " holding " << path << " over " << savedLive << '\n';
         refreshControllerOutput(id);
         return;
     }
