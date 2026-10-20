@@ -1,4 +1,5 @@
 #include "AutoLoad.h"
+#include "CmdRegistry.h"
 
 // https://stackoverflow.com/a/4119881/1130520 gives us case insensitive equality
 static bool iequals(const string& a, const string& b)
@@ -40,7 +41,10 @@ bool AutoLoad::AutoLoadPoll(void* param)
 	// every output path (touchpad, gyro, stick aim) alike -- none of which
 	// this thread's own code touches at all.
 	string windowModule = GetActiveWindowModule();
-	if (!windowModule.empty() && windowModule != lastModuleName && windowModule.compare("JoyShockMapper.exe") != 0)
+    // Keep the retry while Windows has no identifiable foreground window.
+    const bool retry = !windowModule.empty() && windowModule.compare("JoyShockMapper.exe") != 0
+        && registry->takeAutoLoadRetry();
+	if (!windowModule.empty() && (windowModule != lastModuleName || retry) && windowModule.compare("JoyShockMapper.exe") != 0)
 	{
 		lastModuleName = windowModule;
 		string path(AUTOLOAD_FOLDER());

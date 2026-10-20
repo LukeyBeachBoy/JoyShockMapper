@@ -1,0 +1,32 @@
+# Windows sign-in: selected automatically while this Windows session is locked.
+# JSM Evolved must already be running. Requires the virtual keyboard/mouse driver.
+# Enter your PIN yourself. This file never contains a PIN or an unlock macro.
+# Only single digits, ENTER, BACKSPACE, ESC and NONE are accepted while locked.
+# Clockwise from the top: Y=1, B=2, A=3, X=4; Up=5, Right=6, Down=7, Left=8.
+# Turn off a Steam Controller: hold Quick Access, tap Y, then release both.
+# This fixed shortcut also works while locked; it does not enter a PIN digit.
+RESET_MAPPINGS
+GYRO_ON = NONE
+N = 1
+E = 2
+S = 3
+W = 4
+UP = 5
+RIGHT = 6
+DOWN = 7
+LEFT = 8
+L = 9
+R = 0
++ = ENTER
+- = BACKSPACE
+HOME = ESC
+LSL = 1
+RSR = 2
+LSR = 3
+RSL = 4
+L3 = 9
+R3 = 0
+ZL = BACKSPACE
+ZR = ENTER
+MISC2 = ENTER
+MISC3 = BACKSPACE

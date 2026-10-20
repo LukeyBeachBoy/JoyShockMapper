@@ -32,6 +32,15 @@ with tempfile.TemporaryDirectory(prefix='jsm-grip-test-') as directory:
     start = sdl.index('void updateGripHaptics(')
     end = sdl.index('\n\t}', start) + len('\n\t}')
     harness = (root / 'tests/grip_haptics_harness.cpp').read_text()
+    helper_start = sdl.index('void updateControllerSettings(')
+    helper_end = sdl.index('\n\t}', helper_start) + len('\n\t}')
+    grip_start = sdl.index('const int range = triton_grip::threshold(')
+    grip_end = sdl.index('\n\t}', grip_start)
+    harness = harness.replace('// UPDATE_CONTROLLER_SETTINGS', sdl[helper_start:helper_end])
+    harness = harness.replace('// APPLY_GRIP_SETTINGS', sdl[grip_start:grip_end])
+    poll = sdl[sdl.index('int pollDevices()'):sdl.index('std::vector<SDL_JoystickID> _joysticks;')]
+    assert 'updateControllerSettings(iter->first, iter->second);' in poll
+    assert 'applyTritonSettings(iter->second);' not in poll
     source = Path(directory) / 'grip_haptics.cpp'
     source.write_text(harness.replace('// UPDATE_GRIP_HAPTICS', sdl[start:end]))
     run_harness(source, directory)

@@ -76,6 +76,10 @@ add_executable (
 )
 
 if (WINDOWS)
+	add_library(jsm-input SHARED src/win32/VirtualHidInput.cpp src/win32/VirtualHidExports.cpp)
+	target_include_directories(jsm-input PRIVATE include)
+	target_link_libraries(jsm-input PRIVATE hid setupapi user32)
+	add_dependencies(${BINARY_NAME} jsm-input)
 	set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT ${BINARY_NAME})
     set_property(TARGET ${BINARY_NAME} PROPERTY VS_DEBUGGER_COMMAND_ARGUMENTS "${CMAKE_CURRENT_SOURCE_DIR}/dist")
 
@@ -95,6 +99,8 @@ if (WINDOWS)
     target_sources (
         ${BINARY_NAME} PRIVATE
         src/win32/InputHelpers.cpp
+        src/win32/VirtualHidInput.cpp
+        src/win32/WindowsSessionInput.cpp
         src/win32/PlatformDefinitions.cpp
         src/win32/WindowsTrayIcon.cpp        include/win32/WindowsTrayIcon.h
         src/win32/Gamepad.cpp
@@ -116,6 +122,7 @@ if (WINDOWS)
     target_link_libraries (
         ${BINARY_NAME} PRIVATE
         ViGEmClient
+        hid setupapi wtsapi32
     )
     
     target_include_directories (

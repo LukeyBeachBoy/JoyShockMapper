@@ -133,6 +133,9 @@ bool CmdRegistry::loadConfigFile(string fileName)
 	}
 	if (file)
     {
+    // An explicit configuration choice or Studio handover supersedes an
+    // AutoLoad request that was waiting for a held swap to finish.
+    if (_loadingFiles.empty() && !_chordLoading) _deferredAutoLoad.cancel();
     if (bindingHandle) {
         prepareControllerProfile(bindingHandle);
         JSMVariableBase::clearScope(ControllerContext::deviceKey(bindingHandle));
@@ -321,6 +324,7 @@ void CmdRegistry::processLine(const string& line)
         VirtualMenus::clearScope(ControllerContext::deviceKey(id));
         bool held = false;
         { std::lock_guard<std::mutex> lock(profileMutex); held = deviceProfiles.erase(id) > 0; }
+        if (held) _deferredAutoLoad.release(!deviceProfiles.empty() || !_chordRestore.empty());
         if (held) COUT_INFO << "[CHORD] Controller " << id << " let go: back to " << activeProfile() << '\n';
         else COUT_INFO << "[CHORD] Controller " << id << " let go, but nothing was being held\n";
         refreshControllerOutput(id);
@@ -364,7 +368,10 @@ void CmdRegistry::processLine(const string& line)
     // exactly like a dead binding.
     const string autoload = "STUDIO_AUTOLOAD ";
     if (trimmedLine.compare(0, autoload.size(), autoload) == 0) {
-        if (!_chordRestore.empty() || !deviceProfiles.empty()) return;
+        if (!_chordRestore.empty() || !deviceProfiles.empty()) {
+            _deferredAutoLoad.defer();
+            return;
+        }
         loadConfigFile(trimmedLine.substr(autoload.size()));
         return;
     }
@@ -419,6 +426,7 @@ void CmdRegistry::processLine(const string& line)
         // assignments, and by then chord presses were being dropped outright.
         _profileLines = lines;
         _chordLoading = false;
+        _deferredAutoLoad.release(!deviceProfiles.empty());
         return;
     }
     if (trimmedLine == "RESET_MAPPINGS") {

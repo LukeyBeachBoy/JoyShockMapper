@@ -5,6 +5,8 @@
 #include "TritonLed.h"
 #include "TritonBootSound.h"
 #include "TouchpadRotation.h"
+#include "GyroReportWatchdog.h"
+#include "WindowsSessionInput.h"
 #include "JSMVariable.hpp"
  #include "TriggerEffectGenerator.h"
 #include "SettingsManager.h"
@@ -49,6 +51,15 @@ typedef struct
 	Uint8 ucLedBlue;                  /* 46 */
 } DS5EffectsState_t;
 
+static GyroReportWatchdog gyroReports;
+
+static bool SDLCALL watchGyroReports(void *, SDL_Event *event)
+{
+	if (event->type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE && event->gsensor.sensor == SDL_SENSOR_GYRO)
+		gyroReports.observe(int(event->gsensor.which), SDL_GetTicks());
+	return true;
+}
+
 struct ControllerDevice
 {
 	ControllerDevice(int id)
@@ -57,6 +68,8 @@ struct ControllerDevice
 	  , _vendorId(JS_VENDOR_UNKNOWN)
 	  , _productId(JS_PRODUCT_UNKNOWN)
 	{
+		gyroReports.connect(id, SDL_GetTicks());
+		_sensorHandle = id;
 		_prevTouchState.t0Down = false;
 		_prevTouchState.t1Down = false;
 		if (SDL_IsGamepad(id))
@@ -244,6 +257,7 @@ struct ControllerDevice
 
 	virtual ~ControllerDevice()
 	{
+		gyroReports.disconnect(_sensorHandle);
 		// The tone player sends to _sdlController from its own thread; it has to
 		// be gone before the gamepad is, and before the reports below go out.
 		stopTonePlayer();
@@ -358,6 +372,11 @@ public:
 	// switched off, 1 = on. The struct is rebuilt on reconnect, so that sends it
 	// again.
 	int _appliedHardwareGyroCal = -1;
+	// SDL instance ID used by sensor events. JSM's logical map key is separate
+	// and can stay at 1 while this ID changes on every wireless reconnect.
+	int _sensorHandle = 0;
+	bool _imuReadValid = true;
+	bool _gyroReportingStalled = false;
 	// Who this controller is, stable across a reconnect (unlike its handle),
 	// so its gyro calibration can be put back. Empty when SDL cannot say.
 	std::string _key;
@@ -566,11 +585,13 @@ public:
 		SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
 		SDL_SetHintWithPriority(SDL_HINT_TIMER_RESOLUTION, "1", SDL_HINT_OVERRIDE);
 		SDL_Init(SDL_INIT_GAMEPAD);
+		SDL_AddEventWatch(watchGyroReports, nullptr);
 		SetMaxTimerResolution();
 	}
 
 	virtual ~SdlInstance()
 	{
+		SDL_RemoveEventWatch(watchGyroReports, nullptr);
 		SDL_Quit();
 	}
 
@@ -1114,6 +1135,43 @@ public:
 		// On failure the cached values stay stale, so the next poll retries.
 	}
 
+	void serviceGyroReports(int handle, ControllerDevice *device)
+	{
+		if (device->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026 || !device->_has_gyro)
+			return;
+		const auto now = SDL_GetTicks();
+		if (gyroReports.shouldRetry(device->_sensorHandle, now))
+		{
+			device->_gyroReportingStalled = true;
+			CERR << "Steam Controller gyro reports stalled; restarting sensors for device " << handle << ".\n";
+			// Both sensors must be disabled before enabling either again: SDL
+			// calls the driver only when the enabled-sensor count crosses zero.
+			SDL_SetGamepadSensorEnabled(device->_sdlController, SDL_SENSOR_GYRO, false);
+			if (device->_has_accel) SDL_SetGamepadSensorEnabled(device->_sdlController, SDL_SENSOR_ACCEL, false);
+			SDL_SetGamepadSensorEnabled(device->_sdlController, SDL_SENSOR_GYRO, true);
+			if (device->_has_accel) SDL_SetGamepadSensorEnabled(device->_sdlController, SDL_SENSOR_ACCEL, true);
+		}
+		else if (device->_gyroReportingStalled && gyroReports.fresh(device->_sensorHandle, now))
+		{
+			device->_gyroReportingStalled = false;
+			COUT << "Steam Controller gyro reports resumed for device " << handle << ".\n";
+		}
+	}
+
+	void updateControllerSettings(int handle, ControllerDevice *device)
+	{
+		// Hardware settings and automatic haptics must read the same device /
+		// model scope as its input callback. A held chord is isolated: reading
+		// the shared defaults here missed both its thresholds and its pulses.
+		// Keep the poll's bounded lock order: commands may be waiting for SDL.
+		std::unique_lock<std::recursive_timed_mutex> configurationFree;
+		if (!ControllerContext::lockForPoll(configurationFree)) return;
+		ControllerContext::Guard scope(ControllerContext::modelKey(device->_ctrlr_type,
+		    device->_vendorId, device->_productId), handle);
+		applyTritonSettings(device);
+		updateGripHaptics(device);
+	}
+
 	int pollDevices()
 	{
 		RaiseThreadPriority();
@@ -1128,9 +1186,8 @@ public:
 			SDL_UpdateGamepads();
 			for (auto iter = _controllerMap.begin(); iter != _controllerMap.end(); ++iter)
 			{
-				// No-op unless a grip range / flicker guard actually changed.
-				applyTritonSettings(iter->second);
-				updateGripHaptics(iter->second);
+				updateControllerSettings(iter->first, iter->second);
+				serviceGyroReports(iter->first, iter->second);
 				if (g_callback)
 				{
 					JOY_SHOCK_STATE dummy1;
@@ -1139,7 +1196,11 @@ public:
 					memset(&dummy2, 0, sizeof(dummy2));
 					g_callback(iter->first, dummy1, dummy1, dummy2, dummy2, tick_time);
 				}
-				if (g_touch_callback)
+				if (g_touch_callback
+#ifdef _WIN32
+                    && !windowsSignInCapturing(iter->first)
+#endif
+                )
 				{
 					TOUCH_STATE touch = GetTouchState(iter->first, false);
 					g_touch_callback(iter->first, touch, iter->second->_prevTouchState, tick_time);
@@ -1278,8 +1339,10 @@ public:
 		lock_guard guard(controller_lock);
 		if (!_controllerMap.empty())
 			return;
+		SDL_RemoveEventWatch(watchGyroReports, nullptr);
 		SDL_QuitSubSystem(SDL_INIT_GAMEPAD);
 		SDL_InitSubSystem(SDL_INIT_GAMEPAD);
+		SDL_AddEventWatch(watchGyroReports, nullptr);
 	}
 
 	DeviceCensus TakeDeviceCensus() override
@@ -1343,6 +1406,9 @@ public:
 		auto iter = _controllerMap.begin();
 		while (iter != _controllerMap.end())
 		{
+#ifdef _WIN32
+            forgetWindowsSignInController(iter->first);
+#endif
 			delete iter->second;
 			iter = _controllerMap.erase(iter);
 		}
@@ -1382,6 +1448,9 @@ public:
 		auto iter = _controllerMap.begin();
 		while (iter != _controllerMap.end())
 		{
+#ifdef _WIN32
+            forgetWindowsSignInController(iter->first);
+#endif
 			delete iter->second;
 			iter = _controllerMap.erase(iter);
 		}
@@ -1398,10 +1467,15 @@ public:
 	{
 		IMU_STATE imuState;
 		memset(&imuState, 0, sizeof(imuState));
+		_controllerMap[deviceId]->_imuReadValid = true;
 		if (_controllerMap[deviceId]->_has_gyro)
 		{
-			array<float, 3> gyro;
-			SDL_GetGamepadSensorData(_controllerMap[deviceId]->_sdlController, SDL_SENSOR_GYRO, &gyro[0], 3);
+			array<float, 3> gyro{};
+			if (!SDL_GetGamepadSensorData(_controllerMap[deviceId]->_sdlController, SDL_SENSOR_GYRO, &gyro[0], 3))
+			{
+				gyro.fill(0.f);
+				_controllerMap[deviceId]->_imuReadValid = false;
+			}
 			static constexpr float toDegPerSec = float(180. / M_PI);
 			imuState.gyroX = gyro[0] * toDegPerSec;
 			imuState.gyroY = gyro[1] * toDegPerSec;
@@ -1409,14 +1483,22 @@ public:
 		}
 		if (_controllerMap[deviceId]->_has_accel)
 		{
-			array<float, 3> accel;
-			SDL_GetGamepadSensorData(_controllerMap[deviceId]->_sdlController, SDL_SENSOR_ACCEL, &accel[0], 3);
+			array<float, 3> accel{};
+			if (!SDL_GetGamepadSensorData(_controllerMap[deviceId]->_sdlController, SDL_SENSOR_ACCEL, &accel[0], 3))
+				accel.fill(0.f);
 			static constexpr float toGs = 1.f / SDL_STANDARD_GRAVITY;
 			imuState.accelX = accel[0] * toGs;
 			imuState.accelY = accel[1] * toGs;
 			imuState.accelZ = accel[2] * toGs;
 		}
 		return imuState;
+	}
+
+	bool HasFreshIMUState(int deviceId) override
+	{
+		const auto it = _controllerMap.find(deviceId);
+		return it != _controllerMap.end() && it->second &&
+			(!it->second->_has_gyro || (it->second->_imuReadValid && gyroReports.fresh(it->second->_sensorHandle, SDL_GetTicks())));
 	}
 
 	MOTION_STATE GetMotionState(int deviceId) override
@@ -1984,25 +2066,70 @@ public:
 
 	bool TurnOffController(int deviceId) override
 	{
-		auto *jc = _controllerMap[deviceId];
-		if (jc == nullptr)
+		// The console command holds the configuration lock while the tune plays,
+		// so callback/telemetry button state can still say "held" after release.
+		// Read SDL's live buttons instead. A wake button still down when power
+		// goes can start the controller again; require a quiet release first.
+		const auto began = chrono::steady_clock::now();
+		auto releasedAt = chrono::steady_clock::time_point{};
+		SDL_JoystickID originalId = 0;
+		bool waitingLogged = false;
+		while (true)
 		{
-			CERR << "TURN_OFF_CONTROLLER: no controller with id " << deviceId << ".\n";
-			return false;
+			std::unique_lock guard(controller_lock);
+			const auto iter = _controllerMap.find(deviceId);
+			if (iter == _controllerMap.end() || !iter->second)
+			{
+				CERR << "TURN_OFF_CONTROLLER: no controller with id " << deviceId << ".\n";
+				return false;
+			}
+			auto *jc = iter->second;
+			if (jc->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
+			{
+				CERR << "TURN_OFF_CONTROLLER: controller " << deviceId
+				     << " does not support a power-off command; only the Steam Controller does.\n";
+				return false;
+			}
+			const auto id = SDL_GetGamepadID(jc->_sdlController);
+			if (!originalId) originalId = id;
+			if (!id || id != originalId || !SDL_GamepadConnected(jc->_sdlController))
+			{
+				CERR << "TURN_OFF_CONTROLLER: controller disconnected or changed before power-off; cancelled.\n";
+				return false;
+			}
+			const auto now = chrono::steady_clock::now();
+			const bool held = SDL_GetGamepadButton(jc->_sdlController, SDL_GAMEPAD_BUTTON_GUIDE)
+			  || SDL_GetJoystickButton(SDL_GetGamepadJoystick(jc->_sdlController), 11)
+			  || SDL_GetGamepadButton(jc->_sdlController, SDL_GAMEPAD_BUTTON_NORTH);
+			if (held)
+			{
+				releasedAt = {};
+				if (!waitingLogged)
+				{
+					COUT_INFO << "TURN_OFF_CONTROLLER: waiting for Steam / Quick Access / Y release.\n";
+					waitingLogged = true;
+				}
+			}
+			else if (releasedAt == chrono::steady_clock::time_point{}) releasedAt = now;
+			if (!held && now - releasedAt >= chrono::milliseconds(75))
+			{
+				COUT_INFO << "TURN_OFF_CONTROLLER: wake buttons released; sending power-off after "
+				          << chrono::duration_cast<chrono::milliseconds>(now - began).count() << " ms release guard.\n";
+				if (!sendTurnOffController(jc->_sdlController))
+				{
+					CERR << "TURN_OFF_CONTROLLER: failed to write the power-off report: " << SDL_GetError() << '\n';
+					return false;
+				}
+				return true;
+			}
+			if (now - began >= chrono::milliseconds(10000))
+			{
+				CERR << "TURN_OFF_CONTROLLER: wake buttons did not release within 10 seconds; cancelled.\n";
+				return false;
+			}
+			guard.unlock(); // SDL keeps polling while the configuration callbacks give way.
+			this_thread::sleep_for(chrono::milliseconds(10));
 		}
-		if (jc->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026)
-		{
-			CERR << "TURN_OFF_CONTROLLER: controller " << deviceId
-			     << " does not support a power-off command; only the Steam Controller does.\n";
-			return false;
-		}
-		if (!sendTurnOffController(jc->_sdlController))
-		{
-			CERR << "TURN_OFF_CONTROLLER: failed to write the power-off report: "
-			     << SDL_GetError() << '\n';
-			return false;
-		}
-		return true;
 	}
 
 	bool PlayHapticScript(int deviceId, int script, int gainDb) override

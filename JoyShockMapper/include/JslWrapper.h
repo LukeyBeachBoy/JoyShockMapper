@@ -341,6 +341,9 @@ public:
 	virtual void DisconnectAndDisposeAll() = 0;
 	virtual JOY_SHOCK_STATE GetSimpleState(int deviceId) = 0;
 	virtual IMU_STATE GetIMUState(int deviceId) = 0;
+	// SDL exposes cached sensor values even after reporting stops. Other
+	// backends retain their existing callback-driven behavior.
+	virtual bool HasFreshIMUState(int deviceId) { return true; }
 	virtual MOTION_STATE GetMotionState(int deviceId) = 0;
 	virtual TOUCH_STATE GetTouchState(int deviceId, bool previous = false) = 0;
 	// Keep the TOUCH_STATE ABI unchanged for the JoyShockLibrary backend.

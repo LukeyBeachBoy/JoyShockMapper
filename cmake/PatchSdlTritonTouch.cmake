@@ -91,7 +91,19 @@ function(patch_sdl_triton_touch SDL_SOURCE_DIR)
     # 0x80..0x85 block the driver's own header defines -- and writes them the same
     # way. Anything else still returns SDL_Unsupported exactly as before.
     set(_effect_original "    if (size == HID_FEATURE_REPORT_BYTES) {")
-    set(_effect_replacement "    const Uint8 *jsm_bytes = (const Uint8 *)data;\n    if (size > 1 && size < HID_FEATURE_REPORT_BYTES &&\n        jsm_bytes[0] >= ID_OUT_REPORT_HAPTIC_RUMBLE && jsm_bytes[0] <= ID_OUT_REPORT_HAPTIC_SCRIPT) {\n        return SDL_hid_write(device->dev, data, size) == size;\n    }\n    if (size == HID_FEATURE_REPORT_BYTES) {")
+    set(_effect_replacement "    const Uint8 *jsm_bytes = (const Uint8 *)data;\n    if (size > 1 && size < HID_FEATURE_REPORT_BYTES &&\n        jsm_bytes[0] >= ID_OUT_REPORT_HAPTIC_RUMBLE && jsm_bytes[0] <= ID_OUT_REPORT_HAPTIC_SCRIPT) {\n        return SDL_hid_write(device->dev, data, size) >= size;\n    }\n    if (size == HID_FEATURE_REPORT_BYTES) {")
+
+    # Windows HIDAPI pads output reports to OutputReportByteLength and returns
+    # that padded byte count. A four-byte script can return 64 after SUCCESS:
+    # treating it as failure makes shutdown skip its sound wait and power off
+    # immediately. Keep errors/short writes false, and upgrade populated builds.
+    set(_haptic_legacy "return SDL_hid_write(device->dev, data, size) == size;")
+    set(_haptic_success "return SDL_hid_write(device->dev, data, size) >= size;")
+    string(FIND "${_source}" "${_haptic_legacy}" _haptic_legacy_found)
+    if(_haptic_legacy_found GREATER_EQUAL 0)
+        string(REPLACE "${_haptic_legacy}" "${_haptic_success}" _source "${_source}")
+        set(_patched FALSE)
+    endif()
 
     string(FIND "${_source}" "jsm_bytes" _haptic_already)
     if(_haptic_already LESS 0)

@@ -1,6 +1,7 @@
 #include "ConfigErrors.h"
 #include "ConsoleFeed.h"
 #include "Telemetry.h"
+#include "WindowsSessionInput.h"
 
 #include <algorithm>
 #include <deque>
@@ -120,6 +121,12 @@ public:
 		std::ostringstream oss;
 		oss.setf(std::ios::fixed, std::ios::floatfield);
 		oss.precision(4);
+#ifdef _WIN32
+        if (windowsSessionLocked()) {
+            oss << "{\"protoVer\":3,\"sessionLocked\":true,\"activeProfile\":\"profiles-library/Windows Sign-in.txt\",\"devices\":[]}";
+        } else
+#endif
+        {
 		oss << "{"
 		    << "\"protoVer\":" << Telemetry::kProtoVersion
 		    << ",\"ts\":" << (sample.timestampMs != 0 ? sample.timestampMs :
@@ -217,6 +224,7 @@ public:
 		}
 
 		oss << "}";
+        }
 
 		const auto payload = oss.str();
 		const auto sent = sendto(_socket, payload.c_str(), static_cast<int>(payload.size()), 0, reinterpret_cast<sockaddr *>(&_target), sizeof(_target));

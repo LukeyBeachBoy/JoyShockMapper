@@ -19,10 +19,34 @@
 
 #include "ControllerCompatibility.h"
 #include "ControllerContext.h"
+#include "DeferredAutoLoad.h"
 
 namespace
 {
 using namespace std::chrono;
+
+void test_autoload_retries_after_the_last_hold_and_explicit_choices_win()
+{
+    DeferredAutoLoad handover;
+    assert(!handover.takeRetry());
+    handover.defer(); // Alt+Tab tried to load a game's rule while Quick Access held.
+    handover.defer(); // Further window changes coalesce into one foreground recheck.
+    handover.release(true); // Another controller or a legacy chord still holds.
+    assert(!handover.takeRetry());
+    handover.release(false);
+    assert(handover.takeRetry()); // Retry even if AutoLoad remembers this same app.
+    assert(!handover.takeRetry());
+    handover.release(false);
+    assert(!handover.takeRetry()); // No blocked AutoLoad: no unnecessary reload.
+    handover.defer();
+    handover.cancel(); // A binding deliberately selected a profile.
+    handover.release(false);
+    assert(!handover.takeRetry());
+    handover.defer();
+    handover.release(false);
+    handover.cancel(); // Studio already performed the handover before the next poll.
+    assert(!handover.takeRetry());
+}
 
 void test_pad_rotation_stays_global()
 {
@@ -98,6 +122,7 @@ void test_a_short_command_does_not_cost_a_reading()
 
 int main()
 {
+    test_autoload_retries_after_the_last_hold_and_explicit_choices_win();
 	test_pad_rotation_stays_global();
 	test_a_chord_sets_its_own_virtual_pad_only_when_it_says_so();
 	test_a_command_waiting_on_the_controller_thread_cannot_deadlock();

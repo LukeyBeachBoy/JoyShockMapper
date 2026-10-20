@@ -4,17 +4,30 @@
 #include <iostream>
 #include <map>
 #include <vector>
+#include <thread>
+#include <atomic>
+#include "ControllerContext.h"
+#include "TritonGripSettings.h"
 
 enum class Switch { OFF, ON };
 enum class HapticEffect { CLICK, TICK };
 enum class SettingID {
     GRIP_HAPTIC_INTENSITY, GRIP_HAPTIC_EFFECT,
     GRIP_RELEASE_HAPTIC_INTENSITY, GRIP_RELEASE_HAPTIC_EFFECT,
-    LEFT_GRIP_HAPTICS, RIGHT_GRIP_HAPTICS
+    LEFT_GRIP_HAPTICS, RIGHT_GRIP_HAPTICS,
+    GRIP_SENSOR_RANGE, GRIP_FLICKER_GUARD
 };
 template <typename T> struct Setting {
     T setting{};
-    T value() const { return setting; }
+    std::map<std::string, T> scoped;
+    T value() const {
+        const auto scopes = ControllerContext::readScopes();
+        for (const auto& scope : scopes) {
+            const auto found = scoped.find(scope);
+            if (found != scoped.end()) return found->second;
+        }
+        return ControllerContext::isolated() ? T{} : setting;
+    }
 };
 struct SettingsManager {
     template <typename T> static Setting<T>* get(SettingID id) {
@@ -33,6 +46,8 @@ struct ControllerDevice {
     SDL_Gamepad* _sdlController;
     int _ctrlr_type = JS_TYPE_STEAM_CONTROLLER_2026;
     bool _leftGripWasOn = false, _rightGripWasOn = false;
+    int _vendorId = 0, _productId = 0;
+    int _appliedGripRange = -1, _appliedGripRelease = -1;
 };
 struct Pulse { bool right; float intensity; HapticEffect effect; };
 std::vector<Pulse> pulses;
@@ -41,6 +56,17 @@ void sendGripHaptic(SDL_Gamepad*, bool right, float intensity, HapticEffect effe
 }
 
 // UPDATE_GRIP_HAPTICS
+
+bool transportWorks = true;
+std::vector<std::pair<uint8_t, uint16_t>> writes;
+bool sendTritonSettings(SDL_Gamepad*, const std::vector<std::pair<uint8_t, uint16_t>>& pending) {
+    writes.insert(writes.end(), pending.begin(), pending.end());
+    return transportWorks;
+}
+void applyTritonSettings(ControllerDevice* device) {
+    // APPLY_GRIP_SETTINGS
+}
+// UPDATE_CONTROLLER_SETTINGS
 
 int main() {
     SettingsManager::get<float>(SettingID::GRIP_HAPTIC_INTENSITY)->setting = 60;
@@ -99,5 +125,78 @@ int main() {
     device._ctrlr_type = 0;
     updateGripHaptics(&device);
     assert(pulses.empty());
+    // The SDL maintenance path must resolve the model and the active isolated
+    // chord before it reads either hardware thresholds or haptic preferences.
+    device._ctrlr_type = JS_TYPE_STEAM_CONTROLLER_2026;
+    pad.left = pad.right = false;
+    device._leftGripWasOn = device._rightGripWasOn = false;
+    const auto model = ControllerContext::modelKey(device._ctrlr_type);
+    const auto chord = ControllerContext::deviceKey(7);
+    auto range = SettingsManager::get<float>(SettingID::GRIP_SENSOR_RANGE);
+    auto guard = SettingsManager::get<float>(SettingID::GRIP_FLICKER_GUARD);
+    auto intensity = SettingsManager::get<float>(SettingID::GRIP_HAPTIC_INTENSITY);
+    auto left = SettingsManager::get<Switch>(SettingID::LEFT_GRIP_HAPTICS);
+    auto right = SettingsManager::get<Switch>(SettingID::RIGHT_GRIP_HAPTICS);
+    range->setting = guard->setting = -1;
+    range->scoped[model] = 200; guard->scoped[model] = 80;
+    left->scoped[model] = right->scoped[model] = Switch::ON;
+    updateControllerSettings(7, &device); // first startup poll, no editor write
+    assert(device._appliedGripRange == 200 && device._appliedGripRelease == 80);
+    writes.clear();
+    updateControllerSettings(7, &device);
+    assert(writes.empty()); // no feature report every poll
+
+    range->scoped[chord] = 400; guard->scoped[chord] = 95;
+    left->scoped[chord] = Switch::OFF; right->scoped[chord] = Switch::ON;
+    intensity->scoped[chord] = 75;
+    SettingsManager::get<HapticEffect>(SettingID::GRIP_HAPTIC_EFFECT)->scoped[chord] = HapticEffect::TICK;
+    ControllerContext::isolatedScopes.insert(chord);
+    pad.left = pad.right = true;
+    updateControllerSettings(7, &device); // first held poll, no save/apply
+    assert(device._appliedGripRange == 400 && device._appliedGripRelease == 95);
+    assert(pulses.size() == 1 && pulses[0].right && pulses[0].intensity == 75 && pulses[0].effect == HapticEffect::TICK);
+    assert(ControllerContext::model.empty() && ControllerContext::handle == 0);
+    pulses.clear(); writes.clear();
+    updateControllerSettings(7, &device);
+    assert(pulses.empty() && writes.empty()); // held contact is one pulse
+
+    ControllerDevice other{&pad};
+    updateControllerSettings(8, &other); // chord must not leak to another pad
+    assert(other._appliedGripRange == 200 && other._appliedGripRelease == 80);
+    assert(pulses.size() == 2 && pulses[0].intensity == 60);
+    pulses.clear(); writes.clear();
+    ControllerDevice reconnected{&pad};
+    updateControllerSettings(7, &reconnected);
+    assert(reconnected._appliedGripRange == 400 && reconnected._appliedGripRelease == 95);
+    assert(writes.size() == 2);
+    ControllerContext::isolatedScopes.erase(chord); // release restores model
+    range->scoped.erase(chord); guard->scoped.erase(chord);
+    left->scoped.erase(chord); right->scoped.erase(chord);
+    intensity->scoped.erase(chord);
+    SettingsManager::get<HapticEffect>(SettingID::GRIP_HAPTIC_EFFECT)->scoped.erase(chord);
+    transportWorks = false; writes.clear();
+    updateControllerSettings(7, &device);
+    assert(device._appliedGripRange == 400 && device._appliedGripRelease == 95);
+    assert(writes.size() == 2);
+    transportWorks = true;
+    updateControllerSettings(7, &device);
+    assert(device._appliedGripRange == 200 && device._appliedGripRelease == 80);
+
+    // Commands can wait for SDL while holding the config lock. The hardware
+    // poll must give way without consuming the sensor edge or sending defaults.
+    std::atomic<bool> locked{false}, finished{false};
+    std::thread command([&] {
+        std::unique_lock<std::recursive_timed_mutex> lock(ControllerContext::mutex);
+        locked = true;
+        while (!finished) std::this_thread::yield();
+    });
+    while (!locked) std::this_thread::yield();
+    pad.left = pad.right = false; pulses.clear(); writes.clear();
+    updateControllerSettings(7, &device);
+    finished = true; command.join();
+    assert(pulses.empty() && writes.empty());
+    updateControllerSettings(7, &device);
+    assert(pulses.size() == 2); // release edge survives lock contention
     std::cout << "PASS: per-grip contact/release routing, noisy disabled side, live enable, independent devices\n";
+    std::cout << "PASS: startup/model/chord/release/reconnect settings, scoped haptics, retry and bounded locking\n";
 }

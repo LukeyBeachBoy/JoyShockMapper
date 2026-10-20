@@ -132,6 +132,12 @@ def main() -> int:
         # Lift only this function. Adjacent functions may use other hardware
         # services, and must not accidentally become dependencies of the harness.
         process = main[start:end]
+        # Use the real per-pad setting selector too. It is part of the touch
+        # path, and copying its behavior into the fixture would hide regressions.
+        helper_start = main.index('template<typename T>\nstatic T padFeedbackSetting(') if 'static T padFeedbackSetting(' in main else -1
+        if helper_start >= 0:
+            helper_end = main.index('\n}', helper_start) + 2
+            process = main[helper_start:helper_end] + '\n' + process
         (tmp / 'lifted_process.inc').write_text(process, encoding='utf-8')
         (tmp / 'MouseMotionAccumulator.h').write_text((ROOT / 'JoyShockMapper/include/MouseMotionAccumulator.h').read_text(encoding='utf-8'), encoding='utf-8')
         for harness in selected:

@@ -1,4 +1,5 @@
 #include "GyroSteadying.h"
+#include "WindowsSessionInput.h"
 #include "JoyShockMapper.h"
 #include "JSMVersion.h"
 #include "DigitalButton.h"
@@ -1354,6 +1355,25 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	if (jc == nullptr)
 		return;
 	jc->_context->callback_lock.lock();
+#ifdef _WIN32
+    uint64_t signInButtons = jsl->GetButtons(jcHandle);
+    if (jsl->GetLeftTrigger(jcHandle) >= .5f) signInButtons |= uint64_t(1) << JSOFFSET_ZL;
+    if (jsl->GetRightTrigger(jcHandle) >= .5f) signInButtons |= uint64_t(1) << JSOFFSET_ZR;
+    static const auto signInProfile = (filesystem::current_path()/"profiles-library"/"Windows Sign-in.txt").string();
+    if (captureWindowsSignIn(jcHandle,signInButtons,signInProfile,[&] {
+        for (auto *buttons : { &jc->_buttons, &jc->_gridButtons, &jc->_leftGridButtons, &jc->_rightGridButtons, &jc->_leftStickMenuButtons, &jc->_rightStickMenuButtons })
+            for (auto &button : *buttons) button.cancelForKeyboard();
+        for (auto &pad : jc->_touchpads) for (auto &entry : pad.buttons) entry.second.cancelForKeyboard();
+        for (auto &pipeline : jc->touchPipelines) pipeline.reset();
+        jc->stopTilt();jc->_motion->ResetMotion();
+    }, [&] {
+        if(jc->_controllerType == JS_TYPE_STEAM_CONTROLLER_2026)
+            WriteToConsole("STUDIO_DEVICE_COMMAND " + std::to_string(jcHandle) + " TURN_OFF_CONTROLLER");
+    })) {
+        jc->_timeNow=chrono::steady_clock::now();
+        jc->_context->callback_lock.unlock();return;
+    }
+#endif
     const bool keyboardCapture = CmdRegistry::activeProfile(jcHandle) == "profiles-library/.layers/virtual-keyboard.txt";
     if (keyboardCapture && !jc->_keyboardCaptured) {
         for (auto *buttons : { &jc->_buttons, &jc->_gridButtons, &jc->_leftGridButtons, &jc->_rightGridButtons, &jc->_leftStickMenuButtons, &jc->_rightStickMenuButtons })
@@ -1386,7 +1406,9 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	MotionIf &motion = *jc->_motion;
 
 	IMU_STATE imu = jsl->GetIMUState(jc->_handle);
-	GyroCalibrationRun::watchForMovement(jcHandle, imu, deltaTime);
+	const bool imuFresh = jsl->HasFreshIMUState(jc->_handle);
+	if (imuFresh)
+		GyroCalibrationRun::watchForMovement(jcHandle, imu, deltaTime);
 
 	if (SettingsManager::getV<Switch>(SettingID::AUTO_CALIBRATE_GYRO)->value() == Switch::ON)
 	{
@@ -1396,10 +1418,12 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	{
 		motion.SetAutoCalibration(false, 0.f, 0.f);
 	}
-	motion.ProcessMotion(imu.gyroX, imu.gyroY, imu.gyroZ, imu.accelX, imu.accelY, imu.accelZ, deltaTime);
+	if (imuFresh)
+		motion.ProcessMotion(imu.gyroX, imu.gyroY, imu.gyroZ, imu.accelX, imu.accelY, imu.accelZ, deltaTime);
 
-	float inGyroX, inGyroY, inGyroZ;
-	motion.GetCalibratedGyro(inGyroX, inGyroY, inGyroZ);
+	float inGyroX = 0.f, inGyroY = 0.f, inGyroZ = 0.f;
+	if (imuFresh)
+		motion.GetCalibratedGyro(inGyroX, inGyroY, inGyroZ);
 
 	float inGravX, inGravY, inGravZ;
 	motion.GetGravity(inGravX, inGravY, inGravZ);
@@ -1837,6 +1861,11 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		// No global ON presses active but a global ON binding exists: default to off-until-held.
 		blockGyro = true;
 	}
+
+	// A cached sensor value must never drive the mouse, stick, haptics or
+	// trackball while fresh sensor reports are missing. Buttons still dispatch.
+	if (!imuFresh)
+		blockGyro = true;
 
 	// Angular travel is measured before sensitivity and trackball synthesis.
 	const auto deflectionTarget = jc->getSetting<GyroOutput>(SettingID::GYRO_OUTPUT);
@@ -3031,13 +3060,15 @@ atomic<int> generation{ 0 };
 atomic<int> reachedPct{ 0 };
 atomic<bool> moved{ false };
 
-// A controller resting on a desk reads its gyro bias, a few degrees per second
-// at most; being picked up or nudged reads tens. Sustained rather than a single
-// sample, so a tap on the desk does not cancel the run.
+// Compare against the offset saved BEFORE calibration, not the offset being
+// learned during it (which could absorb real movement). Raw bias alone must
+// not cancel a run. Sustained rather than a single sample, so a tap on the
+// desk does not cancel the run.
 constexpr float kMovedDegreesPerSecond = 10.f;
 constexpr float kMovedForSeconds = 0.05f;
 mutex movementMutex;
 unordered_map<int, float> movingFor;
+unordered_map<int, array<float, 3>> movementOffsets;
 
 int64_t nowMs()
 {
@@ -3048,12 +3079,31 @@ void watchForMovement(int handle, const IMU_STATE &imu, float deltaTime)
 {
 	if (phase != CALIBRATING)
 		return;
-	const float speed = sqrtf(imu.gyroX * imu.gyroX + imu.gyroY * imu.gyroY + imu.gyroZ * imu.gyroZ);
 	lock_guard<mutex> lock(movementMutex);
+	const auto offset = movementOffsets.find(handle);
+	if (phase != CALIBRATING || offset == movementOffsets.end())
+		return;
+	// A failed sensor read is returned as zero by the SDL wrapper.
+	if ((imu.gyroX == 0.f && imu.gyroY == 0.f && imu.gyroZ == 0.f) ||
+		!isfinite(imu.gyroX) || !isfinite(imu.gyroY) || !isfinite(imu.gyroZ) ||
+		!isfinite(deltaTime) || deltaTime <= 0.f)
+	{
+		movingFor[handle] = 0.f;
+		return;
+	}
+	const float x = imu.gyroX - offset->second[0];
+	const float y = imu.gyroY - offset->second[1];
+	const float z = imu.gyroZ - offset->second[2];
+	const float speed = sqrtf(x * x + y * y + z * z);
 	float &seconds = movingFor[handle];
-	seconds = speed > kMovedDegreesPerSecond ? seconds + deltaTime : 0.f;
-	if (seconds >= kMovedForSeconds)
-		moved = true;
+	// A delayed poll is not evidence of continuous movement during the gap.
+	seconds = speed > kMovedDegreesPerSecond ? seconds + min(deltaTime, 0.02f) : 0.f;
+	if (seconds >= kMovedForSeconds && !moved.exchange(true))
+		CERR << "Gyro calibration movement: device " << handle
+			 << ", corrected speed " << speed << " deg/s, raw ("
+			 << imu.gyroX << ", " << imu.gyroY << ", " << imu.gyroZ
+			 << "), saved offset (" << offset->second[0] << ", "
+			 << offset->second[1] << ", " << offset->second[2] << ").\n";
 }
 
 // Returns false if a newer CALIBRATE_GYRO took over while this one waited, or
@@ -3120,6 +3170,7 @@ bool do_CALIBRATE_GYRO()
 		{
 			lock_guard<mutex> lock(movementMutex);
 			movingFor.clear();
+			movementOffsets = previous;
 		}
 		moved = false;
 		reachedPct = 0;
@@ -3196,6 +3247,10 @@ bool do_PLAY_SOUND(string_view argument)
 
 bool do_TURN_OFF_CONTROLLER()
 {
+	// Bindings are dispatched with their originating controller's context.
+	// Console invocations have no handle and retain the all-controller action.
+	const auto target = ControllerContext::handle;
+	const auto applies = [target](int handle) { return !target || handle == target; };
 	// The tune has to finish before the power goes: the report would cut it off.
 	int waitMs = 0;
 	const auto setting = SettingsManager::get<PathString>(SettingID::SHUTDOWN_SOUND_FILE);
@@ -3209,7 +3264,7 @@ bool do_TURN_OFF_CONTROLLER()
 			if (logged != path) { logged = path; CERR << "SHUTDOWN_SOUND_FILE " << path << ' ' << file.error << "; playing SHUTDOWN_SOUND instead.\n"; }
 		}
 		else for (auto &[handle, jc] : handle_to_joyshock)
-			waitMs = max(waitMs, jsl->PlayToneSequence(handle, file.tones, SettingsManager::get<int>(SettingID::SOUND_GAIN)->value()));
+			if (applies(handle)) waitMs = max(waitMs, jsl->PlayToneSequence(handle, file.tones, SettingsManager::get<int>(SettingID::SOUND_GAIN)->value()));
 	}
 	if (waitMs == 0)
 	{
@@ -3217,8 +3272,16 @@ bool do_TURN_OFF_CONTROLLER()
 		{
 			bool played = false;
 			for (auto &[handle, jc] : handle_to_joyshock)
-				played |= jsl->PlayHapticScript(handle, sound, SettingsManager::get<int>(SettingID::SOUND_GAIN)->value());
-			if (played) waitMs = 1500;
+				if (applies(handle)) played |= jsl->PlayHapticScript(handle, sound, SettingsManager::get<int>(SettingID::SOUND_GAIN)->value());
+			if (played)
+			{
+				// Firmware script 7 is two 80 ms notes, 81 ms apart. Verified
+				// in IBEX 69FA5889, 69FE17FF and 6AC686B3; IDs go straight
+				// to the firmware's one-based table. Allow 10 ms for dispatch.
+				// Keep the existing fallback for other scripts until verified.
+				waitMs = sound == 7 ? 172 : 1500;
+				COUT_INFO << "TURN_OFF_CONTROLLER: waiting " << waitMs << " ms for shutdown sound " << sound << ".\n";
+			}
 		}
 	}
 	// Say what was (not) played: "my shutdown sound stopped" is otherwise silent.
@@ -3230,6 +3293,7 @@ bool do_TURN_OFF_CONTROLLER()
 	int delivered = 0;
 	for (auto iter = handle_to_joyshock.begin(); iter != handle_to_joyshock.end(); ++iter)
 	{
+		if (!applies(iter->first)) continue;
 		if (jsl->TurnOffController(iter->first))
 			++delivered;
 	}

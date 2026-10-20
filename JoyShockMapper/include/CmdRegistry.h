@@ -1,6 +1,7 @@
 #pragma once
 
 #include "JoyShockMapper.h"
+#include "DeferredAutoLoad.h"
 
 #include <functional>
 #include <map>
@@ -83,6 +84,7 @@ private:
 	// multimap allows multiple entries with the same keys
 	CmdMap _registry;
     string _chordRestore;
+    DeferredAutoLoad _deferredAutoLoad;
     vector<string> _profileLines;
     vector<string> _restoreLines;
     bool _chordLoading = false;
@@ -99,6 +101,7 @@ private:
 
 public:
 	CmdRegistry();
+    bool takeAutoLoadRetry() { return _deferredAutoLoad.takeRetry(); }
     static string activeProfile();
     static string activeProfile(int handle);
 

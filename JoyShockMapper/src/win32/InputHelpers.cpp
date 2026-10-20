@@ -1,5 +1,6 @@
 #include "MouseMotionAccumulator.h"
 #include "InputHelpers.h"
+#include "VirtualHidInput.h"
 #include <thread>
 #include <algorithm>
 
@@ -59,6 +60,10 @@ unordered_map<WORD, tuple<DWORD, DWORD, DWORD>> mouseMaps = {
 // send mouse button
 int pressMouse(KeyCode vkKey, bool isPressed)
 {
+	if (vkKey.code == V_WHEEL_UP || vkKey.code == V_WHEEL_DOWN) {
+		if (!isPressed) return 0;
+		if (VirtualHidInput::instance().relative(0,0,vkKey.code == V_WHEEL_UP ? 1 : -1)) return 1;
+	} else if (VirtualHidInput::instance().mouseButton(vkKey.code,isPressed)) return 1;
 	// https://docs.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput
 	auto val = mouseMaps[vkKey.code];
 
@@ -118,6 +123,7 @@ int pressKey(KeyCode vkKey, bool pressed)
 		return 0;
 	if (vkKey.code <= V_WHEEL_DOWN) // Highest mouse ID
 		return pressMouse(vkKey, pressed);
+	if (VirtualHidInput::instance().key(vkKey.code,pressed)) return 1;
 
 	INPUT input;
 	memset(&input, 0, sizeof(INPUT));
@@ -160,6 +166,7 @@ void flushMouseMotion()
 	{
 		return;
 	}
+	if (VirtualHidInput::instance().relative(applicableX,applicableY)) return;
 
 
 	INPUT input{};
@@ -174,6 +181,7 @@ void flushMouseMotion()
 
 void setMouseNorm(float x, float y)
 {
+	if (VirtualHidInput::instance().absolute(USHORT(std::clamp(x,0.f,1.f)*65535.f),USHORT(std::clamp(y,0.f,1.f)*65535.f))) return;
 	INPUT input{};
 	input.type = INPUT_MOUSE;
 	input.mi.mouseData = 0;

@@ -160,7 +160,9 @@ def test_grip_haptic_plays_a_canned_effect_of_the_users_choosing():
     effect = SDL.split('static bool sendHapticEffect', 1)[1].split('\n\t}', 1)[0]
     assert 'return sendHapticCommand(gamepad, side, effect, gainDb);' in effect
     wire = SDL.split('static bool sendHapticCommand', 1)[1].split('\n\t}', 1)[0]
-    assert 'buffer[0] = TRITON_ID_OUT_REPORT_HAPTIC_COMMAND;' in wire
+    # The report now uses an aggregate initializer, with one actuator index
+    # per write. Preserve the actual wire contract instead of the old syntax.
+    assert re.search(r'buffer\[TRITON_HAPTIC_COMMAND_BYTES\]\s*=\s*\{\s*TRITON_ID_OUT_REPORT_HAPTIC_COMMAND,\s*uint8_t\(right \? 1 : 0\)', wire)
     assert 'TRITON_HAPTIC_COMMAND_BYTES = 4' in SDL
 
 
@@ -177,7 +179,10 @@ def test_grip_haptic_side_is_the_bitmask_the_firmware_expects():
 def test_settings_are_pushed_from_the_poll_loop_only_on_change():
     """A feature report is a device round trip; sending it every poll would
     compete with input reports for bandwidth."""
-    assert 'applyTritonSettings(iter->second);' in SDL
+    assert 'updateControllerSettings(iter->first, iter->second);' in SDL
+    scoped = SDL.split('void updateControllerSettings(', 1)[1].split('\n\tint pollDevices', 1)[0]
+    assert 'ControllerContext::Guard scope' in scoped
+    assert 'applyTritonSettings(device);' in scoped
     body = SDL.split('void applyTritonSettings', 1)[1].split('\n\tint pollDevices', 1)[0]
     assert 'if (pending.empty())' in body
     assert 'if (sendTritonSettings(device->_sdlController, pending))' in body
