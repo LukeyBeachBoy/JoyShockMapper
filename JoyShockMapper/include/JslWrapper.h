@@ -72,6 +72,7 @@ inline bool operator!=(const AdaptiveTriggerSetting &lhs, const AdaptiveTriggerS
 #define JS_TYPE_FLYDIGI_VADER5_PRO 22
 #define JS_TYPE_SWITCH2_PRO_CONTROLLER 23
 #define JS_TYPE_STEAM_CONTROLLER_2026 24
+#define JS_TYPE_AZERON_CYBORG 25
 
 #define JS_SPLIT_TYPE_LEFT 1
 #define JS_SPLIT_TYPE_RIGHT 2
@@ -299,6 +300,8 @@ struct DeviceCensus
 	/// gamepad valid and answering with its last state, so without this count
 	/// nothing notices and the pad is reported for the rest of the session.
 	int disconnected = 0;
+	// Explicit hardware allowlist census; -1 uses the legacy virtual-pad discount.
+	int managedListed = -1;
 };
 
 class JslWrapper
@@ -389,6 +392,7 @@ public:
 	// are not). Empty when the backend cannot tell, which opts it out of having
 	// its gyro calibration carried over.
 	virtual std::string GetControllerKey(int deviceId) { return {}; }
+    virtual std::string GetNativeInputStatus(int deviceId) { return {}; }
 	virtual int GetControllerSplitType(int deviceId) = 0;
 	virtual int GetControllerVendor(int deviceId) = 0;
 	virtual int GetControllerProduct(int deviceId) = 0;

@@ -3,7 +3,9 @@
 #include "InputGuards.h"
 #include "GyroAngularHaptics.h"
 #include "GyroDeflection.h"
+#include "Telemetry.h"
 #include <atomic>
+#include <mutex>
 #include "JoyShockMapper.h"
 #include "TouchMouseResampler.h"
 #include "TouchGridRouting.h"
@@ -277,6 +279,9 @@ public:
 	template<>
 	FloatXY getSetting<FloatXY>(SettingID index);
 
+	// Profile-scoped stick geometry, before axis flips and mode/deadzone processing.
+	FloatXY getStickInput(bool left);
+
 	template<>
 	MouseArea getSetting<MouseArea>(SettingID index);
 
@@ -301,6 +306,7 @@ public:
 	void disableGyroDecaySmoothing();
 	void applyOneEuroFilter(float rawX, float rawY, float deltaTime, float &outX, float &outY);
 	void resetOneEuroFilter();
+	TelemetryStickState oneEuroDerivative() const { return { _oneEuroX.dxFilt.prev, _oneEuroY.dxFilt.prev }; }
 	void updateGyroHaptics(float x, float y, float deltaTime, bool active);
 
 	void handleButtonChange(ButtonID id, bool pressed, int touchpadID = -1);
@@ -407,6 +413,14 @@ public:
 
 	float gyroXVelocity = 0.f;
 	float gyroYVelocity = 0.f;
+	void setMotionPreview(const TelemetryMotionPreview &preview) {
+		std::lock_guard<std::mutex> lock(_motionPreviewMutex);
+		_motionPreview = preview;
+	}
+	std::optional<TelemetryMotionPreview> getMotionPreview() const {
+		std::lock_guard<std::mutex> lock(_motionPreviewMutex);
+		return _motionPreview;
+	}
 	GyroAngularHaptics gyroAngularHaptics;
 	GyroDeflection gyroDeflection;
 	std::atomic<bool> gyroDeflectionRecenterRequested { false };
@@ -487,6 +501,8 @@ private:
 
 	OneEuroFilter _oneEuroX;
 	OneEuroFilter _oneEuroY;
+	mutable std::mutex _motionPreviewMutex;
+	std::optional<TelemetryMotionPreview> _motionPreview;
 
 	Vec _lastGrav = Vec(0.f, -1.f, 0.f);
 

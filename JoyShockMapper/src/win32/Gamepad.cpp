@@ -230,12 +230,14 @@ public:
 
 	virtual ~VigemGamepad()
 	{
-		if (isInitialized())
+		// A target can be attached even when notification registration failed.
+		// Error status must not suppress unplug/free and leak a virtual device.
+		if (_gamepad)
 		{
 			// We're done with this pad, free resources (this disconnects the virtual device)
 			if (PVIGEM_CLIENT client = VigemClient::get(); client != nullptr)
 			{
-				vigem_target_remove(client, _gamepad);
+				if (vigem_target_is_attached(_gamepad)) vigem_target_remove(client, _gamepad);
 			}
 			vigem_target_free(_gamepad);
 		}
@@ -320,6 +322,11 @@ public:
 			vigem_target_x360_unregister_notification(_gamepad);
 		}
 	}
+	void neutralize() override {
+        XUSB_REPORT_INIT(&_stateX360);
+        isLeftTriggerPressedDigitally = isRightTriggerPressedDigitally = false;
+        update();
+    }
 	void setButton(KeyCode btn, bool pressed) override
 	{
 		auto op = pressed ? &SetPressed<WORD> : &ClearPressed<WORD>;
@@ -473,6 +480,12 @@ public:
 			return vigem_target_ds4_await_output_report_timeout(VigemClient::get(), _gamepad, 1000, &out.buffer);
 		return VIGEM_ERROR_IS_DISPOSING;
 	}
+	void neutralize() override {
+        DS4_REPORT_EX_INIT(&_stateDS4);
+        _touchId1.reset(); _touchId2.reset();
+        isLeftTriggerPressedDigitally = isRightTriggerPressedDigitally = false;
+        update();
+    }
 
 	void pollDs4()
 	{

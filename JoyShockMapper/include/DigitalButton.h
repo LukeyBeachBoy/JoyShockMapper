@@ -101,6 +101,7 @@ class DigitalButtonState : public pocket_fsm::StatePimplIF<DigitalButtonImpl>
 	virtual BtnState getState() const = 0;
 	void releaseOwnedToggles();
     DigitalButtonState *neutralForKeyboard();
+    bool hasHeldModifier() const;
 
 	virtual void swapPimpl(DigitalButtonState& otherState)
 	{
@@ -118,6 +119,7 @@ class DigitalButtonState : public pocket_fsm::StatePimplIF<DigitalButtonImpl>
 class DigitalButton : public pocket_fsm::FiniteStateMachine<DigitalButtonState>
 {
 public:
+    bool hasHeldModifier() const { return _currentState->hasHeldModifier(); }
 	// All digital _buttons need a reference to the same instance of the common structure within the same controller.
 	// It enables the _buttons to synchronize and be aware of the state of the whole controller, access gyro etc...
 	struct Context
@@ -128,6 +130,7 @@ public:
 		deque<ButtonID> chordStack; // Represents the current active _buttons in order from most recent to latest
 		std::map<std::string, VirtualMenuCommandState> menuCommands;
 		unique_ptr<Gamepad> _vigemController;
+        unique_ptr<Gamepad> _parkedVigemController;
 		function<DigitalButton *(ButtonID)> _getMatchingSimBtn; // A functor to JoyShock::getMatchingSimBtn
 		function<DigitalButton *(ButtonID, optional<MapIterator>&)> _getMatchingDiagBtn; // A functor to JoyShock::getMatchingDiagBtn
 		function<void(int small, int big)> _rumble;             // A functor to JoyShock::sendRumble

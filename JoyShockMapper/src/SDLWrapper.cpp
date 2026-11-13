@@ -6,6 +6,10 @@
 #include "TritonBootSound.h"
 #include "TouchpadRotation.h"
 #include "GyroReportWatchdog.h"
+#include "ManagedControllers.h"
+#include "AzeronCyborg.h"
+#include "AzeronNativeSession.h"
+#include <filesystem>
 #include "WindowsSessionInput.h"
 #include "JSMVariable.hpp"
  #include "TriggerEffectGenerator.h"
@@ -72,6 +76,22 @@ struct ControllerDevice
 		_sensorHandle = id;
 		_prevTouchState.t0Down = false;
 		_prevTouchState.t1Down = false;
+        const char *name = SDL_GetJoystickNameForID(id);
+        // Do not interpret the composite device's XInput interface as numbered buttons.
+        if (SDL_GetJoystickVendorForID(id) == 0x16d0 && SDL_GetJoystickProductForID(id) == 0x12f7 &&
+            (!SDL_IsGamepad(id) || (name && std::strstr(name, "DirectInput")))) {
+            _azeronJoystick = SDL_OpenJoystick(id);
+            if (_azeronJoystick) {
+                _ctrlr_type = JS_TYPE_AZERON_CYBORG;
+                _vendorId = SDL_GetJoystickVendor(_azeronJoystick);
+                _productId = SDL_GetJoystickProduct(_azeronJoystick);
+                const char *serial = SDL_GetJoystickSerial(_azeronJoystick);
+                const char *path = SDL_GetJoystickPath(_azeronJoystick);
+                _key = to_string(_vendorId) + ':' + to_string(_productId) + ':' + (serial ? serial : "") + ':' + (path ? path : "");
+                _azeronNative = std::make_unique<AzeronNative::Session>(serial ? serial : "");
+            }
+            return;
+        }
 		if (SDL_IsGamepad(id))
 		{
 			_sdlController = nullptr;
@@ -275,11 +295,13 @@ struct ControllerDevice
 			SDL_SendGamepadEffect(_sdlController, report, int(sizeof(report)));
 		}
 		SDL_CloseGamepad(_sdlController);
+        _azeronNative.reset();
+        if (_azeronJoystick) SDL_CloseJoystick(_azeronJoystick);
 	}
 
 	inline bool isValid()
 	{
-		return _sdlController != nullptr;
+		return _sdlController != nullptr || _azeronJoystick != nullptr;
 	}
 
 private:
@@ -362,6 +384,9 @@ public:
 	AdaptiveTriggerSetting _rightTriggerEffect;
 	uint8_t _micLight = 0;
 	SDL_Gamepad *_sdlController = nullptr;
+    SDL_Joystick *_azeronJoystick = nullptr;
+    std::unique_ptr<AzeronNative::Session> _azeronNative;
+    AzeronNative::Snapshot _azeronState;
 	TOUCH_STATE _prevTouchState;
 	// Last values pushed to the controller's firmware, so the settings feature
 	// report is only re-sent when something actually changed. -1 = never applied,
@@ -387,6 +412,7 @@ public:
 	// Rising edge of each grip sensor, for the haptic pulse.
 	bool _leftGripWasOn = false;
 	bool _rightGripWasOn = false;
+    triton_grip::WriteGate _gripWriteGate;
 	// When each grip (0 left, 1 right) last read held, for its release delay.
 	chrono::steady_clock::time_point _gripLastHeld[2] {};
 	// Last LED_BRIGHTNESS written; -1 = never, so a reconnect writes it again.
@@ -1092,27 +1118,16 @@ public:
 
 		// The controller's own jingle volume, kept in its flash: written when
 		// BOOT_SOUND_LEVEL asks for a level it was not already given, left alone
-		// at -1. A reconnect rebuilds ControllerDevice, so what was written is
-		// remembered per controller (by its key) for the life of the process;
-		// the controller itself never forgets it.
+		// at -1. Reapply on each connection: firmware updates and Steam can reset
+		// the persistent value while this mapper process remains running. A
+		// process-wide cache would then silently leave the factory jingles on.
 		if (const int level = SettingsManager::get<int>(SettingID::BOOT_SOUND_LEVEL)->value();
 		    triton_boot_sound::isLevel(level) && level != device->_appliedBootSoundLevel)
 		{
-			static std::map<std::string, int> writtenLevels; // under controller_lock, like the rest of this
-			const auto remembered = device->_key.empty() ? writtenLevels.end() : writtenLevels.find(device->_key);
-			if (remembered != writtenLevels.end() && remembered->second == level)
+			const auto report = triton_boot_sound::levelReport(level);
+			if (SDL_SendGamepadEffect(device->_sdlController, report.data(), int(report.size())))
 			{
 				device->_appliedBootSoundLevel = level;
-			}
-			else
-			{
-				const auto report = triton_boot_sound::levelReport(level);
-				if (SDL_SendGamepadEffect(device->_sdlController, report.data(), int(report.size())))
-				{
-					device->_appliedBootSoundLevel = level;
-					if (!device->_key.empty())
-						writtenLevels[device->_key] = level;
-				}
 			}
 		}
 
@@ -1123,6 +1138,16 @@ public:
 		const int guard = triton_grip::hysteresis(SettingsManager::get<float>(SettingID::GRIP_FLICKER_GUARD)->value());
 		const auto pending = triton_grip::pending(range, guard,
 		    device->_appliedGripRange, device->_appliedGripRelease);
+
+        bool touching = false;
+        for (int pad = 0; pad < SDL_GetNumGamepadTouchpads(device->_sdlController); ++pad) {
+            bool down = false;
+            if (SDL_GetGamepadTouchpadFinger(device->_sdlController, pad, 0, &down, nullptr, nullptr, nullptr)) touching |= down;
+        }
+        // Keep the last applied values while a finger is down. Recompute pending
+        // from the final live profile after release: a quick chord round trip
+        // must not replay its intermediate hardware calibration afterward.
+        if (!device->_gripWriteGate.ready(touching, SDL_GetTicks())) return;
 
 		if (pending.empty())
 			return;
@@ -1160,6 +1185,7 @@ public:
 
 	void updateControllerSettings(int handle, ControllerDevice *device)
 	{
+		if (device->_ctrlr_type != JS_TYPE_STEAM_CONTROLLER_2026) return;
 		// Hardware settings and automatic haptics must read the same device /
 		// model scope as its input callback. A held chord is isolated: reading
 		// the shared defaults here missed both its thresholds and its pulses.
@@ -1176,16 +1202,31 @@ public:
 	{
 		RaiseThreadPriority();
 		InitPollingTimer();
+		AzeronNative::InputQueue::Batch azeronBatch;
 
 		while (keep_polling)
 		{
 			auto tick_time = SettingsManager::get<float>(SettingID::TICK_TIME)->value();
 			PollingTimer(uint64_t(tick_time));
 
+			// Commands (including shutdown) own configuration before requesting
+			// controller_lock. Wait in that same order: waiting inside the SDL
+			// lock lets successive callbacks starve a command for whole seconds.
+			// Still refresh raw buttons when busy so shutdown sees their release.
+			std::unique_lock<std::recursive_timed_mutex> pollConfiguration;
+			const bool processInputs = ControllerContext::lockForPoll(pollConfiguration);
 			lock_guard guard(controller_lock);
 			SDL_UpdateGamepads();
+			if (!processInputs) continue;
 			for (auto iter = _controllerMap.begin(); iter != _controllerMap.end(); ++iter)
 			{
+				auto *native = iter->second->_azeronNative.get();
+				// Do not dequeue edges if a configuration command owns the lock.
+				// Holding it across the batch also prevents a layer/profile change
+				// between the press and release of the same captured tap.
+				std::unique_lock<std::recursive_timed_mutex> nativeConfiguration;
+				if (native && !ControllerContext::lockForPoll(nativeConfiguration)) continue;
+				const auto readings = native ? native->take(azeronBatch) : size_t(1);
 				updateControllerSettings(iter->first, iter->second);
 				serviceGyroReports(iter->first, iter->second);
 				if (g_callback)
@@ -1194,9 +1235,16 @@ public:
 					IMU_STATE dummy2;
 					memset(&dummy1, 0, sizeof(dummy1));
 					memset(&dummy2, 0, sizeof(dummy2));
-					g_callback(iter->first, dummy1, dummy1, dummy2, dummy2, tick_time);
+					// Replay all button edges received since the previous tick, in
+					// order. A press followed by a release must not collapse to zero.
+					// Analog-only reports coalesce to the freshest stick position.
+					for (size_t i = 0; i < readings; ++i) {
+						if (native) iter->second->_azeronState = azeronBatch[i];
+						g_callback(iter->first, dummy1, dummy1, dummy2, dummy2, tick_time);
+					}
 				}
-				if (g_touch_callback
+				else if (native) iter->second->_azeronState = azeronBatch[readings - 1];
+				if (g_touch_callback && !native
 #ifdef _WIN32
                     && !windowsSignInCapturing(iter->first)
 #endif
@@ -1207,7 +1255,7 @@ public:
 					iter->second->_prevTouchState = touch;
 				}
 				// Perform rumble
-				SDL_RumbleGamepad(iter->second->_sdlController, iter->second->_big_rumble, iter->second->_small_rumble, Uint32(tick_time + 5));
+				if (iter->second->_sdlController) SDL_RumbleGamepad(iter->second->_sdlController, iter->second->_big_rumble, iter->second->_small_rumble, Uint32(tick_time + 5));
 			}
 
 			// One mouse event per tick, no matter how many sources moved it: both
@@ -1257,6 +1305,48 @@ public:
 		}
 	}
 
+	// Load once after JSM_DIRECTORY is set, before opening any controller.
+	// Profile resets and AutoLoad must never broaden this explicit selection.
+	const ManagedControllers &managedControllers() {
+		static const auto policy = [] {
+			try {
+				const auto path = std::filesystem::current_path() / "ManagedControllers.txt";
+				if (!std::filesystem::exists(path)) {
+					COUT_INFO << "[MANAGED] No policy in " << path.string() << "; standalone controller selection.\n";
+					return ManagedControllers{};
+				}
+				auto policy = ManagedControllers::load(path.string());
+				COUT_INFO << "[MANAGED] Loaded " << path.string() << '\n';
+				return policy;
+			} catch (const std::exception &error) {
+				CERR << "ManagedControllers.txt: " << error.what() << ". No controllers will be managed.\n";
+				return ManagedControllers::denyAll();
+			}
+		}();
+		return policy;
+	}
+    // Azeron exposes an idle XInput companion beside its full DirectInput
+    // keypad. Opening both creates a second virtual pad and a misleading Xbox
+    // editor. Prefer its numbered interface; retain XInput if it is the only one.
+    bool azeronCompanion(SDL_JoystickID id) {
+        if (SDL_GetJoystickVendorForID(id) != 0x16d0 || SDL_GetJoystickProductForID(id) != 0x12f7 || !SDL_IsGamepad(id)) return false;
+        const char *name = SDL_GetJoystickNameForID(id);
+        if (name && std::strstr(name, "DirectInput")) return false;
+        int count = 0;
+        auto ids = SDL_GetJoysticks(&count);
+        bool found = false;
+        for (int i = 0; i < count; ++i) {
+            const char *other = SDL_GetJoystickNameForID(ids[i]);
+            if (ids[i] != id && SDL_GetJoystickVendorForID(ids[i]) == 0x16d0 && SDL_GetJoystickProductForID(ids[i]) == 0x12f7 &&
+                (!SDL_IsGamepad(ids[i]) || (other && std::strstr(other, "DirectInput")))) { found = true; break; }
+        }
+        SDL_free(ids);
+        return found;
+    }
+    bool manages(SDL_JoystickID id) {
+        return managedControllers().allows(SDL_GetJoystickVendorForID(id), SDL_GetJoystickProductForID(id)) && !azeronCompanion(id);
+    }
+
 	int ConnectDevices() override
 	{
 		return ConnectDevices({});
@@ -1288,6 +1378,7 @@ public:
 		for (int i = 0; i < count; ++i)
 		{
 			SDL_JoystickID joystickId = joysticksArray[i];
+			if (!manages(joystickId)) continue;
 			if (!selectedDeviceIds.empty() &&
 				std::find(selectedDeviceIds.begin(), selectedDeviceIds.end(), int(joystickId)) == selectedDeviceIds.end())
 			{
@@ -1351,16 +1442,25 @@ public:
 		std::lock_guard guard(controller_lock);
 		int count = 0;
 		SDL_JoystickID *joysticksArray = SDL_GetJoysticks(&count);
-		SDL_free(joysticksArray);
 		DeviceCensus census;
 		census.listed = count;
+		// With no explicit selection, retain AutoConnect's virtual-output
+		// discount. An unrestricted policy allows our own Xbox/DS4 outputs too;
+		// reporting that as a hardware-only count makes every slot that changes
+		// VIRTUAL_CONTROLLER reopen the physical controllers.
+        if (managedControllers().enabled()) {
+			census.managedListed = 0;
+			for (int i = 0; i < count; ++i)
+				if (manages(joysticksArray[i])) ++census.managedListed;
+		}
+		SDL_free(joysticksArray);
 		census.opened = int(_controllerMap.size());
 		census.failedToOpen = _failedToOpen;
 		// A pad that switched off after we opened it: SDL removes its joystick
 		// but keeps the gamepad object valid, answering with its last state.
 		for (const auto &entry : _controllerMap)
 		{
-			if (entry.second->isValid() && !SDL_GamepadConnected(entry.second->_sdlController))
+			if (entry.second->isValid() && (entry.second->_azeronJoystick ? !SDL_JoystickConnected(entry.second->_azeronJoystick) : !SDL_GamepadConnected(entry.second->_sdlController)))
 			{
 				++census.disconnected;
 			}
@@ -1381,6 +1481,7 @@ public:
 		for (int i = 0; i < count; ++i)
 		{
 			SDL_JoystickID joystickId = joysticksArray[i];
+            if (azeronCompanion(joystickId)) continue;
 			bool isGamepad = SDL_IsGamepad(joystickId);
 			const char *name = isGamepad ? SDL_GetGamepadNameForID(joystickId) : SDL_GetJoystickNameForID(joystickId);
 			int vendorId = isGamepad ? SDL_GetGamepadVendorForID(joystickId) : SDL_GetJoystickVendorForID(joystickId);
@@ -1614,6 +1715,9 @@ public:
     uint64_t GetSupportedButtons(int deviceId) override { return ReadButtons(deviceId, true); }
     uint64_t ReadButtons(int deviceId, bool supported)
     {
+        if (_controllerMap[deviceId]->_azeronJoystick) {
+            return supported ? AzeronNative::supported : _controllerMap[deviceId]->_azeronState.buttons;
+        }
         auto readButton = [&](SDL_GamepadButton button) {
             auto pad = _controllerMap[deviceId]->_sdlController;
             return supported ? SDL_GamepadHasButton(pad, button) : SDL_GetGamepadButton(pad, button);
@@ -1785,31 +1889,37 @@ public:
 
 	float GetLeftX(int deviceId) override
 	{
+        if (_controllerMap[deviceId]->_azeronJoystick) return _controllerMap[deviceId]->_azeronState.x;
 		return SDL_GetGamepadAxis(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_AXIS_LEFTX) / (float)SDL_JOYSTICK_AXIS_MAX;
 	}
 
 	float GetLeftY(int deviceId) override
 	{
+        if (_controllerMap[deviceId]->_azeronJoystick) return _controllerMap[deviceId]->_azeronState.y;
 		return -SDL_GetGamepadAxis(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_AXIS_LEFTY) / (float)SDL_JOYSTICK_AXIS_MAX;
 	}
 
 	float GetRightX(int deviceId) override
 	{
+        if (_controllerMap[deviceId]->_azeronJoystick) return 0.f;
 		return SDL_GetGamepadAxis(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_AXIS_RIGHTX) / (float)SDL_JOYSTICK_AXIS_MAX;
 	}
 
 	float GetRightY(int deviceId) override
 	{
+        if (_controllerMap[deviceId]->_azeronJoystick) return 0.f;
 		return -SDL_GetGamepadAxis(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_AXIS_RIGHTY) / (float)SDL_JOYSTICK_AXIS_MAX;
 	}
 
 	float GetLeftTrigger(int deviceId) override
 	{
+        if (_controllerMap[deviceId]->_azeronJoystick) return 0.f;
 		return (SDL_GetGamepadAxis(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_AXIS_LEFT_TRIGGER)) / (float)(SDL_JOYSTICK_AXIS_MAX);
 	}
 
 	float GetRightTrigger(int deviceId) override
 	{
+        if (_controllerMap[deviceId]->_azeronJoystick) return 0.f;
 		return (SDL_GetGamepadAxis(_controllerMap[deviceId]->_sdlController, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) / (float)(SDL_JOYSTICK_AXIS_MAX);
 	}
 
@@ -1951,6 +2061,10 @@ public:
 		return _controllerMap[deviceId]->_ctrlr_type;
 	}
 
+    std::string GetNativeInputStatus(int deviceId) override {
+        auto it = _controllerMap.find(deviceId);
+        return it != _controllerMap.end() && it->second->_azeronNative ? it->second->_azeronState.status : "";
+    }
 	std::string GetControllerKey(int deviceId) override
 	{
 		auto device = _controllerMap.find(deviceId);

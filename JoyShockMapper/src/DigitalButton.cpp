@@ -84,7 +84,8 @@ private:
 public:
 	multimap<BtnEvent, Callback> _instantReleaseQueue;
 	unsigned int _turboApplies = 0;
-	unsigned int _turboReleases = 0;
+	float _turboReleaseAt = 0;
+	bool _turboPending = false;
 	struct BindingTurbo { float next = 0; float releaseAt = 0; vector<Callback> pending; };
 	map<size_t, BindingTurbo> _bindingTurbos;
 	BindingTurbo *_capturingTurbo = nullptr;
@@ -132,7 +133,8 @@ public:
 		_instantReleaseQueue.clear();
 		_nameToRelease.clear();
 		_turboApplies = 0;
-		_turboReleases = 0;
+		_turboReleaseAt = 0;
+		_turboPending = false;
 		_bindingTurbos.clear();
 	}
 
@@ -576,6 +578,8 @@ class ActiveHoldPress : public ActiveMappingState
 		pimpl()->_keyToRelease->ProcessBindingTurbos(0, *pimpl());
 		pimpl()->_keyToRelease->ProcessEvent(BtnEvent::OnTurbo, *pimpl());
 		pimpl()->_turboApplies++;
+		pimpl()->_turboReleaseAt = MAGIC_INSTANT_DURATION;
+		pimpl()->_turboPending = true;
 	}
 
 	REACT(Pressed)
@@ -587,15 +591,19 @@ class ActiveHoldPress : public ActiveMappingState
 		{
 			pimpl()->ReleaseInstant(BtnEvent::OnHold);
 		}
-		if (floorf((elapsed_time - e.holdTime) / e.turboTime) >= pimpl()->_turboApplies)
-		{
-			pimpl()->_keyToRelease->ProcessEvent(BtnEvent::OnTurbo, *pimpl());
-			pimpl()->_turboApplies++;
-		}
-		if (elapsed_time > e.holdTime + pimpl()->_turboReleases * e.turboTime + MAGIC_INSTANT_DURATION)
+		const float turboElapsed = std::max(0.f, elapsed_time - e.holdTime);
+		if (pimpl()->_turboPending && turboElapsed >= pimpl()->_turboReleaseAt)
 		{
 			pimpl()->ReleaseInstant(BtnEvent::OnTurbo);
-			pimpl()->_turboReleases++;
+			pimpl()->_turboPending = false;
+		}
+		if (floorf(turboElapsed / e.turboTime) >= pimpl()->_turboApplies)
+		{
+			pimpl()->_keyToRelease->ProcessEvent(BtnEvent::OnTurbo, *pimpl());
+			// Skip missed intervals instead of repaying them on successive ticks.
+			pimpl()->_turboApplies = static_cast<unsigned int>(floorf(turboElapsed / e.turboTime)) + 1;
+			pimpl()->_turboReleaseAt = turboElapsed + std::min(float(MAGIC_INSTANT_DURATION), e.turboTime * .5f);
+			pimpl()->_turboPending = true;
 		}
 	}
 
@@ -1176,6 +1184,16 @@ class InstRelease : public DigitalButtonState
 };
 
 // Keyboard ownership must cancel held/turbo outputs without generating a tap.
+bool DigitalButtonState::hasHeldModifier() const {
+    const auto *impl = const_cast<DigitalButtonState*>(this)->pimpl();
+    for (const auto &[name, key] : impl->_heldOutputs) {
+        // Windows virtual key values are also used by the portable key parser.
+        if ((key.code >= 0x10 && key.code <= 0x12) ||
+            (key.code >= 0xa0 && key.code <= 0xa5) || key.code == 0x5b || key.code == 0x5c) return true;
+    }
+    return false;
+}
+
 // Replacing the FSM bypasses ordinary Released, which could execute OnTap.
 DigitalButtonState *DigitalButtonState::neutralForKeyboard() {
     auto *impl = pimpl();

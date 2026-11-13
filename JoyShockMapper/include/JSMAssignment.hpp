@@ -31,6 +31,7 @@ protected:
 		smatch results;
 		_ASSERT_EXPR(_parse, L"There is no function defined to parse this command.");
 		const string argStr(arguments);
+		static const regex assignmentPattern(R"(\s*=\s*(.*))");
 		if (arguments.empty())
 		{
 			displayCurrentValue();
@@ -40,7 +41,7 @@ protected:
 			// Show help.
 			COUT << _help << '\n';
 		}
-		else if (regex_match(argStr, results, regex(R"(\s*=\s*(.*))")))
+		else if (regex_match(argStr, results, assignmentPattern))
 		{
 			string assignment(results.empty() ? arguments : results[1].str());
 			if (assignment.rfind("DEFAULT", 0) == 0)

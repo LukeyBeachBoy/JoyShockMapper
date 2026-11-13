@@ -18,6 +18,16 @@ inline std::string key(const std::string &line) {
     std::transform(result.begin(), result.end(), result.begin(), [](unsigned char c){return std::toupper(c);});
     return result;
 }
+inline bool hasSharedSetting(const std::vector<std::string> &lines, const std::string &setting) {
+    return std::any_of(lines.begin(), lines.end(), [&](const std::string &candidate) {
+        const auto text = trim(candidate);
+        if (text.empty() || text.front() == '#' || text.find('=') == std::string::npos) return false;
+        const auto assigned = key(text);
+        if (assigned == setting) return true;
+        // The legacy common deadzone commands configure both sticks.
+        return (setting == "LEFT_STICK_DEADZONE_INNER" || setting == "LEFT_STICK_DEADZONE_OUTER") && assigned == setting.substr(5);
+    });
+}
 inline std::string translateToken(std::string token, bool left) {
     const std::string side = left ? "LEFT_" : "RIGHT_";
     if (token == side + "GRID_REQUIRES_CLICK") return "TOUCHPAD_GRID_REQUIRES_CLICK";

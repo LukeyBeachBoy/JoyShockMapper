@@ -89,6 +89,8 @@ private:
     vector<string> _restoreLines;
     bool _chordLoading = false;
     bool _controllerLoading = false;
+    bool _slotLoading = false;
+    string _pendingFocusProfile;
     void applyControllerVariants();
     vector<string> _loadingFiles;
     // The line being read in each file of _loadingFiles, so a line that cannot
@@ -101,6 +103,9 @@ private:
 
 public:
 	CmdRegistry();
+    bool slotLoading() const { return _slotLoading; }
+    bool hasPendingFocusProfile();
+    void serviceFocusProfile();
     bool takeAutoLoadRetry() { return _deferredAutoLoad.takeRetry(); }
     static string activeProfile();
     static string activeProfile(int handle);

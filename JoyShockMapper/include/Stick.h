@@ -2,6 +2,7 @@
 
 #include "JoyShockMapper.h"
 #include "DigitalButton.h"
+#include "StickDirections.h"
 #include <chrono>
 
 class JoyShock;
@@ -91,6 +92,8 @@ struct Stick
 	// rather than leaving two segments pressed at once.
 	int _menuSelected = -1;
 	int _touchpadIndex = -1;
+	StickDirections::State directionState;
+	bool keyboardDirectionsActive = false;
 
 	// Flick stick
 	chrono::steady_clock::time_point started_flick;

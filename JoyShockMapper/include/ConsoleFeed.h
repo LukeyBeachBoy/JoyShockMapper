@@ -18,12 +18,32 @@ inline void append(const std::string &text) {
 inline std::string json() {
   std::lock_guard<std::mutex> lock(mutex);
   std::string result = "\"";
-  for (unsigned char c : tail) {
+  for (size_t i = 0; i < tail.size(); ++i) {
+    const auto c = static_cast<unsigned char>(tail[i]);
     if (c == '\n') result += "\\n";
     else if (c == '\r') result += "\\r";
     else if (c == '\t') result += "\\t";
     else if (c == '"') result += "\\\"";
     else if (c == '\\') result += "\\\\";
+    else if (c >= 128) {
+      // A Windows console/error message can contain an ANSI byte, or the
+      // bounded tail can start inside a UTF-8 sequence. Never let that make
+      // the entire controller telemetry packet invalid JSON/UTF-8.
+      const size_t length = c >= 0xc2 && c <= 0xdf ? 2 : c >= 0xe0 && c <= 0xef ? 3 : c >= 0xf0 && c <= 0xf4 ? 4 : 0;
+      bool valid = length != 0 && i + length <= tail.size();
+      for (size_t n = 1; valid && n < length; ++n) {
+        const auto next = static_cast<unsigned char>(tail[i+n]);
+        valid = next >= 0x80 && next <= 0xbf;
+        if (n == 1) {
+          if (c == 0xe0) valid = valid && next >= 0xa0;
+          if (c == 0xed) valid = valid && next <= 0x9f;
+          if (c == 0xf0) valid = valid && next >= 0x90;
+          if (c == 0xf4) valid = valid && next <= 0x8f;
+        }
+      }
+      if (valid) { result.append(tail, i, length); i += length - 1; }
+      else result += "\\ufffd";
+    }
     else if (c >= 32) result += char(c);
   }
   return result + "\"";

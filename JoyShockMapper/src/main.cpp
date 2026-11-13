@@ -14,6 +14,7 @@
 #include "JoyShock.h"
 #include "Telemetry.h"
 #include "StudioFeedback.h"
+#include "StudioSlotFilter.h"
 #include "ToneSequence.h"
 #include "NaturalCurve.h"
 #include "PowerCurve.h"
@@ -22,6 +23,8 @@
 #include "JumpCurve.h"
 #include "TouchAreaMapping.h"
 #include "ConfigErrors.h"
+#include "ProfileOutputTransaction.h"
+#include "VirtualControllerLifecycle.h"
 #include <filesystem>
 #include <algorithm>
 #include <atomic>
@@ -87,6 +90,18 @@ void prepareControllerProfile(int handle) {
         for (auto &button : *buttons) button.cancelForKeyboard();
     for (auto &pad : jc->_touchpads) for (auto &entry : pad.buttons) entry.second.cancelForKeyboard();
     jc->stopTilt();
+    if (jc->_context->_vigemController) jc->_context->_vigemController->neutralize();
+}
+
+bool mappedModifiersHeld() {
+    for (const auto &[id, jc] : handle_to_joyshock) {
+        lock_guard guard(jc->_context->callback_lock);
+        for (auto *buttons : { &jc->_buttons, &jc->_gridButtons, &jc->_leftGridButtons, &jc->_rightGridButtons, &jc->_leftStickMenuButtons, &jc->_rightStickMenuButtons })
+            for (const auto &button : *buttons) if (button.hasHeldModifier()) return true;
+        for (const auto &pad : jc->_touchpads)
+            for (const auto &entry : pad.buttons) if (entry.second.hasHeldModifier()) return true;
+    }
+    return false;
 }
 
 int input_pipe_fd[2];
@@ -1121,6 +1136,23 @@ static void dispatchPhysicalButtons(shared_ptr<JoyShock> &jc, bool menuSnapshot)
     else jc->handleButtonChange(id, pressed);
   };
 	uint64_t buttons = jsl->GetButtons(jc->_handle);
+    unsigned slotMouse = 0;
+#ifdef _WIN32
+    if (StudioSlotFilter::configured.load(std::memory_order_relaxed)) {
+        if (GetAsyncKeyState(VK_XBUTTON1) < 0) slotMouse |= 1;
+        if (GetAsyncKeyState(VK_XBUTTON2) < 0) slotMouse |= 2;
+    }
+#endif
+    buttons = StudioSlotFilter::filter(jc->_handle, buttons, slotMouse);
+    if (jc->_controllerType == JS_TYPE_AZERON_CYBORG) {
+        for (int i = 0; i < 32; ++i)
+            changeButton(ButtonID(int(ButtonID::JOY1) + i), (buttons & (1ULL << i)) != 0);
+        changeButton(ButtonID::UP, (buttons & (1ULL << 32)) != 0);
+        changeButton(ButtonID::RIGHT, (buttons & (1ULL << 33)) != 0);
+        changeButton(ButtonID::DOWN, (buttons & (1ULL << 34)) != 0);
+        changeButton(ButtonID::LEFT, (buttons & (1ULL << 35)) != 0);
+        return;
+    }
 	// button mappings
 	if (jc->_splitType != JS_SPLIT_TYPE_RIGHT)
 	{
@@ -1360,7 +1392,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
     if (jsl->GetLeftTrigger(jcHandle) >= .5f) signInButtons |= uint64_t(1) << JSOFFSET_ZL;
     if (jsl->GetRightTrigger(jcHandle) >= .5f) signInButtons |= uint64_t(1) << JSOFFSET_ZR;
     static const auto signInProfile = (filesystem::current_path()/"profiles-library"/"Windows Sign-in.txt").string();
-    if (captureWindowsSignIn(jcHandle,signInButtons,signInProfile,[&] {
+    if (jc->_controllerType != JS_TYPE_AZERON_CYBORG && captureWindowsSignIn(jcHandle,signInButtons,signInProfile,[&] {
         for (auto *buttons : { &jc->_buttons, &jc->_gridButtons, &jc->_leftGridButtons, &jc->_rightGridButtons, &jc->_leftStickMenuButtons, &jc->_rightStickMenuButtons })
             for (auto &button : *buttons) button.cancelForKeyboard();
         for (auto &pad : jc->_touchpads) for (auto &entry : pad.buttons) entry.second.cancelForKeyboard();
@@ -1649,6 +1681,14 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		}
 	}
 	float gyroLength = sqrt(gyroX * gyroX + gyroY * gyroY);
+	TelemetryMotionPreview motionPreview;
+	motionPreview.timestampMs = std::chrono::duration_cast<std::chrono::milliseconds>(jc->_timeNow.time_since_epoch()).count();
+	motionPreview.input = { gyroX, gyroY };
+	{
+		const Quat neutral(jc->neutralQuatW, jc->neutralQuatX, jc->neutralQuatY, jc->neutralQuatZ);
+		const Vec grav = Vec(inGravX, inGravY, inGravZ) * neutral.Inverse();
+		motionPreview.tiltAngle = atan2f(sqrtf(grav.x * grav.x + grav.z * grav.z), -grav.y) * 180.f / M_PI;
+	}
 	// do gyro smoothing
 	const bool useDecaySmoothing = jc->getSetting<Switch>(SettingID::GYRO_SMOOTHING_DECAY) == Switch::ON;
 	if (useDecaySmoothing)
@@ -1689,6 +1729,8 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	const bool floorEnabled = floorConfigured && !(jc->getSetting<Switch>(SettingID::GYRO_STICK_DEFLECTION) == Switch::ON &&
 	  (steadyingOutput == GyroOutput::LEFT_STICK || steadyingOutput == GyroOutput::RIGHT_STICK));
 	const float steadyingInputSpeed = gyroLength;
+	motionPreview.filtered = { gyroX, gyroY };
+	motionPreview.derivative = jc->oneEuroDerivative();
 	const float steadyingFactor = gyroSteadyingFactor(gyroLength, speed, recovery);
 	if (floorEnabled)
 	{
@@ -1729,8 +1771,8 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		break;
 	case GyroIgnoreMode::LEFT_STICK:
 	{
-		float leftX = jsl->GetLeftX(jc->_handle);
-		float leftY = jsl->GetLeftY(jc->_handle);
+		const auto leftInput = jc->getStickInput(true);
+		float leftX = leftInput.first, leftY = leftInput.second;
 		float leftLength = sqrtf(leftX * leftX + leftY * leftY);
 		float deadzoneInner = jc->getSetting(SettingID::LEFT_STICK_DEADZONE_INNER);
 		float deadzoneOuter = jc->getSetting(SettingID::LEFT_STICK_DEADZONE_OUTER);
@@ -1769,8 +1811,8 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	break;
 	case GyroIgnoreMode::RIGHT_STICK:
 	{
-		float rightX = jsl->GetRightX(jc->_handle);
-		float rightY = jsl->GetRightY(jc->_handle);
+		const auto rightInput = jc->getStickInput(false);
+		float rightX = rightInput.first, rightY = rightInput.second;
 		float rightLength = sqrtf(rightX * rightX + rightY * rightY);
 		float deadzoneInner = jc->getSetting(SettingID::RIGHT_STICK_DEADZONE_INNER);
 		float deadzoneOuter = jc->getSetting(SettingID::RIGHT_STICK_DEADZONE_OUTER);
@@ -2017,6 +2059,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 
 	// Apply angle snap after decel brake detection so braking is not triggered by snap-induced slowdown
 	const float gyroAngleSnapDeg = jc->getSetting(SettingID::GYRO_ANGLE_SNAP);
+	motionPreview.snapInput = { gyroXVelocity, gyroYVelocity };
 	if (gyroAngleSnapDeg > 0.0f && (gyroXVelocity != 0.0f || gyroYVelocity != 0.0f))
 	{
 		const bool smoothSnap = jc->getSetting<Switch>(SettingID::GYRO_ANGLE_SNAP_EASE) == Switch::ON;
@@ -2145,6 +2188,9 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	  normalizeSens(appliedSensY * (trackball_y_pressed ? 1.f : steadyingFactor), lowSensXY.second, hiSensXY.second));
 	telemetrySample.sensX = appliedSensX * (floorEnabled || trackball_x_pressed ? 1.f : steadyingFactor);
 	telemetrySample.sensY = appliedSensY * (floorEnabled || trackball_y_pressed ? 1.f : steadyingFactor);
+	motionPreview.omega = telemetrySample.omega;
+	motionPreview.sensX = telemetrySample.sensX;
+	motionPreview.sensY = telemetrySample.sensY;
 	telemetrySample.minThreshold = minThreshold;
 	telemetrySample.maxThreshold = maxThreshold;
 	telemetrySample.sMinX = lowSensXY.first;
@@ -2187,28 +2233,32 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 #ifdef SDL
 	// SDL path: fall back to applied update rate (loop iterations over a short window).
 	{
-		static size_t s_loopCount = 0;
-		static auto s_windowStart = std::chrono::steady_clock::now();
-		static double s_lastAppliedRate = 0.0;
+		struct AppliedRateWindow {
+			size_t loopCount = 0;
+			std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+			double lastRate = 0.0;
+		};
+		static std::unordered_map<int, AppliedRateWindow> appliedRates;
+		auto& rateWindow = appliedRates[jc->_handle];
 		constexpr double kWindowSeconds = 2.0;
 
-		s_loopCount++;
+		rateWindow.loopCount++;
 		const auto now = std::chrono::steady_clock::now();
 		const double elapsedSeconds =
-		  std::chrono::duration_cast<std::chrono::milliseconds>(now - s_windowStart).count() / 1000.0;
+		  std::chrono::duration_cast<std::chrono::milliseconds>(now - rateWindow.start).count() / 1000.0;
 		if (elapsedSeconds >= kWindowSeconds)
 		{
-			const double rate = s_loopCount / elapsedSeconds;
+			const double rate = rateWindow.loopCount / elapsedSeconds;
 			if (rate > 0.0)
 			{
-				s_lastAppliedRate = rate;
+				rateWindow.lastRate = rate;
 			}
-			s_loopCount = 0;
-			s_windowStart = now;
+			rateWindow.loopCount = 0;
+			rateWindow.start = now;
 		}
-		if (telemetrySample.sampleRateHz <= 0.0f && s_lastAppliedRate > 0.0)
+		if (telemetrySample.sampleRateHz <= 0.0f && rateWindow.lastRate > 0.0)
 		{
-			telemetrySample.sampleRateHz = static_cast<float>(s_lastAppliedRate);
+			telemetrySample.sampleRateHz = static_cast<float>(rateWindow.lastRate);
 		}
 	}
 #else
@@ -2222,6 +2272,8 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 		}
 	}
 #endif
+	motionPreview.sampleHz = telemetrySample.sampleRateHz;
+	jc->setMotionPreview(motionPreview);
 	if (Telemetry::IsDue())
 	{
 		telemetrySample.activeProfile = CmdRegistry::activeProfile();
@@ -2238,6 +2290,9 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			dev.handle = device->_handle;
 			dev.controllerType = device->_controllerType;
 			dev.supportedButtons = jsl->GetSupportedButtons(device->_handle);
+            dev.nativeInputStatus = jsl->GetNativeInputStatus(device->_handle);
+            dev.controllerId = ControllerContext::instanceKey(device->_handle);
+            dev.persistentIdentity = !jsl->GetControllerKey(device->_handle).empty();
 			dev.splitType = device->_splitType;
 			dev.vendorId = jsl->GetControllerVendor(device->_handle);
 			dev.productId = jsl->GetControllerProduct(device->_handle);
@@ -2248,6 +2303,7 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 				dev.touchpadWidth = dev.touchpadHeight = 0;
 #ifdef SDL
 			TelemetryDeviceStatus status;
+			status.motion = device->getMotionPreview();
       for (const auto &menu : device->_virtualMenus)
         status.virtualMenus.push_back({ menu.attachment.menu, int(menu.attachment.source), menu.result.open, menu.result.selected, menu.result.cursor, menu.result.x, menu.result.y, menu.result.navigating });
       if (device->_context->_vigemController) {
@@ -2260,12 +2316,16 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 			{
 				status.leftStick.x = jsl->GetLeftX(device->_handle);
 				status.leftStick.y = jsl->GetLeftY(device->_handle);
+				const auto adjusted = device->getStickInput(true);
+				status.adjustedLeftStick = {adjusted.first, adjusted.second};
 				status.triggers.left = jsl->GetLeftTrigger(device->_handle);
 			}
 			if (device->_splitType != JS_SPLIT_TYPE_LEFT)
 			{
 				status.rightStick.x = jsl->GetRightX(device->_handle);
 				status.rightStick.y = jsl->GetRightY(device->_handle);
+				const auto adjusted = device->getStickInput(false);
+				status.adjustedRightStick = {adjusted.first, adjusted.second};
 				status.triggers.right = jsl->GetRightTrigger(device->_handle);
 			}
 			const auto imu = jsl->GetIMUState(device->_handle);
@@ -2335,8 +2395,8 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
   const auto tilt = jc->getSetting<GyroSettings>(SettingID::TILT_ON);
   const auto tiltMode = jc->getSetting<StickMode>(SettingID::MOTION_STICK_MODE);
   const auto tiltStickActive = [&](bool left) {
-    float x = left ? jsl->GetLeftX(jc->_handle) : jsl->GetRightX(jc->_handle);
-    float y = left ? jsl->GetLeftY(jc->_handle) : jsl->GetRightY(jc->_handle);
+    const auto input = jc->getStickInput(left);
+    const float x = input.first, y = input.second;
     const auto mode = jc->getSetting<StickMode>(left ? SettingID::LEFT_STICK_MODE : SettingID::RIGHT_STICK_MODE);
     const float deadzone = mode == StickMode::FLICK
       ? 1.f - jc->getSetting(left ? SettingID::LEFT_STICK_DEADZONE_OUTER : SettingID::RIGHT_STICK_DEADZONE_OUTER)
@@ -2373,8 +2433,9 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	{
 		// let's do these sticks... don't want to constantly send input, so we need to compare them to last time
 		auto axisSign = jc->getSetting<AxisSignPair>(SettingID::LEFT_STICK_AXIS);
-		float calX = jsl->GetLeftX(jc->_handle) * float(axisSign.first);
-		float calY = jsl->GetLeftY(jc->_handle) * float(axisSign.second);
+		const auto input = jc->getStickInput(true);
+		float calX = input.first * float(axisSign.first);
+		float calY = input.second * float(axisSign.second);
     if (jc->virtualMenuConsumes(VirtualMenuSource::LSTICK)) calX = calY = 0.f;
 
 		jc->processStick(calX, calY, jc->_leftStick, mouseCalibrationFactor, deltaTime, leftAny, lockMouse, camSpeedX, camSpeedY);
@@ -2385,8 +2446,9 @@ void joyShockPollCallback(int jcHandle, JOY_SHOCK_STATE state, JOY_SHOCK_STATE l
 	if (jc->_splitType != JS_SPLIT_TYPE_LEFT)
 	{
 		auto axisSign = jc->getSetting<AxisSignPair>(SettingID::RIGHT_STICK_AXIS);
-		float calX = jsl->GetRightX(jc->_handle) * float(axisSign.first);
-		float calY = jsl->GetRightY(jc->_handle) * float(axisSign.second);
+		const auto input = jc->getStickInput(false);
+		float calX = input.first * float(axisSign.first);
+		float calY = input.second * float(axisSign.second);
     if (jc->virtualMenuConsumes(VirtualMenuSource::RSTICK)) calX = calY = 0.f;
 
 		jc->processStick(calX, calY, jc->_rightStick, mouseCalibrationFactor, deltaTime, rightAny, lockMouse, camSpeedX, camSpeedY);
@@ -2864,7 +2926,9 @@ bool do_RESET_MAPPINGS(CmdRegistry *registry)
 	if (registry)
 	{
 		registry->loadConfigFile("StudioDefaults.txt");
-		if (!registry->loadConfigFile("OnReset.txt"))
+		// A slot switch changes mappings, not the physical connection. Keep
+		// user-authored reset hooks for ordinary RESET_MAPPINGS/loads only.
+		if (!registry->slotLoading() && !registry->loadConfigFile("OnReset.txt"))
 		{
 			COUT << "There is no ";
 			COUT_INFO << "OnReset.txt";
@@ -3721,34 +3785,18 @@ void updateRingModeFromStickMode(JSMVariable<RingMode> *stickRingMode, const Sti
 
 ControllerScheme updateVirtualController(ControllerScheme prevScheme, ControllerScheme nextScheme)
 {
+	if (ProfileOutput::defer()) return nextScheme;
 	string error;
 	bool success = true;
 	for (auto &js : handle_to_joyshock)
 	{
         if (!ControllerContext::matches(js.second->_controllerType, js.first, js.second->_vendorId, js.second->_productId)) continue;
-		lock_guard guard(js.second->_context->callback_lock);
-		if (!js.second->_context->_vigemController ||
-		  js.second->_context->_vigemController->getType() != nextScheme)
-		{
-			if (nextScheme == ControllerScheme::NONE)
-			{
-				js.second->_context->_vigemController.reset(nullptr);
-			}
-			else
-			{
-				js.second->_context->_vigemController.reset(Gamepad::getNew(nextScheme, bind(&JoyShock::onVirtualControllerNotification, js.second.get(), placeholders::_1, placeholders::_2, placeholders::_3)));
-				success &= js.second->_context->_vigemController && js.second->_context->_vigemController->isInitialized(&error);
-				if (!error.empty())
-				{
-					CERR << error << '\n';
-					error.clear();
-				}
-				if (!success)
-				{
-					js.second->_context->_vigemController.release();
-					break;
-				}
-			}
+		success = setVirtualController(js.second->_context->_vigemController, js.second->_context->callback_lock,
+		    nextScheme, bind(&JoyShock::onVirtualControllerNotification, js.second.get(), placeholders::_1, placeholders::_2, placeholders::_3), error,
+            ProfileOutput::studioTransitions ? &js.second->_context->_parkedVigemController : nullptr);
+		if (!success) {
+			CERR << "[ViGEm Client] " << (error.empty() ? "Could not create virtual controller" : error) << '\n';
+			break;
 		}
 	}
 	return success ? nextScheme : prevScheme;
@@ -3756,6 +3804,7 @@ ControllerScheme updateVirtualController(ControllerScheme prevScheme, Controller
 
 void onVirtualControllerChange(const ControllerScheme &newScheme)
 {
+	if (ProfileOutput::depth) return;
 	for (auto &js : handle_to_joyshock)
 	{
         if (!ControllerContext::matches(js.second->_controllerType, js.first, js.second->_vendorId, js.second->_productId)) continue;
@@ -3779,6 +3828,7 @@ string virtualControllerAssignment(int handle) {
 }
 
 void refreshControllerOutput(int handle) {
+    if (ProfileOutput::defer()) return;
     auto it = handle_to_joyshock.find(handle);
     if (it == handle_to_joyshock.end()) return;
     ControllerContext::Guard scope(controllerModelForHandle(handle), handle, ControllerContext::isolatedScopes.count(ControllerContext::deviceKey(handle)) ? ControllerContext::deviceKey(handle) : ControllerContext::baseKey(handle));
@@ -3786,6 +3836,21 @@ void refreshControllerOutput(int handle) {
     updateVirtualController(scheme, scheme);
     lock_guard guard(it->second->_context->callback_lock);
     it->second->updateGridSize();
+}
+
+void refreshAllControllerOutputs() {
+    for (const auto &[id, jc] : handle_to_joyshock) {
+        // Read the final effective device value, including persistent instance
+        // overrides. A shared assignment must not overwrite another scope's pad.
+        ControllerContext::Guard read(controllerModelForHandle(id), id);
+        const auto scheme = SettingsManager::getV<ControllerScheme>(SettingID::VIRTUAL_CONTROLLER)->value();
+        {
+            ControllerContext::Guard target(controllerModelForHandle(id), id, ControllerContext::deviceKey(id));
+            updateVirtualController(scheme, scheme);
+        }
+        lock_guard guard(jc->_context->callback_lock);
+        jc->updateGridSize();
+    }
 }
 
 void refreshAutoLoadHelp(JSMAssignment<Switch> *autoloadCmd)
@@ -4155,7 +4220,10 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	commandRegistry->add((new GyroButtonAssignment(SettingID::GYRO_ON, true))->setListener() // Set only one listener
 	                       ->setHelp("Assign a controller button to enable the gyro when pressed."));
 
-  auto tilt_settings = new JSMSetting<GyroSettings>(SettingID::TILT_ON, GyroSettings());
+  // Tilt is opt-in. Keep the gyro's independent default unchanged.
+  GyroSettings tilt_defaults;
+  tilt_defaults.always_off = true;
+  auto tilt_settings = new JSMSetting<GyroSettings>(SettingID::TILT_ON, tilt_defaults);
   tilt_settings->setFilter([](GyroSettings current, GyroSettings next)
     { return next.ignore_mode != GyroIgnoreMode::INVALID ? next : current; });
   SettingsManager::add(tilt_settings);
@@ -4424,7 +4492,7 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	});
 	SettingsManager::add(gyro_steadying_floor);
 	commandRegistry->add((new JSMAssignment<FloatXY>(*gyro_steadying_floor))
-	  ->setHelp("Minimum low-speed steadying sensitivity in RWS (X [Y]). Default 0 preserves legacy velocity attenuation. Positive floors blend into the unattenuated curve, capped per axis. Hard cutoff still produces zero output."));
+	  ->setHelp("Minimum low-speed steadying sensitivity in RWS (X [Y]). Default 0 preserves legacy velocity attenuation. Positive floors use a smooth S-shaped transition into the unattenuated curve, capped per axis. Hard cutoff still produces zero output."));
 
 	auto gyro_haptic_intensity = new JSMSetting<float>(SettingID::GYRO_HAPTIC_INTENSITY, 0.f);
 	gyro_haptic_intensity->setFilter([](float current, float next) { return isfinite(next) ? clamp(next, 0.f, 100.f) : current; });
@@ -4508,6 +4576,51 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 	SettingsManager::add(left_stick_deadzone_outer);
 	commandRegistry->add((new JSMAssignment<float>(*left_stick_deadzone_outer))
 	                       ->setHelp("Defines a distance from the left stick's outer edge for which the stick will be considered fully tilted. This value can only be between 0 and 1 but it should be small. Stick input out of this deadzone will be adjusted."));
+
+  for (bool left : {true, false}) {
+    const auto directionSetting = [&](SettingID id, float initial, float low, float high, const char* help) {
+      auto setting = new JSMSetting<float>(id, initial);
+      setting->setFilter([=](float current, float next) { return isfinite(next) && next >= low && next <= high ? next : current; });
+      SettingsManager::add(setting);
+      commandRegistry->add((new JSMAssignment<float>(*setting))->setHelp(help));
+    };
+    directionSetting(left ? SettingID::LEFT_STICK_CARDINAL_WIDTH : SettingID::RIGHT_STICK_CARDINAL_WIDTH,
+      StickDirections::legacyWidth, 10.f, 90.f,
+      "Keyboard direction cardinal sector width in degrees. Default 53.130102 preserves legacy sectors. Wider values make single directions easier; 90 gives four-way movement. Does not affect analog output.");
+    directionSetting(left ? SettingID::LEFT_STICK_DIRECTION_HYSTERESIS : SettingID::RIGHT_STICK_DIRECTION_HYSTERESIS,
+      0.f, 0.f, 15.f,
+      "Keyboard direction boundary stability in degrees. Holds the current sector across small angular fluctuations, without a time delay. Default 0. Capped to preserve narrow diagonal sectors.");
+    directionSetting(left ? SettingID::LEFT_STICK_DIRECTION_DEADZONE : SettingID::RIGHT_STICK_DIRECTION_DEADZONE,
+      0.f, 0.f, .95f,
+      "Minimum stick radius to start a keyboard direction, 0 to 0.95. Uses the larger of this and the inner deadzone. Default 0 follows the inner deadzone. Rejects return bounce without altering analog output.");
+    directionSetting(left ? SettingID::LEFT_STICK_DIRECTION_RELEASE_MARGIN : SettingID::RIGHT_STICK_DIRECTION_RELEASE_MARGIN,
+      0.f, 0.f, .5f,
+      "Keyboard direction release hysteresis in stick radius. Release below activation minus this margin; a new direction still requires full activation. Default 0. Does not add a timed delay.");
+    auto calibration = new JSMSetting<Switch>(left ? SettingID::LEFT_STICK_CALIBRATION : SettingID::RIGHT_STICK_CALIBRATION, Switch::OFF);
+    calibration->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+    SettingsManager::add(calibration);
+    commandRegistry->add((new JSMAssignment<Switch>(*calibration))->setHelp("Independent natural direction calibration, before deadzones and all stick modes. OFF preserves existing geometry. Angles are corrections relative to STICK_ROTATION; ranges are fractions of ring-adjusted travel."));
+    directionSetting(left ? SettingID::LEFT_STICK_CALIBRATION_UP_ANGLE : SettingID::RIGHT_STICK_CALIBRATION_UP_ANGLE, 0.f, -40.f, 40.f, "Clockwise correction relative to common rotation, -40 to 40 degrees. Neighbouring directions interpolate continuously.");
+    directionSetting(left ? SettingID::LEFT_STICK_CALIBRATION_UP_RANGE : SettingID::RIGHT_STICK_CALIBRATION_UP_RANGE, 1.f, .1f, 1.f, "Reachable radius after ring scaling, 0.1 to 1. This travel maps to full output; adjacent directions interpolate continuously.");
+    directionSetting(left ? SettingID::LEFT_STICK_CALIBRATION_RIGHT_ANGLE : SettingID::RIGHT_STICK_CALIBRATION_RIGHT_ANGLE, 0.f, -40.f, 40.f, "Clockwise correction relative to common rotation, -40 to 40 degrees. Neighbouring directions interpolate continuously.");
+    directionSetting(left ? SettingID::LEFT_STICK_CALIBRATION_RIGHT_RANGE : SettingID::RIGHT_STICK_CALIBRATION_RIGHT_RANGE, 1.f, .1f, 1.f, "Reachable radius after ring scaling, 0.1 to 1. This travel maps to full output; adjacent directions interpolate continuously.");
+    directionSetting(left ? SettingID::LEFT_STICK_CALIBRATION_DOWN_ANGLE : SettingID::RIGHT_STICK_CALIBRATION_DOWN_ANGLE, 0.f, -40.f, 40.f, "Clockwise correction relative to common rotation, -40 to 40 degrees. Neighbouring directions interpolate continuously.");
+    directionSetting(left ? SettingID::LEFT_STICK_CALIBRATION_DOWN_RANGE : SettingID::RIGHT_STICK_CALIBRATION_DOWN_RANGE, 1.f, .1f, 1.f, "Reachable radius after ring scaling, 0.1 to 1. This travel maps to full output; adjacent directions interpolate continuously.");
+    directionSetting(left ? SettingID::LEFT_STICK_CALIBRATION_LEFT_ANGLE : SettingID::RIGHT_STICK_CALIBRATION_LEFT_ANGLE, 0.f, -40.f, 40.f, "Clockwise correction relative to common rotation, -40 to 40 degrees. Neighbouring directions interpolate continuously.");
+    directionSetting(left ? SettingID::LEFT_STICK_CALIBRATION_LEFT_RANGE : SettingID::RIGHT_STICK_CALIBRATION_LEFT_RANGE, 1.f, .1f, 1.f, "Reachable radius after ring scaling, 0.1 to 1. This travel maps to full output; adjacent directions interpolate continuously.");
+    auto rotation = new JSMSetting<float>(left ? SettingID::LEFT_STICK_ROTATION : SettingID::RIGHT_STICK_ROTATION, 0.f);
+    rotation->setFilter([](auto current, auto next) { return isfinite(next) && next >= -180.f && next <= 180.f ? next : current; });
+    SettingsManager::add(rotation);
+    commandRegistry->add((new JSMAssignment<float>(*rotation))->setHelp("Stick rotation in degrees, -180 to 180. Positive is clockwise. Applied before deadzones and all stick modes. Default 0."));
+    auto ring = new JSMSetting<Switch>(left ? SettingID::LEFT_STICK_RESTRICTOR_RING : SettingID::RIGHT_STICK_RESTRICTOR_RING, Switch::OFF);
+    ring->setFilter(&filterInvalidValue<Switch, Switch::INVALID>);
+    SettingsManager::add(ring);
+    commandRegistry->add((new JSMAssignment<Switch>(*ring))->setHelp("ON expands reduced restrictor-ring travel to full stick input. OFF (default) keeps normal travel. Uses this stick's RESTRICTOR_RANGE before deadzones and all modes."));
+    auto range = new JSMSetting<float>(left ? SettingID::LEFT_STICK_RESTRICTOR_RANGE : SettingID::RIGHT_STICK_RESTRICTOR_RANGE, .7f);
+    range->setFilter([](auto current, auto next) { return isfinite(next) && next >= .1f && next <= 1.f ? next : current; });
+    SettingsManager::add(range);
+    commandRegistry->add((new JSMAssignment<float>(*range))->setHelp("Reachable stick radius with the restrictor ring, 0.1 to 1. Default 0.7. Only used with RESTRICTOR_RING = ON; input at this radius becomes full travel."));
+  }
 
 	auto flick_deadzone_angle = new JSMSetting<float>(SettingID::FLICK_DEADZONE_ANGLE, 0.0f);
 	flick_deadzone_angle->setFilter(&filterPositive);
@@ -5736,7 +5849,7 @@ void initJsmSettings(CmdRegistry *commandRegistry)
 // entered once typed or injected characters are waiting; other console
 // events (focus, mouse, resize) are drained here, or they would wake the
 // wait for ever. Not a console (piped input): getline alone, as before.
-static void waitForConsoleCommand()
+static bool waitForConsoleCommand(DWORD timeout = INFINITE)
 {
 	// The handle cin reads, not GetStdHandle: Studio starts the mapper with a
 	// null stdin, and initConsole reopens the CRT's stdin on the console
@@ -5744,15 +5857,16 @@ static void waitForConsoleCommand()
 	HANDLE input = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(stdin)));
 	DWORD mode = 0;
 	if (input == INVALID_HANDLE_VALUE || !GetConsoleMode(input, &mode))
-		return;
+		return true;
 	// A line already buffered is read without waiting.
 	if (cin.rdbuf()->in_avail() > 0)
-		return;
+		return true;
 	for (;;)
 	{
 		// MWMO_INPUTAVAILABLE: also wake for messages already queued (one that
 		// arrived while a command ran), not only for ones that arrive later.
-		const DWORD woke = MsgWaitForMultipleObjectsEx(1, &input, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+		const DWORD woke = MsgWaitForMultipleObjectsEx(1, &input, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+		if (woke == WAIT_TIMEOUT) return false;
 		if (woke == WAIT_OBJECT_0 + 1)
 		{
 			MSG message;
@@ -5764,7 +5878,7 @@ static void waitForConsoleCommand()
 			continue;
 		}
 		if (woke != WAIT_OBJECT_0)
-			return; // Unexpected: fall back to a plain blocking read.
+			return true; // Unexpected: fall back to a plain blocking read.
 		INPUT_RECORD records[64];
 		DWORD count = 0;
 		if (!PeekConsoleInputW(input, records, DWORD(size(records)), &count) || count == 0)
@@ -5773,7 +5887,7 @@ static void waitForConsoleCommand()
 		{
 			const auto &record = records[index];
 			if (record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown && record.Event.KeyEvent.uChar.UnicodeChar != 0)
-				return; // a line is being typed or injected: getline takes it
+				return true; // a line is being typed or injected: getline takes it
 		}
 		// Only key releases and non-key events: consume them and wait again.
 		ReadConsoleInputW(input, records, count, &count);
@@ -5828,6 +5942,19 @@ int main(int argc, char *argv[])
 		}
 	}
 
+	// Select the configuration directory before constructing SDL or starting
+	// any workers. AutoConnect can take its first census during settings setup;
+	// its managed-device policy is cached on that first read.
+	for (int i = argc - 1; i >= 0; --i)
+	{
+#if _WIN32
+		string arg(&argv[i][0], &argv[i][wcslen(argv[i])]);
+#else
+		string arg = string(argv[i]);
+#endif
+		std::error_code error;
+		if (filesystem::is_directory(filesystem::path(arg), error) && SetCWD(arg)) break;
+	}
 	jsl.reset(JslWrapper::getNew());
 	whitelister.reset(Whitelister::getNew(false));
 
@@ -5860,20 +5987,6 @@ int main(int argc, char *argv[])
 	//  Threads need to be created before listeners
 	CmdRegistry commandRegistry;
 	initJsmSettings(&commandRegistry);
-
-	for (int i = argc - 1; i >= 0; --i)
-	{
-#if _WIN32
-		string arg(&argv[i][0], &argv[i][wcslen(argv[i])]);
-#else
-		string arg = string(argv[0]);
-#endif
-		if (filesystem::is_directory(filesystem::status(arg)) &&
-		  SettingsManager::getV<PathString>(SettingID::JSM_DIRECTORY)->set(arg).compare(arg) == 0)
-		{
-			break;
-		}
-	}
 
 	if (autoLoadThread && autoLoadThread->isRunning())
 	{
@@ -6004,12 +6117,15 @@ int main(int argc, char *argv[])
 	string enteredCommand;
 	while (!quit)
 	{
+		commandRegistry.serviceFocusProfile();
 		#if _WIN32
-			waitForConsoleCommand();
+			if (!waitForConsoleCommand(commandRegistry.hasPendingFocusProfile() ? 16 : INFINITE)) continue;
 			getline(cin, enteredCommand);
         #else
 			std::unique_lock<std::mutex> lock(commandQueueMutex);
-			commandQueueCV.wait(lock, []{ return !commandQueue.empty(); });
+			if (commandRegistry.hasPendingFocusProfile()) {
+				if (!commandQueueCV.wait_for(lock, chrono::milliseconds(16), []{ return !commandQueue.empty(); })) continue;
+			} else commandQueueCV.wait(lock, []{ return !commandQueue.empty(); });
 
 			Command cmd = commandQueue.front();
 			commandQueue.pop();

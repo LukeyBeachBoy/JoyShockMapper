@@ -12,6 +12,20 @@ namespace triton_grip
 constexpr uint8_t thresholdSetting = 0x22;
 constexpr uint8_t hysteresisSetting = 0x23;
 
+// Changing the capacitive calibration pauses the firmware's pad coordinates
+// even though IMU reports keep arriving. Never write it through an active
+// gesture, including a brief contact dropout at the edge of the pad.
+struct WriteGate {
+    uint64_t lastContact = 0;
+    bool waiting = false;
+    bool ready(bool touching, uint64_t now) {
+        if (touching) { lastContact = now; waiting = true; return false; }
+        if (waiting && (now < lastContact || now - lastContact < 100)) return false;
+        waiting = false;
+        return true;
+    }
+};
+
 inline int threshold(float value)
 {
     return !std::isfinite(value) || value < 0 ? -1 :

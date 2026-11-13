@@ -4,6 +4,13 @@
 #include <mutex>
 #include <chrono>
 #include <vector>
+#include <map>
+#include <sstream>
+#include <iomanip>
+#include <cstdint>
+#include <array>
+#include <algorithm>
+#include <initializer_list>
 
 // Configuration values inherit device -> controller model -> shared base.
 // A callback's context is thread-local; profile writes serialize with callbacks.
@@ -26,19 +33,70 @@ inline bool lockForPoll(std::unique_lock<std::recursive_timed_mutex> &lock) {
 inline thread_local std::string model;
 inline thread_local int handle = 0;
 inline thread_local std::string writeScope;
+// Persistent hardware identity, independent of enumeration order or player slot.
+inline std::map<int, std::string> instanceScopes;
+inline std::string instanceKey(int id) {
+    const auto found = instanceScopes.find(id);
+    return found == instanceScopes.end() ? std::string{} : found->second;
+}
+inline std::string layoutKey(const std::string &model, const std::string &hardware) {
+    uint64_t hash = 14695981039346656037ULL;
+    for (unsigned char c : hardware) { hash ^= c; hash *= 1099511628211ULL; }
+    std::ostringstream out; out << model << "-device-" << std::hex << std::setfill('0') << std::setw(16) << hash;
+    return out.str();
+}
 inline std::string modelKey(int type, int vendor = 0, int product = 0) {
     if (type == 5 && vendor == 0x054c && product == 0x0df2) return "type-5-edge";
     return "type-" + std::to_string(type);
 }
 inline std::string deviceKey(int id) { return "device-" + std::to_string(id); }
 inline std::string baseKey(int id) { return "device-base-" + std::to_string(id); }
-inline bool isolated() { return handle && (isolatedScopes.count(deviceKey(handle)) || isolatedScopes.count(baseKey(handle))); }
-inline std::vector<std::string> readScopes() {
-    if (!writeScope.empty() && isolatedScopes.count(writeScope)) return {writeScope};
-    if (handle && isolatedScopes.count(deviceKey(handle))) return {deviceKey(handle)};
-    if (handle && isolatedScopes.count(baseKey(handle))) return {baseKey(handle)};
-    if (!writeScope.empty()) return {writeScope, model};
-    return handle ? std::vector<std::string>{deviceKey(handle), model} : std::vector<std::string>{model};
+struct HandleKeys {
+    int id = 0;
+    std::string device, base;
+};
+inline const HandleKeys& handleKeys() {
+    thread_local HandleKeys keys;
+    if (keys.id != handle) {
+        keys.id = handle;
+        keys.device = deviceKey(handle);
+        keys.base = baseKey(handle);
+    }
+    return keys;
+}
+inline bool isolated() {
+    if (!handle) return false;
+    const auto& keys = handleKeys();
+    return isolatedScopes.count(keys.device) || isolatedScopes.count(keys.base);
+}
+// A transient range of references, valid inside the current Guard. Settings
+// are looked up hundreds of times per poll: rebuilding vectors and copying
+// persistent device IDs here used to allocate for every single lookup.
+struct ScopeRefs {
+    std::array<const std::string*, 4> scopes{};
+    size_t count = 0;
+    ScopeRefs(std::initializer_list<const std::string*> values) : count(values.size()) {
+        std::copy(values.begin(), values.end(), scopes.begin());
+    }
+    struct Iterator {
+        const std::string* const* value;
+        const std::string& operator*() const { return **value; }
+        Iterator& operator++() { ++value; return *this; }
+        bool operator!=(const Iterator& other) const { return value != other.value; }
+    };
+    Iterator begin() const { return {scopes.data()}; }
+    Iterator end() const { return {scopes.data() + count}; }
+};
+inline ScopeRefs readScopes() {
+    if (!writeScope.empty() && isolatedScopes.count(writeScope)) return {&writeScope};
+    const auto& keys = handleKeys();
+    if (handle && isolatedScopes.count(keys.device)) return {&keys.device};
+    if (handle && isolatedScopes.count(keys.base)) return {&keys.base};
+    if (!writeScope.empty()) return {&writeScope, &model};
+    if (!handle) return {&model};
+    const auto instance = instanceScopes.find(handle);
+    static const std::string empty;
+    return {&keys.device, &keys.base, instance == instanceScopes.end() ? &empty : &instance->second, &model};
 }
 struct Guard {
     std::unique_lock<std::recursive_timed_mutex> lock{mutex};
@@ -50,6 +108,6 @@ struct Guard {
     ~Guard() { model = oldModel; handle = oldHandle; writeScope = oldWrite; }
 };
 inline bool matches(int type, int id, int vendor = 0, int product = 0) {
-    return writeScope.empty() || writeScope == deviceKey(id) || writeScope == baseKey(id) || writeScope == modelKey(type, vendor, product);
+    return writeScope.empty() || writeScope == deviceKey(id) || writeScope == baseKey(id) || writeScope == instanceKey(id) || writeScope == modelKey(type, vendor, product);
 }
 }

@@ -38,7 +38,13 @@ struct SettingsManager {
 constexpr int JS_TYPE_STEAM_CONTROLLER_2026 = 1;
 constexpr int SDL_GAMEPAD_CAPSENSE_LEFT_GRIP = 0;
 constexpr int SDL_GAMEPAD_CAPSENSE_RIGHT_GRIP = 1;
-struct SDL_Gamepad { bool left = false, right = false; };
+struct SDL_Gamepad { bool left = false, right = false; bool pads[2] = {}; };
+uint64_t ticks = 0;
+uint64_t SDL_GetTicks() { return ticks; }
+int SDL_GetNumGamepadTouchpads(SDL_Gamepad*) { return 2; }
+bool SDL_GetGamepadTouchpadFinger(SDL_Gamepad* pad, int side, int, bool* down, float*, float*, float*) {
+    *down = pad->pads[side]; return true;
+}
 bool SDL_GetGamepadCapSense(SDL_Gamepad* device, int side) {
     return side == SDL_GAMEPAD_CAPSENSE_LEFT_GRIP ? device->left : device->right;
 }
@@ -48,6 +54,7 @@ struct ControllerDevice {
     bool _leftGripWasOn = false, _rightGripWasOn = false;
     int _vendorId = 0, _productId = 0;
     int _appliedGripRange = -1, _appliedGripRelease = -1;
+    triton_grip::WriteGate _gripWriteGate;
 };
 struct Pulse { bool right; float intensity; HapticEffect effect; };
 std::vector<Pulse> pulses;
@@ -197,6 +204,21 @@ int main() {
     assert(pulses.empty() && writes.empty());
     updateControllerSettings(7, &device);
     assert(pulses.size() == 2); // release edge survives lock contention
+    // Exercise the production write gate with real scope changes. Both pads
+    // must be released; a held thumb must not let a profile change interrupt it.
+    writes.clear(); pad.pads[1] = true; ticks = 1000;
+    range->scoped[model] = 393; guard->scoped[model] = 99;
+    updateControllerSettings(7, &device);
+    assert(writes.empty() && device._appliedGripRange == 200);
+    pad.pads[0] = true; pad.pads[1] = false; ticks = 1100;
+    updateControllerSettings(7, &device);
+    assert(writes.empty());
+    pad.pads[0] = false; ticks = 1199;
+    updateControllerSettings(7, &device);
+    assert(writes.empty());
+    ticks = 1200;
+    updateControllerSettings(7, &device);
+    assert(writes.size() == 2 && device._appliedGripRange == 393 && device._appliedGripRelease == 99);
     std::cout << "PASS: per-grip contact/release routing, noisy disabled side, live enable, independent devices\n";
     std::cout << "PASS: startup/model/chord/release/reconnect settings, scoped haptics, retry and bounded locking\n";
 }

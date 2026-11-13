@@ -19,6 +19,11 @@ header = (ROOT / 'JoyShockMapper/include/JoyShockMapper.h').read_text()
 main = (ROOT / 'JoyShockMapper/src/main.cpp').read_text()
 joy = (ROOT / 'JoyShockMapper/src/JoyShock.cpp').read_text()
 stick = (ROOT / 'JoyShockMapper/include/Stick.h').read_text()
+variables = (ROOT / 'JoyShockMapper/include/JSMVariable.hpp').read_text()
+operators = (ROOT / 'JoyShockMapper/src/operators.cpp').read_text()
+default_start = main.index('  GyroSettings tilt_defaults;')
+defaults = main[default_start:main.index('  tilt_settings->setFilter', default_start)]
+variable_types = variables[variables.index('// Global ID generator'):variables.index('// A combo map')]
 types = '\n'.join(balanced(header, name) + ';' for name in [
     'enum class ButtonID', 'enum class SettingID', 'enum class StickMode',
     'enum class GyroIgnoreMode', 'enum class JoyconMask', 'struct GyroSettings'])
@@ -35,8 +40,18 @@ cpp = r'''
 #include <memory>
 #include <iostream>
 #include <type_traits>
+#include <functional>
+#include <optional>
+#include <set>
+#include <string>
+#include <string_view>
+#include "@@INCLUDE@@/StickDirections.h"
+#include "@@INCLUDE@@/ControllerContext.h"
 using namespace std;
 @@TYPES@@
+@@EQUALITY@@
+bool operator!=(const GyroSettings &lhs, const GyroSettings &rhs) { return !(lhs == rhs); }
+@@VARIABLES@@
 struct ScrollAxis {
  bool initialized = false;
  int leftovers = 0;
@@ -66,6 +81,7 @@ struct JoyShock {
    SettingID::MOTION_RING_MODE, SettingID::MOTION_STICK_MODE, ButtonID::MRING,
    ButtonID::MLEFT, ButtonID::MRIGHT, ButtonID::MUP, ButtonID::MDOWN};
  bool isPressed(ButtonID b) { return pressed[b]; }
+ pair<float, float> getStickInput(bool left);
  void handleButtonChange(ButtonID b, bool down) { pressed[b] = down; }
  void stopTilt();
  template<class T> T getSetting(SettingID id) {
@@ -81,14 +97,25 @@ struct Inputs {
  float GetRightX(int) { return right; } float GetRightY(int) { return 0; }
 };
 auto jsl = make_shared<Inputs>();
+pair<float, float> JoyShock::getStickInput(bool left) { return {left ? jsl->left : jsl->right, 0.f}; }
 @@CLEANUP@@
 bool gate(shared_ptr<JoyShock> jc) {
  @@GATE@@
  return tiltEnabled;
 }
 int main() {
+ @@DEFAULTS@@
  auto jc = make_shared<JoyShock>();
- assert(gate(jc)); // Legacy default stays always on.
+ jc->activation = tilt_settings->value();
+ assert(!gate(jc)); // Production registration starts with tilt off.
+ tilt_settings->set(GyroSettings()); // Explicit TILT_OFF = NONE still enables it.
+ jc->activation = tilt_settings->value();
+ assert(gate(jc));
+ tilt_settings->reset(); // The real JSMSetting reset restores the off default.
+ jc->activation = tilt_settings->value();
+ assert(!gate(jc));
+ delete tilt_settings;
+ jc->_tiltWasActive = true;
  jc->activation.always_off = true; // TILT_ON = NONE
  jc->pressed[ButtonID::MLEFT] = jc->pressed[ButtonID::MRING] = jc->pressed[ButtonID::LEAN_LEFT] = true;
  jc->pressed[ButtonID::S] = true; // An unrelated physical action stays held.
@@ -120,10 +147,13 @@ int main() {
  jc->_windingAngleLeft = 90; jc->mode = StickMode::RIGHT_STEER_X;
  assert(gate(jc)); assert(jc->_windingAngleLeft == 0 && !jc->_tiltWasActive);
  jc->_splitType = 1; jc->mask = JoyconMask::IGNORE_LEFT; assert(!gate(jc));
- cout << "PASS: production tilt activation, hold on/off, Any/All, stick input, mask, target changes, owned releases, flick/hybrid reset and independent output cleanup\n";
+ cout << "PASS: production tilt defaults/reset off, explicit enable, hold on/off, Any/All, stick input, mask, target changes, owned releases, flick/hybrid reset and independent output cleanup\n";
 }
 '''.replace('@@TYPES@@', types).replace('@@STICK@@', balanced(stick, 'struct Stick') + ';')
 cpp = cpp.replace('@@CLEANUP@@', cleanup).replace('@@GATE@@', gate)
+cpp = cpp.replace('@@DEFAULTS@@', defaults).replace('@@VARIABLES@@', variable_types)
+cpp = cpp.replace('@@EQUALITY@@', balanced(operators, 'bool operator==(const GyroSettings'))
+cpp = cpp.replace('@@INCLUDE@@', (ROOT / 'JoyShockMapper/include').as_posix())
 # The actual Stick's helper only needs initialized() on its ScrollAxis.
 cpp = cpp.replace(' void init(int&, int&) { initialized = true; }', ' void init(int&, int&) { initialized = true; } bool isInitialized() const { return initialized; }')
 vcvars = Path(os.environ.get('ProgramFiles(x86)', 'C:/Program Files (x86)')) / 'Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/vcvars64.bat'

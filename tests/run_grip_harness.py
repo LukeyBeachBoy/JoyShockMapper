@@ -29,6 +29,12 @@ def run_harness(source, directory):
 with tempfile.TemporaryDirectory(prefix='jsm-grip-test-') as directory:
     run_harness(root / 'tests/grip_settings_harness.cpp', directory)
     sdl = (root / 'JoyShockMapper/src/SDLWrapper.cpp').read_text()
+    boot_start = sdl.index('if (const int level = SettingsManager::get<int>(SettingID::BOOT_SOUND_LEVEL)')
+    boot_end = sdl.index('\n\t\t// Negative means', boot_start)
+    boot = Path(directory) / 'boot_sound.cpp'
+    boot.write_text((root / 'tests/boot_sound_harness.cpp').read_text().replace('// APPLY_BOOT_SOUND', sdl[boot_start:boot_end]))
+    run_harness(boot, directory)
+    run_harness(root.parent / 'tests/triton_grip_handoff.cpp', directory)
     start = sdl.index('void updateGripHaptics(')
     end = sdl.index('\n\t}', start) + len('\n\t}')
     harness = (root / 'tests/grip_haptics_harness.cpp').read_text()

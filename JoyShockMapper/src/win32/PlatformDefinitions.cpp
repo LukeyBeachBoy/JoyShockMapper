@@ -4,6 +4,7 @@
 #include "JoyShockMapper.h"
 #include "PlatformDefinitions.h"
 #include "InputHelpers.h"
+#include "ProfileOutputTransaction.h"
 
 constexpr uint16_t DEFAULT_COLOR = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE; // White
 #define FOREGROUND_YELLOW FOREGROUND_RED | FOREGROUND_GREEN
@@ -27,6 +28,7 @@ public:
 
 streambuf *Log::makeBuffer(Level level)
 {
+    if (level == Level::BASE && ProfileOutput::quietDepth) return new NullBuffer();
 	switch (level)
 	{
 	case Level::ERR:

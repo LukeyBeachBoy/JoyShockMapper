@@ -20,7 +20,7 @@ assert 'gyroLength *= gyroIgnoreFactor;' in source
 assert 'new JSMSetting<FloatXY>(SettingID::GYRO_STEADYING_FLOOR, { 0.f, 0.f })' in source
 curves=['Natural','Power','Quadratic','Sigmoid','Jump']
 includes='\n'.join('#include "'+str(ROOT/'JoyShockMapper/src'/f'{c}Curve.cpp').replace('\\','/')+'"' for c in curves)
-program=r''' 
+program=r'''
 #include <algorithm>
 #include <cmath>
 #include <cassert>
@@ -52,8 +52,11 @@ int main(){
  for(float invalid:{-1.f,nanf(""),INFINITY}){auto n=validate(current,FloatXY(invalid,2));near(n.first,2);near(n.second,1.5f);}
  auto valid=validate(current,FloatXY(0,3));near(valid.first,0);near(valid.second,3);
  near(gyroSteadyingSensitivity(5,99,.2f),5);
- near(gyroSteadyingSensitivity(5,-1,.2f),1);
- near(gyroSteadyingSensitivity(5,nanf(""),.2f),1);
+near(gyroSteadyingSensitivity(5,-1,.2f),.2896f);
+near(gyroSteadyingSensitivity(5,nanf(""),.2f),.2896f);
+// Flat floor tangent and smooth recovery join; a linear blend fails these.
+near(gyroSteadyingSensitivity(5,2,.001f),2);
+near(gyroSteadyingSensitivity(5,2,.999f),5);
  near(gyroSteadyingFactor(1,0,0),1);
  near(gyroSteadyingFactor(1,2,2),0);
  cout<<setprecision(9);
@@ -69,6 +72,8 @@ int main(){
     if(floor==0){float oldV=v;if(v<5)oldV*=v/5;near(actual,v/5<1?v/5*evaluateAccelCurve(s,max(0.f,oldV-minimum),5,21):base);}
     if(floor==2&&v==0)near(actual,2);
     cout<<c<<","<<minimum<<","<<floor<<","<<v<<","<<actual<<"\n";
+    // The Cyberpunk curve has asymmetric axes, with the same 2 RWS floor.
+    cout<<c<<","<<minimum<<","<<floor<<","<<v<<","<<effective(v,0,5,floor,s,3,6)<<",3,6\n";
    }
    near(effective(4.99999f,0,5,2,s),effective(5,0,5,2,s));
    near(effective(1,2,5,2,s),0);
@@ -77,13 +82,19 @@ int main(){
   }
  }
  AccelCurveShape q;q.curve=AccelCurve::QUADRATIC;q.maxThreshold=80;
- near(effective(1,0,5,2,q),2.6005f);near(effective(3,0,5,2,q),3.8135f);
+near(effective(1,0,5,2,q),2.1739048f);near(effective(3,0,5,2,q),4.0630376f);
+const float h=.01f;
+const float leftSlope=(effective(5,0,5,2,q)-effective(5-h,0,5,2,q))/h;
+const float rightSlope=(effective(5+h,0,5,2,q)-effective(5,0,5,2,q))/h;
+assert(abs(leftSlope-rightSlope)<.001f);
+float previous=2;
+for(int i=1;i<=5000;++i){float v=i*.001f;float value=effective(v,0,5,2,q);assert(value>=previous-.00001f&&value>=2&&value<=evaluateAccelCurve(q,v,5,21)+.00001f);previous=value;}
  near(effective(20,0,5,2,q),6);near(effective(40,0,5,2,q),9);
  near(effective(60,0,5,2,q),14);near(effective(80,0,5,2,q),21);
  q.minThreshold=10;near(effective(80,0,5,2,q),17.25f);near(effective(90,0,5,2,q),21);
- near(gyroSteadyingSensitivity(3,1.5f,.2f),1.8f);
- near(gyroSteadyingSensitivity(5,2,.2f),2.6f);
- for(float v:speeds)near(effective(v,0,5,2,q,5,5),2+min(1.f,v/5)*3);
+near(gyroSteadyingSensitivity(3,1.5f,.2f),1.58688f);
+near(gyroSteadyingSensitivity(5,2,.2f),2.17376f);
+for(float v:speeds){float t=min(1.f,v/5);float blend=6*pow(t,5)-15*pow(t,4)+10*pow(t,3);near(effective(v,0,5,2,q,5,5),2+blend*3);}
  cerr<<"PASS: native curves, legacy recovery, floor, cutoff, validation, parser, static and asymmetric axes\n";
 }
 '''

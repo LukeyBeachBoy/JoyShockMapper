@@ -28,7 +28,7 @@ bool AutoConnect::AutoConnectPoll(void* param)
 
 	// Our own virtual pads are SDL devices too, and are discounted here exactly
 	// as they always have been.
-	int realSize = census.listed - int(Gamepad::getCount());
+	int realSize = census.managedListed >= 0 ? census.managedListed : census.listed - int(Gamepad::getCount());
 
 	// A controller we hold open that SDL says is gone: switched off, or out of
 	// range. SDL keeps the gamepad object valid and answering with its last
@@ -64,7 +64,7 @@ bool AutoConnect::AutoConnectPoll(void* param)
 			// found goes through the count trigger below in this same tick,
 			// which was a second of every switch-on spent waiting.
 			census = jsl->TakeDeviceCensus();
-			realSize = census.listed - int(Gamepad::getCount());
+			realSize = census.managedListed >= 0 ? census.managedListed : census.listed - int(Gamepad::getCount());
 			if (realSize <= 0)
 				return true;
 			COUT_INFO << "[AUTOCONNECT] Rescan found " << realSize << " device(s).\n";

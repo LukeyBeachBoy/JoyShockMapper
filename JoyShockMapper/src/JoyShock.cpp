@@ -1,6 +1,8 @@
 #include "JoyShock.h"
 #include "Telemetry.h"
 #include "InputHelpers.h"
+#include "StickGeometry.h"
+#include "ProfileOutputTransaction.h"
 #include <algorithm>
 #define _USE_MATH_DEFINES
 #include <math.h> // M_PI
@@ -14,6 +16,29 @@ extern vector<JSMButton> right_stick_menu_mappings;
 extern vector<JSMButton> right_grid_mappings;
 extern float os_mouse_speed;
 extern float last_flick_and_rotation;
+
+FloatXY JoyShock::getStickInput(bool left)
+{
+  StickCalibration calibration;
+  calibration.enabled = getSetting<Switch>(left ? SettingID::LEFT_STICK_CALIBRATION : SettingID::RIGHT_STICK_CALIBRATION) == Switch::ON;
+  if (calibration.enabled) {
+    calibration.angles[0] = getSetting(left ? SettingID::LEFT_STICK_CALIBRATION_UP_ANGLE : SettingID::RIGHT_STICK_CALIBRATION_UP_ANGLE);
+    calibration.ranges[0] = getSetting(left ? SettingID::LEFT_STICK_CALIBRATION_UP_RANGE : SettingID::RIGHT_STICK_CALIBRATION_UP_RANGE);
+    calibration.angles[1] = getSetting(left ? SettingID::LEFT_STICK_CALIBRATION_RIGHT_ANGLE : SettingID::RIGHT_STICK_CALIBRATION_RIGHT_ANGLE);
+    calibration.ranges[1] = getSetting(left ? SettingID::LEFT_STICK_CALIBRATION_RIGHT_RANGE : SettingID::RIGHT_STICK_CALIBRATION_RIGHT_RANGE);
+    calibration.angles[2] = getSetting(left ? SettingID::LEFT_STICK_CALIBRATION_DOWN_ANGLE : SettingID::RIGHT_STICK_CALIBRATION_DOWN_ANGLE);
+    calibration.ranges[2] = getSetting(left ? SettingID::LEFT_STICK_CALIBRATION_DOWN_RANGE : SettingID::RIGHT_STICK_CALIBRATION_DOWN_RANGE);
+    calibration.angles[3] = getSetting(left ? SettingID::LEFT_STICK_CALIBRATION_LEFT_ANGLE : SettingID::RIGHT_STICK_CALIBRATION_LEFT_ANGLE);
+    calibration.ranges[3] = getSetting(left ? SettingID::LEFT_STICK_CALIBRATION_LEFT_RANGE : SettingID::RIGHT_STICK_CALIBRATION_LEFT_RANGE);
+  }
+  const auto result = transformStickGeometry(
+    left ? jsl->GetLeftX(_handle) : jsl->GetRightX(_handle),
+    left ? jsl->GetLeftY(_handle) : jsl->GetRightY(_handle),
+    getSetting(left ? SettingID::LEFT_STICK_ROTATION : SettingID::RIGHT_STICK_ROTATION),
+    getSetting<Switch>(left ? SettingID::LEFT_STICK_RESTRICTOR_RING : SettingID::RIGHT_STICK_RESTRICTOR_RING) == Switch::ON,
+    getSetting(left ? SettingID::LEFT_STICK_RESTRICTOR_RANGE : SettingID::RIGHT_STICK_RESTRICTOR_RANGE), calibration);
+  return {result.first, result.second};
+}
 
 float radial(float vX, float vY, float X, float Y)
 {
@@ -57,6 +82,13 @@ JoyShock::JoyShock(int uniqueHandle, int controllerSplitType, shared_ptr<Digital
 	_vendorId = jsl->GetControllerVendor(uniqueHandle);
 	_productId = jsl->GetControllerProduct(uniqueHandle);
     ControllerContext::Guard controllerScope(ControllerContext::modelKey(_controllerType, _vendorId, _productId), uniqueHandle);
+    const auto hardwareKey = jsl->GetControllerKey(uniqueHandle);
+    // Without a hardware identity use a session-only key; never guess which
+    // identical controller reconnected from its enumeration position.
+    static const auto session = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    ControllerContext::instanceScopes[uniqueHandle] = ControllerContext::layoutKey(
+        ControllerContext::modelKey(_controllerType, _vendorId, _productId),
+        hardwareKey.empty() ? session + ":" + std::to_string(uniqueHandle) : hardwareKey);
 	if (!sharedButtonCommon)
 	{
 		_context = make_shared<DigitalButton::Context>(bind(&JoyShock::onVirtualControllerNotification, this, placeholders::_1, placeholders::_2, placeholders::_3), _motion);
@@ -69,8 +101,10 @@ JoyShock::JoyShock(int uniqueHandle, int controllerSplitType, shared_ptr<Digital
 	_context->_studioCommand = [uniqueHandle](const string &command) { Telemetry::StudioCommand(command, uniqueHandle); };
 	_context->_haptic = bind(&JoyShock::sendHaptic, this, placeholders::_1, placeholders::_2, placeholders::_3);
 
-	_buttons.reserve(LAST_ANALOG_TRIGGER); // Don't include touch stick _buttons
-	for (int i = 0; i <= LAST_ANALOG_TRIGGER; ++i)
+	// Keep every fixed mapping addressable, including the numbered keypad
+	// inputs after the touch directions. Touch events still use their pad below.
+	_buttons.reserve(MAPPING_SIZE);
+	for (int i = 0; i < MAPPING_SIZE; ++i)
 	{
 		_buttons.push_back(DigitalButton(_context, mappings[i]));
 	}
@@ -155,6 +189,9 @@ void JoyShock::sendRumble(int smallRumble, int bigRumble)
 
 bool JoyShock::hasVirtualController()
 {
+	// Configuration filters validate the requested scheme while the bus update
+	// waits for all shared, model and device assignments to finish.
+	if (ProfileOutput::depth) return true;
 	auto virtual_controller = SettingsManager::getV<ControllerScheme>(SettingID::VIRTUAL_CONTROLLER);
 	if (virtual_controller && virtual_controller->value() != ControllerScheme::NONE)
 	{
@@ -181,6 +218,7 @@ void JoyShock::onVirtualControllerNotification(uint8_t largeMotor, uint8_t small
 	// last_call = now;
 	// COUT_INFO << "Time since last vigem rumble is " << diff << " us\n";
 	lock_guard guard(_context->callback_lock);
+    if (!_context->_vigemController) return; // An inactive parked output cannot drive hardware feedback.
 	switch (_controllerType)
 	{
 	case JS_TYPE_DS4:
@@ -625,7 +663,7 @@ void JoyShock::handleButtonChange(ButtonID id, bool pressed, int touchpadID)
   const bool menuDirection = virtualMenuConsumesButton(id);
   const bool physicalPressed = pressed;
   if (menuDirection) pressed = false;
-	DigitalButton *button = int(id) <= LAST_ANALOG_TRIGGER ? &_buttons[int(id)] :
+	DigitalButton *button = int(id) >= 0 && (int(id) <= LAST_ANALOG_TRIGGER || (id >= ButtonID::JOY1 && id <= ButtonID::JOY32)) ? &_buttons[int(id)] :
 	  touchpadID >= 0 && touchpadID < _touchpads.size()    ? &_touchpads[touchpadID].buttons.find(id)->second :
 	                                                         findGridSlot(id).button;
 
@@ -1164,8 +1202,8 @@ void JoyShock::processVirtualMenus()
       input.previous = input.contact && input.x < .3f; input.next = input.contact && input.x > .7f;
     } else if (attachment.source == VirtualMenuSource::LSTICK || attachment.source == VirtualMenuSource::RSTICK) {
       const bool left = attachment.source == VirtualMenuSource::LSTICK;
-      const float x = left ? jsl->GetLeftX(_handle) : jsl->GetRightX(_handle);
-      const float y = left ? jsl->GetLeftY(_handle) : jsl->GetRightY(_handle);
+      const auto stick = getStickInput(left);
+      const float x = stick.first, y = stick.second;
       input.contact = std::hypot(x, y) > runtime.definition.deadzone;
       input.atRest = !input.contact;
       input.x = .5f + x * .5f; input.y = .5f - y * .5f;
@@ -1519,6 +1557,25 @@ void JoyShock::processStick(float stickX, float stickY, Stick &stick, float mous
 	float stickLength = sqrtf(stickX * stickX + stickY * stickY);
 	auto ringMode = getSetting<RingMode>(stick._ringMode);
 	auto stickMode = getSetting<StickMode>(stick._stickMode);
+	const bool keyboardMode = stickMode == StickMode::NO_MOUSE || stickMode == StickMode::INNER_RING || stickMode == StickMode::OUTER_RING;
+	const bool physicalStick = stick._stickMode == SettingID::LEFT_STICK_MODE || stick._stickMode == SettingID::RIGHT_STICK_MODE;
+	if (keyboardMode && physicalStick) {
+		const bool leftSide = stick._stickMode == SettingID::LEFT_STICK_MODE;
+		StickDirections::Options options;
+		options.width = getSetting(leftSide ? SettingID::LEFT_STICK_CARDINAL_WIDTH : SettingID::RIGHT_STICK_CARDINAL_WIDTH);
+		options.hysteresis = getSetting(leftSide ? SettingID::LEFT_STICK_DIRECTION_HYSTERESIS : SettingID::RIGHT_STICK_DIRECTION_HYSTERESIS);
+		options.activation = max(innerDeadzone, getSetting(leftSide ? SettingID::LEFT_STICK_DIRECTION_DEADZONE : SettingID::RIGHT_STICK_DIRECTION_DEADZONE));
+		options.releaseMargin = getSetting(leftSide ? SettingID::LEFT_STICK_DIRECTION_RELEASE_MARGIN : SettingID::RIGHT_STICK_DIRECTION_RELEASE_MARGIN);
+		const auto directions = stick.directionState.update(rawX, rawY, options);
+		up = directions & 1; right = directions & 2; down = directions & 4; left = directions & 8;
+		stick.keyboardDirectionsActive = true;
+	} else if (stick.keyboardDirectionsActive) {
+		// Switching to analog steering/mouse/menu must not leave a WASD key held.
+		for (auto id : {stick._leftId, stick._rightId, stick._upId, stick._downId})
+			handleButtonChange(id, false, stick._touchpadIndex);
+		stick.directionState.reset();
+		stick.keyboardDirectionsActive = false;
+	}
 
 	bool ring = ringMode == RingMode::INNER && stickLength > 0.0f && stickLength < 0.7f ||
 	  ringMode == RingMode::OUTER && stickLength > 0.7f;
@@ -1613,14 +1670,11 @@ void JoyShock::processStick(float stickX, float stickY, Stick &stick, float mous
 	}
 	else if (stickMode == StickMode::NO_MOUSE || stickMode == StickMode::INNER_RING || stickMode == StickMode::OUTER_RING)
 	{ // Do not do if invalid
-		// left!
-		handleButtonChange(stick._leftId, left, stick._touchpadIndex);
-		// right!
-		handleButtonChange(stick._rightId, right, stick._touchpadIndex);
-		// up!
-		handleButtonChange(stick._upId, up, stick._touchpadIndex);
-		// down!
-		handleButtonChange(stick._downId, down, stick._touchpadIndex);
+		// Release departed directions before pressing replacements. Reversing
+		// right -> left must never briefly submit both A and D to the keyboard.
+		const pair<ButtonID, bool> directions[] = {{stick._leftId,left}, {stick._rightId,right}, {stick._upId,up}, {stick._downId,down}};
+		for (const auto& [id, pressed] : directions) if (!pressed) handleButtonChange(id, false, stick._touchpadIndex);
+		for (const auto& [id, pressed] : directions) if (pressed) handleButtonChange(id, true, stick._touchpadIndex);
 
 		anyStickInput = left || right || up || down; // ring doesn't count
 	}

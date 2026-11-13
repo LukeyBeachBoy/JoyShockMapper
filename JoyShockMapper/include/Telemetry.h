@@ -25,6 +25,22 @@ struct TelemetryGyroState
 	float z = 0.0f;
 };
 
+// Controller-local graph inputs. These are measurements at named pipeline
+// stages, not a second implementation of the mapper in the UI.
+struct TelemetryMotionPreview
+{
+	uint64_t timestampMs = 0;
+	TelemetryStickState input;    // mapped/calibrated gyro before filters, deg/s
+	TelemetryStickState filtered; // after smoothing/One Euro, before cutoff, deg/s
+	TelemetryStickState derivative; // One Euro's filtered rate of change, deg/s^2
+	TelemetryStickState snapInput; // gyro velocity entering angle snapping, deg/s
+	float omega = 0.f;            // input used by the sensitivity preview, deg/s
+	float sensX = 0.f;
+	float sensY = 0.f;
+	float sampleHz = 0.f;
+	float tiltAngle = 0.f;        // gravity deflection from captured neutral, degrees
+};
+
 struct TelemetryPadState
 {
 	float x = 0.0f;        // -1..1 normalized position
@@ -52,8 +68,12 @@ struct TelemetryDeviceStatus
 	uint64_t buttons = 0;
 	TelemetryStickState leftStick;
 	TelemetryStickState rightStick;
+	// Geometry-adjusted input, before deadzones, axis flips and mode output.
+	TelemetryStickState adjustedLeftStick;
+	TelemetryStickState adjustedRightStick;
 	TelemetryTriggerState triggers;
 	TelemetryGyroState gyro;
+	std::optional<TelemetryMotionPreview> motion;
 	TelemetryPadState leftPad;
 	TelemetryPadState rightPad;
 	TelemetryGripState leftGrip;
@@ -71,6 +91,9 @@ struct TelemetryDeviceStatus
 struct TelemetryDevice
 {
     std::string activeProfile;
+    std::string nativeInputStatus;
+    std::string controllerId;
+    bool persistentIdentity = false;
 	int handle = 0;
 	int controllerType = 0;
 	uint64_t supportedButtons = (1ULL << 33) - 1;

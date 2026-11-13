@@ -211,6 +211,12 @@ if(SDL OR NOT DEFINED SDL)
     patch_sdl_triton_touch (${SDL3_SOURCE_DIR})
 	set_target_properties(SDL_uclibc PROPERTIES FOLDER "SDL")
     set_target_properties(SDL3-shared PROPERTIES FOLDER "SDL")
+    if(WINDOWS)
+        add_executable(AzeronRecovery src/win32/AzeronRecovery.cpp)
+        target_include_directories(AzeronRecovery PRIVATE include)
+        target_link_libraries(AzeronRecovery PRIVATE SDL3::SDL3-shared)
+        add_dependencies(${BINARY_NAME} AzeronRecovery)
+    endif()
 	set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
     target_link_libraries (

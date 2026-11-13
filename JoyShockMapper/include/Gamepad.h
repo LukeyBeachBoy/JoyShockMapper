@@ -50,6 +50,8 @@ public:
 	virtual void setGyro(TimePoint now, float accelX, float accelY, float accelZ, float gyroX, float gyroY, float gyroZ) = 0;
 	virtual void setTouchState(optional<FloatXY> press1, optional<FloatXY> press2) = 0;
 	virtual void update() = 0;
+    // Release every button/axis before a temporary keyboard/mouse mapping.
+    virtual void neutralize() {}
   virtual optional<VirtualStickReport> submittedSticks() const { return nullopt; }
 
 	virtual ControllerScheme getType() const = 0;

@@ -14,6 +14,8 @@
 #include "ControllerCompatibility.h"
 #include "JSMVariable.hpp"
 #include "VirtualMenuCatalog.h"
+#include "StudioSlotFilter.h"
+#include "ProfileOutputTransaction.h"
 
 namespace { std::mutex profileMutex; string liveProfile; std::map<int, string> deviceProfiles, deviceBaseProfiles; }
 string CmdRegistry::activeProfile() { std::lock_guard<std::mutex> lock(profileMutex); return liveProfile; }
@@ -22,11 +24,35 @@ extern string controllerModelForHandle(int handle);
 extern void refreshControllerOutput(int handle);
 extern string virtualControllerAssignment(int handle);
 extern void prepareControllerProfile(int handle);
+extern void refreshAllControllerOutputs();
+extern bool mappedModifiersHeld();
+
+bool CmdRegistry::hasPendingFocusProfile() {
+    std::lock_guard<std::recursive_timed_mutex> lock(ControllerContext::mutex);
+    return !_pendingFocusProfile.empty();
+}
+void CmdRegistry::serviceFocusProfile() {
+    std::lock_guard<std::recursive_timed_mutex> lock(ControllerContext::mutex);
+    if (_pendingFocusProfile.empty() || mappedModifiersHeld()) return;
+    const auto path = std::exchange(_pendingFocusProfile, {});
+    loadConfigFile(path);
+}
 
 void CmdRegistry::applyControllerVariants() {
     if (_controllerLoading) return;
     _controllerLoading = true;
     const auto lines = _profileLines;
+    // Model defaults are fallback values: a game's shared assignment wins too.
+    for (const auto &line : lines) {
+        const string prefix = "# @controller-default type-25 ";
+        if (line.rfind(prefix, 0) != 0) continue;
+        if (!ControllerContext::writeScope.empty() && ControllerContext::model != "type-25") continue;
+        const auto assignment = line.substr(prefix.size());
+        const auto key = ControllerCompatibility::key(assignment);
+        if (ControllerCompatibility::hasSharedSetting(lines, key)) continue;
+        ControllerContext::Guard scope("type-25", ControllerContext::handle, ControllerContext::writeScope.empty() ? "type-25" : ControllerContext::writeScope);
+        processLine(assignment);
+    }
     for (const string model : {string("type-4"), string("type-5"), string("type-5-edge")}) {
         if (!ControllerContext::writeScope.empty() && model != ControllerContext::model) continue;
         bool left = false, forcePad = false;
@@ -35,15 +61,33 @@ void CmdRegistry::applyControllerVariants() {
         for (const auto &line : ControllerCompatibility::fallback(lines, left, forcePad)) processLine(line);
         VirtualMenus::adaptSinglePad(left);
     }
-    for (int phase = 0; phase < 2; ++phase) for (const auto &line : lines) {
+    // A physical controller may choose a different shared pad than the default
+    // for its model. Adapt into its own scope before applying explicit values.
+    for (const auto &line : lines) {
+        std::istringstream fields(ControllerCompatibility::trim(line));
+        string comment, tag, target, side; fields >> comment >> tag >> target >> side;
+        const auto at = target.find("-device-");
+        if (comment != "#" || tag != "@controller-pad" || at == string::npos || (side != "left" && side != "right")) continue;
+        const auto model = target.substr(0, at);
+        if (model != "type-4" && model != "type-5" && model != "type-5-edge") continue;
+        if (!ControllerContext::writeScope.empty() && target != ControllerContext::instanceKey(ControllerContext::handle)) continue;
+        ControllerContext::Guard scope(model, ControllerContext::handle, ControllerContext::writeScope.empty() ? target : ControllerContext::writeScope);
+        for (const auto &fallback : ControllerCompatibility::fallback(lines, side == "left", true)) processLine(fallback);
+        VirtualMenus::adaptSinglePad(side == "left");
+    }
+    for (int specificity = 0; specificity < 2; ++specificity) for (int phase = 0; phase < 2; ++phase) for (const auto &line : lines) {
         const auto text = ControllerCompatibility::trim(line);
         const string prefix = "# @controller ";
         if (text.rfind(prefix, 0) != 0) continue;
         const auto split = text.find(' ', prefix.size());
         if (split == string::npos) continue;
         const auto model = text.substr(prefix.size(), split - prefix.size());
-        if (!ControllerContext::writeScope.empty() && model != ControllerContext::model) continue;
-        ControllerContext::Guard scope(model, ControllerContext::handle, ControllerContext::writeScope.empty() ? model : ControllerContext::writeScope);
+        const auto deviceAt = model.find("-device-");
+        if ((deviceAt != string::npos) != (specificity == 1)) continue;
+        static const regex controllerTarget("type-[0-9]+(-edge)?(-device-[a-f0-9]{16})?");
+        if (!regex_match(model, controllerTarget)) continue;
+        if (!ControllerContext::writeScope.empty() && model != ControllerContext::model && model != ControllerContext::instanceKey(ControllerContext::handle)) continue;
+        ControllerContext::Guard scope(model.substr(0, deviceAt), ControllerContext::handle, ControllerContext::writeScope.empty() ? model : ControllerContext::writeScope);
         const auto assignment = text.substr(split + 1);
         // Controller variants carry assignments and metadata, never one-shot macros.
         if (assignment.find('=') != string::npos && (ControllerCompatibility::key(assignment) == "VIRTUAL_CONTROLLER") == (phase == 0)) processLine(assignment);
@@ -107,6 +151,7 @@ CmdRegistry::CmdRegistry()
 bool CmdRegistry::loadConfigFile(string fileName)
 {
     std::lock_guard<std::recursive_timed_mutex> configurationLock(ControllerContext::mutex);
+    ProfileOutput::Transaction outputTransaction(&refreshAllControllerOutputs);
     if (fileName.empty()) return false;
     const int bindingHandle = (!_chordLoading && _loadingFiles.empty() && ControllerContext::handle) ? ControllerContext::handle : 0;
     const auto bindingLines = bindingHandle ? _profileLines : std::vector<string>{};
@@ -120,8 +165,9 @@ bool CmdRegistry::loadConfigFile(string fileName)
 	auto comment = fileName.find_first_of('#');
 	if (comment != string::npos)
 	{
-		fileName = fileName.substr(0, comment - 1);
+        fileName = string(strtrim(string_view(fileName).substr(0, comment)));
 	}
+    if (fileName.empty()) return false;
 	// Trim away quotation marks from drag and drop
 	if (*fileName.begin() == '\"' && *(fileName.end() - 1) == '\"')
 		fileName = fileName.substr(1, fileName.size() - 2);
@@ -135,7 +181,10 @@ bool CmdRegistry::loadConfigFile(string fileName)
     {
     // An explicit configuration choice or Studio handover supersedes an
     // AutoLoad request that was waiting for a held swap to finish.
-    if (_loadingFiles.empty() && !_chordLoading) _deferredAutoLoad.cancel();
+    if (_loadingFiles.empty() && !_chordLoading) {
+        _deferredAutoLoad.cancel();
+        _pendingFocusProfile.clear();
+    }
     if (bindingHandle) {
         prepareControllerProfile(bindingHandle);
         JSMVariableBase::clearScope(ControllerContext::deviceKey(bindingHandle));
@@ -146,6 +195,7 @@ bool CmdRegistry::loadConfigFile(string fileName)
         ControllerContext::isolatedScopes.insert(ControllerContext::baseKey(bindingHandle));
     }
         if (_loadingFiles.empty() && !_chordLoading && ControllerContext::writeScope.empty()) {
+            ProfileOutput::defer(); // Clearing a scoped scheme can change the effective output.
             std::lock_guard<std::mutex> lock(profileMutex);
             // A whole-mapper load (Autoload, Studio handing the pad over as the
             // window in front changes) replaces what each controller falls back
@@ -262,7 +312,7 @@ bool CmdRegistry::add(JSMCommand* newCommand)
 bool CmdRegistry::Remove(string_view name)
 {
 	// If I allow multiple commands with the same name, I should have a way to specify which one I want to remove.
-	CmdMap::iterator cmd = find_if(_registry.begin(), _registry.end(), bind(&CmdRegistry::findCommandWithName, name, placeholders::_1));
+	CmdMap::iterator cmd = _registry.find(string(name));
 	if (cmd != _registry.end())
 	{
 		_registry.erase(cmd);
@@ -290,14 +340,72 @@ bool CmdRegistry::isCommandValid(string_view line) const
 	const char op = parts.op;
 
 	bool hasProcessed = false;
-	CmdMap::const_iterator cmd = find_if(_registry.cbegin(), _registry.cend(), bind(&CmdRegistry::findCommandWithName, name, placeholders::_1));
+	CmdMap::const_iterator cmd = _registry.find(name);
 	return cmd != _registry.end();
 }
 
 void CmdRegistry::processLine(const string& line)
 {
     std::lock_guard<std::recursive_timed_mutex> configurationLock(ControllerContext::mutex);
+    ProfileOutput::Transaction outputTransaction(&refreshAllControllerOutputs);
 	auto trimmedLine = string{ strtrim(line) };
+    const string focusProfile = "STUDIO_FOCUS_PROFILE ";
+    const string slotProfile = "STUDIO_SLOT_PROFILE ";
+    if (trimmedLine.rfind(slotProfile, 0) == 0) {
+        ProfileOutput::QuietAssignments quietAssignments;
+        ProfileOutput::studioTransitions = true;
+        const auto arguments = trimmedLine.substr(slotProfile.size());
+        const auto split = arguments.find('\t');
+        const auto target = string(strtrim(arguments.substr(0, split)));
+        const auto navigation = split == string::npos ? string{} : string(strtrim(arguments.substr(split + 1)));
+        const auto exists = [](const string &path) {
+            if (path.empty() || path.find_first_of("\r\n\t") != string::npos) return false;
+            ifstream file(path);
+            if (!file) file.open(string{BASE_JSM_CONFIG_FOLDER()} + path);
+            return bool(file);
+        };
+        // Validate both files before releasing anything currently held.
+        if (!exists(target) || (!navigation.empty() && !exists(navigation))) {
+            CERR << "Slot configuration does not exist.\n";
+            return;
+        }
+        struct SlotLoad {
+            bool &flag; bool previous;
+            explicit SlotLoad(bool &value) : flag(value), previous(std::exchange(value, true)) {}
+            ~SlotLoad() { flag = previous; }
+        } slotLoad(_slotLoading);
+        // Discard temporary scopes without briefly restoring their old base.
+        // This outer output transaction commits only the final slot/navigation
+        // output, so an unchanged virtual controller stays attached.
+        std::map<int, string> discarded;
+        { std::lock_guard<std::mutex> lock(profileMutex); discarded.swap(deviceProfiles); }
+        for (const auto &[id, path] : discarded) {
+            prepareControllerProfile(id);
+            JSMVariableBase::clearScope(ControllerContext::deviceKey(id));
+            VirtualMenus::clearScope(ControllerContext::deviceKey(id));
+            ControllerContext::isolatedScopes.erase(ControllerContext::deviceKey(id));
+        }
+        _chordRestore.clear(); _restoreLines.clear();
+        _pendingFocusProfile.clear(); _deferredAutoLoad.cancel();
+        loadConfigFile(target);
+        if (!navigation.empty()) loadConfigFile(navigation);
+        processLine("TELEMETRY_ENABLED = ON");
+        processLine("TELEMETRY_PORT = 8974");
+        processLine("AUTOCONNECT = ON");
+        processLine("AUTOLOAD = OFF");
+        COUT_INFO << "[SLOT] Applied " << target << '\n';
+        return;
+    }
+    if (trimmedLine.rfind(focusProfile, 0) == 0) {
+        _pendingFocusProfile = string(strtrim(string_view(trimmedLine).substr(focusProfile.size())));
+        serviceFocusProfile();
+        return;
+    }
+    const string slotFilter = "STUDIO_SLOT_FILTER";
+    if (trimmedLine == slotFilter || trimmedLine.rfind(slotFilter + " ", 0) == 0) {
+        StudioSlotFilter::configure(trimmedLine.substr(slotFilter.size()));
+        return;
+    }
     if (trimmedLine.rfind("# @controller", 0) == 0) {
         if (!_controllerLoading) _profileLines.push_back(trimmedLine);
         return;
@@ -318,6 +426,8 @@ void CmdRegistry::processLine(const string& line)
     if (trimmedLine.rfind(deviceEnd, 0) == 0) {
         int id = 0; std::istringstream(trimmedLine.substr(deviceEnd.size())) >> id;
         if (id <= 0) return;
+        // Ending a swap that never began must not cancel ordinary held keys.
+        { std::lock_guard<std::mutex> lock(profileMutex); if (!deviceProfiles.count(id)) return; }
         prepareControllerProfile(id);
         JSMVariableBase::clearScope(ControllerContext::deviceKey(id));
         ControllerContext::isolatedScopes.erase(ControllerContext::deviceKey(id));
@@ -331,6 +441,8 @@ void CmdRegistry::processLine(const string& line)
         return;
     }
     if (trimmedLine.rfind(deviceBegin, 0) == 0) {
+        ProfileOutput::QuietAssignments quietAssignments;
+        ProfileOutput::studioTransitions = true;
         std::istringstream args(trimmedLine.substr(deviceBegin.size()));
         int id = 0; args >> id; string path; std::getline(args, path); path = ControllerCompatibility::trim(path);
         const auto model = controllerModelForHandle(id);
@@ -372,7 +484,8 @@ void CmdRegistry::processLine(const string& line)
             _deferredAutoLoad.defer();
             return;
         }
-        loadConfigFile(trimmedLine.substr(autoload.size()));
+        _pendingFocusProfile = trimmedLine.substr(autoload.size());
+        serviceFocusProfile();
         return;
     }
     const string begin = "STUDIO_CHORD_BEGIN ";
@@ -439,7 +552,11 @@ void CmdRegistry::processLine(const string& line)
     }
 
 
-	if (!trimmedLine.empty() && trimmedLine.front() != '#' && !loadConfigFile(trimmedLine))
+    // Assignment lines are not file names. Avoid two failed file opens for
+    // every setting/binding while the input thread waits for this transaction.
+    const bool fileCandidate = trimmedLine.find('=') == string::npos ||
+        (trimmedLine.size() >= 2 && trimmedLine.front() == '"' && trimmedLine.back() == '"');
+	if (!trimmedLine.empty() && trimmedLine.front() != '#' && !(fileCandidate && loadConfigFile(trimmedLine)))
 	{
         // Assignments include bindings, mode shifts, and settings. Do not replay
         // one-shot console macros (power off, calibration, reconnect, etc.).
@@ -451,9 +568,9 @@ void CmdRegistry::processLine(const string& line)
 		const char op = parts.op;
 
 		bool hasProcessed = false;
-		CmdMap::iterator cmd = find_if(_registry.begin(), _registry.end(), bind(&CmdRegistry::findCommandWithName, name, placeholders::_1));
-		const bool known = cmd != _registry.end();
-		while (cmd != _registry.end())
+		auto [cmd, end] = _registry.equal_range(name);
+		const bool known = cmd != end;
+		while (cmd != end)
 		{
 			if (combo.empty())
 			{
@@ -468,7 +585,7 @@ void CmdRegistry::processLine(const string& line)
 				}
 				// Any task set to be run on destruction is done here.
 			}
-			cmd = find_if(++cmd, _registry.end(), bind(&CmdRegistry::findCommandWithName, name, placeholders::_1));
+			++cmd;
 		}
 
 		if (!hasProcessed)

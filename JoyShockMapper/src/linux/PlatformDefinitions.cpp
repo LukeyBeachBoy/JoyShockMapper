@@ -11,6 +11,7 @@
 
 #include "JoyShockMapper.h"
 #include "PlatformDefinitions.h"
+#include "ProfileOutputTransaction.h"
 
 
 // https://www.theurbanpenguin.com/4184-2/
@@ -34,6 +35,7 @@ struct ColorStream : public std::stringbuf
 
 streambuf *Log::makeBuffer(Level level)
 {
+    if (level == Level::BASE && ProfileOutput::quietDepth) return new NullBuffer();
 	switch (level)
 	{
 	case Level::ERR:

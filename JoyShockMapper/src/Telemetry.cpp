@@ -66,6 +66,7 @@ public:
 
 	void configure(bool enabled, uint16_t port)
 	{
+		std::lock_guard<std::mutex> lock(_sendMutex);
 		if (_enabled == enabled && (!_enabled || port == _port))
 		{
 			return;
@@ -79,19 +80,24 @@ public:
 
 	void shutdown()
 	{
+		std::lock_guard<std::mutex> lock(_sendMutex);
 		_enabled = false;
 		closeSocket();
 	}
 
 	bool isDue() const
 	{
+		std::lock_guard<std::mutex> lock(_sendMutex);
 		return _enabled && std::chrono::steady_clock::now() >= _nextSend;
 	}
 
 	bool sentWithin(std::chrono::milliseconds window)
 	{
 		std::lock_guard<std::mutex> lock(_sendMutex);
-		return std::chrono::steady_clock::now() - _lastSent < window;
+		// min() means no sample has ever been sent. Subtracting it overflows
+		// the clock duration and can suppress the first idle heartbeat forever.
+		return _lastSent != std::chrono::steady_clock::time_point::min() &&
+		    std::chrono::steady_clock::now() - _lastSent < window;
 	}
 
 	void maybeSend(const TelemetrySample &sample)
@@ -168,6 +174,9 @@ public:
 				    << "\"handle\":" << dev.handle
 				    << ",\"type\":" << dev.controllerType
                     << ",\"activeProfile\":" << std::quoted(dev.activeProfile)
+                    << ",\"nativeInputStatus\":" << std::quoted(dev.nativeInputStatus)
+                    << ",\"controllerId\":" << std::quoted(dev.controllerId)
+                    << ",\"persistentIdentity\":" << (dev.persistentIdentity ? "true" : "false")
 				    << ",\"supportedButtons\":" << dev.supportedButtons
 				    << ",\"split\":" << dev.splitType
 				    << ",\"vid\":" << dev.vendorId
@@ -192,6 +201,16 @@ public:
 				    << ",\"leftStickTouch\":" << (status.leftStickTouch ? "true" : "false")
 				    << ",\"rightStickTouch\":" << (status.rightStickTouch ? "true" : "false")
           ;
+          if (status.motion) {
+            const auto &motion = *status.motion;
+            oss << ",\"motion\":{\"timestampMs\":" << motion.timestampMs
+                << ",\"input\":{\"x\":" << motion.input.x << ",\"y\":" << motion.input.y << "}"
+                << ",\"filtered\":{\"x\":" << motion.filtered.x << ",\"y\":" << motion.filtered.y << "}"
+                << ",\"derivative\":{\"x\":" << motion.derivative.x << ",\"y\":" << motion.derivative.y << "}"
+                << ",\"snapInput\":{\"x\":" << motion.snapInput.x << ",\"y\":" << motion.snapInput.y << "}"
+                << ",\"omega\":" << motion.omega << ",\"sensX\":" << motion.sensX << ",\"sensY\":" << motion.sensY << ",\"sampleHz\":" << motion.sampleHz
+                << ",\"tiltAngle\":" << motion.tiltAngle << "}";
+          }
           for (const auto &pad : {std::pair<const char *, const TelemetryPadState *>{"leftPadRaw", &status.leftPad},
                                  std::pair<const char *, const TelemetryPadState *>{"rightPadRaw", &status.rightPad}}) {
             if (pad.second->raw) {
@@ -199,6 +218,8 @@ public:
               oss << ",\"" << pad.first << "\":{\"x\":" << raw.x << ",\"y\":" << raw.y << "}";
             }
           }
+          oss << ",\"adjustedLeftStick\":{\"x\":" << status.adjustedLeftStick.x << ",\"y\":" << status.adjustedLeftStick.y << "}"
+              << ",\"adjustedRightStick\":{\"x\":" << status.adjustedRightStick.x << ",\"y\":" << status.adjustedRightStick.y << "}";
           if (status.virtualSticks) {
             const auto &output = *status.virtualSticks;
             oss << ",\"virtualSticks\":{\"left\":{\"x\":" << output.left.x << ",\"y\":" << output.left.y
@@ -333,7 +354,7 @@ private:
 	sockaddr_in _target {};
 	std::chrono::steady_clock::time_point _nextSend = std::chrono::steady_clock::time_point::min();
 	std::chrono::steady_clock::time_point _lastSent = std::chrono::steady_clock::time_point::min();
-	std::mutex _sendMutex;
+	mutable std::mutex _sendMutex;
 #ifdef _WIN32
 	bool _wsaStarted = false;
 #endif

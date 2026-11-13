@@ -187,7 +187,7 @@ bool Mapping::AddMapping(KeyCode key, EventModifier evtMod, ActionModifier actMo
 	}
 	else if (key.code == COMMAND_ACTION)
 	{
-		if (key.name == "OPEN_KEYBOARD" || key.name == "TOGGLE_MAPPING")
+		if (key.name == "OPEN_KEYBOARD" || key.name == "TOGGLE_MAPPING" || std::regex_match(key.name, std::regex("LAYER_REMOVE [A-Za-z][A-Za-z0-9_-]{0,63}")))
 		{
 			apply = [command = key.name](EventActionIf *button) { button->StudioCommand(command); };
 		}
